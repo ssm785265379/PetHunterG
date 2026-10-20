@@ -1,0 +1,19 @@
+# APKs and signing material are local-only and must not enter Git.
+*.apk
+*.aab
+*.ipa
+*.idsig
+*.p12
+*.jks
+*.keystore
+
+# Build output and local tooling state.
+.gradle/
+build/
+dist/
+__pycache__/
+.venv/
+*.log
+
+# Device captures may contain personal/device information.
+captures/
