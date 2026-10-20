@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<application xmlns="http://ns.adobe.com/air/application/51.4">
+    <id>com.lv1.hunter</id>
+    <versionNumber>2.7.1</versionNumber>
+    <filename>PetHunterG</filename>
+    <name>Pet Hunter G</name>
+    <initialWindow>
+        <content>APetHunter.swf</content>
+        <visible>true</visible>
+        <renderMode>direct</renderMode>
+        <autoOrients>false</autoOrients>
+    </initialWindow>
+    <android>
+        <manifestAdditions><![CDATA[
+            <manifest android:installLocation="auto">
+                <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="28" />
+                <uses-permission android:name="android.permission.INTERNET" />
+                <application android:usesCleartextTraffic="true" />
+            </manifest>
+        ]]></manifestAdditions>
+    </android>
+</application>

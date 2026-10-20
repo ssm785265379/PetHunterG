@@ -23,7 +23,7 @@ The client resources were repackaged with HARMAN AIR SDK 51.4.1. The resulting A
 
 ## Generated local artifacts
 
-These files currently live outside this repository in `..\..\outputs`:
+These files currently live outside the repository in `C:\Users\ssm\Documents\Codex\2026-10-20\ban\outputs`:
 
 - `552114-android16-compatible-sdk28.apk`: earlier SDK 28 compatibility build; retained as a local fallback.
 - `552114-air51-android16-test.apk`: AIR 51 build with the original package identity; not installed over the prior package.
@@ -32,6 +32,8 @@ These files currently live outside this repository in `..\..\outputs`:
 - `air51-launch.png`: device screenshot showing the game's connection-timeout screen.
 
 The old package was uninstalled once at the user's request, then restored from the pulled APK. Uninstalling cleared its private app data; the APK backup does not restore that data. The old package and the AIR 51 side-by-side test package are both currently installed.
+
+The AIR 51 packaging inputs are copied into `client/air51-repack/` in this repository. The original APK and generated APKs remain outside Git.
 
 ## Current blockers
 

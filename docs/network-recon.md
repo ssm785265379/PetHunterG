@@ -13,6 +13,8 @@ String inspection of `APetHunter.swf` in the AIR 51 repack source and the SDK 23
 
 The client displayed `Connection Timeout` while running on Android 16. That confirms the startup flow is blocked at a network step, but does not by itself prove whether every embedded host is offline or which one the current configuration selected.
 
+The AIR SDK `swfdump -abc` disassembly identifies `cc.lv1.game::CommandManager.getCommandPost(int,Object)`. It creates `flash.net.URLVariables` and constructs a request path from `GameUtil.url + "flash.do?"`, then selects command names such as `login` and `autoLogin`. This confirms the dispatcher and request-building path; the complete variable serialization and response contract still need further inspection.
+
 ## Protocol clues
 
 The SWF contains `HttpRequest`, `sendPost`, and `POST` strings. The command dispatcher contains `flash.do?` and action names including:

@@ -12,6 +12,11 @@ Private, local-only work to assess and prototype offline play for the discontinu
 
 See [docs/progress-v1.md](docs/progress-v1.md) and [docs/network-recon.md](docs/network-recon.md).
 
+## Project files
+
+- `client/air51-repack/` contains the AIR 51 packaging descriptor and extracted SWF/data/icon inputs used for the test build.
+- Build outputs and device captures remain outside this repository at `C:\Users\ssm\Documents\Codex\2026-10-20\ban\outputs`.
+
 ## Local-only handling
 
 Do not publish or distribute the game APK or extracted game assets. Do not configure a public server or commercial service. APKs, signatures, build outputs, and captures are excluded by `.gitignore`. This repository has no remote configured; review contents before adding a remote.
