@@ -562,6 +562,177 @@ def test_grant_starter_equipment_is_idempotent_and_keeps_existing_items(tmp_path
         ).fetchone()[0] == 1
 
 
+def test_shop_lists_local_stock_per_category(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "ShopList")
+
+    gold = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "27", "uid": uid, "ttype": "1", "p": "1", "n": "9"},
+        )
+    )[1]
+    silver = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "27", "uid": uid, "ttype": "2", "p": "1", "n": "9"},
+        )
+    )[1]
+    mystery = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "27", "uid": uid, "ttype": "4", "p": "1", "n": "9"},
+        )
+    )[1]
+
+    assert gold["shop_type"] == 1
+    assert [row["id"] for row in gold["list"]] == [10007, 10001, 10002]
+    assert all(row["team"] == 1 and row["type"] == 1 for row in gold["list"])
+    assert [row["money"] for row in gold["list"]] == [80, 90, 360]
+    # ShopListUI hands the row icon to PropItem, which prefixes "p" itself.
+    assert gold["list"][0]["icon"] == 10007
+    assert silver["shop_type"] == 2
+    assert [(row["id"], row["type"], row["point"]) for row in silver["list"]] == [
+        (10010, 2, 500)
+    ]
+    assert mystery["shop_type"] == 4
+    assert mystery["list"] == []
+
+
+def test_shop_detail_returns_goods_and_own_currency(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ShopInfo")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET money = 500, point = 700, crystal = 30 WHERE uid = ?",
+            (uid,),
+        )
+
+    response = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "28", "uid": uid, "gid": "10007", "ttype": "1", "loc": "1"},
+    )
+
+    command, payload = _envelope(response)
+    assert command == 28
+    assert payload["shop_type"] == 1
+    assert payload["loc"] == 1
+    assert payload["goods"] == {"id": 10007, "icon": 10007}
+    assert payload["goods_ext"]["own_money"] == 500
+    assert payload["goods_ext"]["own_point"] == 700
+    assert payload["goods_ext"]["own_crystal"] == 30
+    assert payload["goods_ext"]["need_money"] == 80
+    assert payload["goods_ext"]["need_point"] == 0
+    assert payload["goods_ext"]["need_crystal"] == 0
+
+
+def test_shop_detail_rejects_unknown_goods_and_mismatched_price_type(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "ShopBad")
+
+    unknown = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "28", "uid": uid, "gid": "999999", "ttype": "1", "loc": "1"},
+    )
+    mismatched = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "28", "uid": uid, "gid": "10007", "ttype": "2", "loc": "1"},
+    )
+
+    assert unknown.get_data(as_text=True) == "-1:400"
+    assert mismatched.get_data(as_text=True) == "-1:400"
+
+
+def test_shop_buy_deducts_currency_and_stacks_inventory(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ShopBuy")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET money = 1000 WHERE uid = ?", (uid,))
+
+    first = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "29", "uid": uid, "gid": "10007", "count": "2", "ttype": "1", "loc": "1"},
+    )
+    second = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "29", "uid": uid, "gid": "10007", "count": "1", "ttype": "1", "loc": "1"},
+    )
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        money = connection.execute(
+            "SELECT money FROM players WHERE uid = ?", (uid,)
+        ).fetchone()["money"]
+        row = connection.execute(
+            "SELECT team, quantity, icon FROM inventory WHERE item_id = 10007"
+        ).fetchone()
+
+    assert _envelope(first) == (29, {"value": "ok"})
+    assert _envelope(second) == (29, {"value": "ok"})
+    assert money == 1000 - 80 * 3
+    assert row["team"] == 1
+    assert row["quantity"] == 3
+    assert row["icon"] == 10007
+
+    bag = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "22", "uid": uid, "ttype": "1", "p": "1", "n": "9"},
+        )
+    )[1]
+    assert bag["bag_size"] == 1
+    assert bag["goods_list"][0]["id"] == 10007
+    assert bag["goods_list"][0]["num"] == 3
+    assert bag["goods_list"][0]["icon"] == "p10007"
+
+
+def test_shop_buy_rejects_bad_count_and_insufficient_currency(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ShopPoor")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET money = 10, point = 0 WHERE uid = ?", (uid,))
+
+    too_many = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "29", "uid": uid, "gid": "10007", "count": "0", "ttype": "1", "loc": "1"},
+    )
+    no_money = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "29", "uid": uid, "gid": "10007", "count": "1", "ttype": "1", "loc": "1"},
+    )
+    no_silver = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "29", "uid": uid, "gid": "10010", "count": "1", "ttype": "2", "loc": "1"},
+    )
+
+    assert too_many.get_data(as_text=True) == "-1:206"
+    # 403 = 金币不够, 404 = 银币不够 (client error.txt keys).
+    assert no_money.get_data(as_text=True) == "-1:403"
+    assert no_silver.get_data(as_text=True) == "-1:404"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE item_id IN (10007, 10010)"
+        ).fetchone()[0] == 0
+
+
+def test_shop_list_rejects_unknown_player(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+
+    response = client.post(
+        "/flash.do", data={"m": "show", "showId": "27", "uid": "missing", "ttype": "1"}
+    )
+
+    assert response.get_data(as_text=True) == "-1:103"
+
+
 def _create_local_player(client, nick: str) -> str:
     created = client.post(
         "/flash.do", data={"m": "autoReg", "nick": nick, "sex": "1"}

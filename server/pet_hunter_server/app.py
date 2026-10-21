@@ -66,6 +66,16 @@ LOCAL_STARTER_EQUIPMENT = (
         "mag_def": 0,
     },
 )
+# Local-only shop stock. The original server's shop table is not recoverable, so
+# these rows are explicit local defaults. `shop_type` 1 = 金币商店, 2 = 银币商店,
+# 4 = 神秘商店. `price_type` 1 = money, 2 = point, 3 = crystal, 4 = goods trade.
+# Icons p10001/p10002/p10007/p10010 all exist in the bundled prop.swf.
+LOCAL_SHOP_GOODS = (
+    {"item_id": 10007, "team": 1, "shop_type": 1, "price_type": 1, "price": 80, "icon": 10007, "sort": 1},
+    {"item_id": 10001, "team": 1, "shop_type": 1, "price_type": 1, "price": 90, "icon": 10001, "sort": 2},
+    {"item_id": 10002, "team": 1, "shop_type": 1, "price_type": 1, "price": 360, "icon": 10002, "sort": 3},
+    {"item_id": 10010, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10010, "sort": 1},
+)
 # EquipInfoUI hides the sell button when the detail's `money` field is positive
 # (EquipInfoUI.as:191). Selling (68/69) is not implemented yet, so this local value
 # keeps the unsupported button hidden. The original meaning of `money` is unknown.
@@ -203,6 +213,37 @@ def _initialize_database(database_path: Path) -> None:
         ):
             if column not in inventory_columns:
                 connection.execute(ddl)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shop_goods (
+                item_id INTEGER NOT NULL,
+                team INTEGER NOT NULL,
+                shop_type INTEGER NOT NULL,
+                price_type INTEGER NOT NULL,
+                price INTEGER NOT NULL CHECK (price >= 0),
+                icon INTEGER NOT NULL,
+                sort INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (item_id, team)
+            )
+            """
+        )
+        for goods in LOCAL_SHOP_GOODS:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO shop_goods (
+                    item_id, team, shop_type, price_type, price, icon, sort
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    goods["item_id"],
+                    goods["team"],
+                    goods["shop_type"],
+                    goods["price_type"],
+                    goods["price"],
+                    goods["icon"],
+                    goods["sort"],
+                ),
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS pets (
@@ -594,6 +635,161 @@ def _player_equipment_detail(database_path: Path) -> Response:
     )
 
 
+_SHOP_PRICE_COLUMN = {1: "money", 2: "point", 3: "crystal"}
+
+
+def _shop_list(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    try:
+        shop_type = int(_request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        page_size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if shop_type not in (1, 2, 4) or page < 1 or not 1 <= page_size <= 9:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT 1 FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rows = connection.execute(
+            """
+            SELECT item_id, team, price_type, price, icon
+            FROM shop_goods WHERE shop_type = ?
+            ORDER BY sort, item_id LIMIT ? OFFSET ?
+            """,
+            (shop_type, page_size, (page - 1) * page_size),
+        ).fetchall()
+
+    goods = []
+    for row in rows:
+        item = {
+            "team": row["team"],
+            "id": row["item_id"],
+            # ShopListUI passes this to PropItem, which prefixes "p" itself.
+            "icon": row["icon"],
+            "type": row["price_type"],
+        }
+        if row["price_type"] in _SHOP_PRICE_COLUMN:
+            item[_SHOP_PRICE_COLUMN[row["price_type"]]] = row["price"]
+        else:
+            item["need_goods_id"] = 0
+            item["need_goods_num"] = row["price"]
+        goods.append(item)
+    return _protocol_response(27, {"shop_type": shop_type, "list": goods})
+
+
+def _shop_goods_detail(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    try:
+        goods_id = int(_request_value("gid", ""))
+        price_type = int(_request_value("ttype", ""))
+        loc = int(_request_value("loc", ""))
+    except ValueError:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, money, point, crystal FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = connection.execute(
+            """
+            SELECT item_id, team, shop_type, price_type, price, icon
+            FROM shop_goods WHERE item_id = ? AND team = ?
+            """,
+            (goods_id, loc),
+        ).fetchone()
+    if row is None or row["price_type"] != price_type:
+        return _pet_error(400)
+
+    goods = {"id": row["item_id"], "icon": row["icon"]}
+    need = {"need_money": 0, "need_point": 0, "need_crystal": 0}
+    if row["price_type"] in _SHOP_PRICE_COLUMN:
+        need[f"need_{_SHOP_PRICE_COLUMN[row['price_type']]}"] = row["price"]
+    return _protocol_response(
+        28,
+        {
+            "shop_type": row["shop_type"],
+            "loc": row["team"],
+            "goods": goods,
+            "goods_ext": {
+                "own_money": player["money"],
+                "own_point": player["point"],
+                "own_crystal": player["crystal"],
+                "need_goods_id": 0,
+                "own_need_goods_num": 0,
+                **need,
+            },
+        },
+    )
+
+
+def _shop_buy(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    try:
+        goods_id = int(_request_value("gid", ""))
+        count = int(_request_value("count", "1"))
+        price_type = int(_request_value("ttype", ""))
+        loc = int(_request_value("loc", ""))
+    except ValueError:
+        return _pet_error(100)
+    if not 1 <= count <= 99:
+        return _pet_error(206)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = connection.execute(
+            """
+            SELECT item_id, team, price_type, price, icon
+            FROM shop_goods WHERE item_id = ? AND team = ?
+            """,
+            (goods_id, loc),
+        ).fetchone()
+        if row is None or row["price_type"] != price_type:
+            return _pet_error(400)
+        column = _SHOP_PRICE_COLUMN.get(row["price_type"])
+        if column is None:
+            # Goods-trade purchases need a barter flow that is not implemented.
+            return _pet_error(100)
+        total = row["price"] * count
+        updated = connection.execute(
+            f"""
+            UPDATE players SET {column} = {column} - ?
+            WHERE id = ? AND {column} >= ?
+            """,
+            (total, player["id"], total),
+        )
+        if updated.rowcount == 0:
+            return _pet_error({1: 403, 2: 404, 3: 405}[row["price_type"]])
+        connection.execute(
+            """
+            INSERT INTO inventory (
+                player_id, item_id, team, quantity, icon, item_type, use_type,
+                level, star
+            ) VALUES (?, ?, ?, ?, ?, 0, 0, 1, 1)
+            ON CONFLICT (player_id, item_id)
+            DO UPDATE SET quantity = quantity + excluded.quantity
+            """,
+            (
+                player["id"],
+                row["item_id"],
+                row["team"],
+                count,
+                row["icon"],
+            ),
+        )
+    return _protocol_response(29, {"value": "ok"})
+
+
 def _pet_error(error_id: int, status: int = 200) -> Response:
     """Client-recognised protocol error (`-1:<error.txt key>`).
 
@@ -944,6 +1140,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_inventory(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "39":
             return _player_equipment_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "27":
+            return _shop_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "28":
+            return _shop_goods_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "29":
+            return _shop_buy(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":
