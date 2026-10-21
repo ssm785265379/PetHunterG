@@ -2011,19 +2011,26 @@ def _explore_map_world(gid: int) -> int:
 def _explore_event_type(gid: int) -> int:
     """Which expedition event the map rolls, read from exploreMap.txt.
 
-    The shipped `events` column holds two-digit codes ("11:12:13:14:15") and
-    `eventProbability` a parallel weight list ("5700:2000:500:500:1300").
-    GameUtil.getExploreEvent:482 switches on the *tens* digit (0,2,3,5,6,7,8,9)
-    and ExploreUI.as:100 compares against 1, so the raw code is divided by 10.
+    The shipped `events` column holds codes built as `map_id * 10 + event_type`,
+    with `eventProbability` a parallel weight list:
 
-    LOCAL DEFAULT: always the first entry (the battle), because the original
+        map 1  -> "11:12:13:14:15"       (types 1-5)
+        map 4  -> "41:42:43:44:45"       (types 1-5)
+        map 11 -> "111:112:...:117"      (types 1-7)
+
+    GameUtil.getExploreEvent:482 switches on the event type (0,2,3,5,6,7,8,9) and
+    ExploreUI.as:100 only opens the battle screen for type 1, so the type is the
+    LAST digit — dividing by ten returned the map id and pushed every map onto the
+    non-battle event page.
+
+    LOCAL DEFAULT: always the first entry (a battle), because the original
     weighted roll and its persistent per-map state are not recoverable.
     """
     record = _explore_map_table().get(gid)
     if record is None:
         return 1
     first = str(record.get("events", "")).split(":")[0].strip()
-    return int(first) // 10 if first.isdigit() else 1
+    return int(first) % 10 if first.isdigit() else 1
 
 
 # ExploreUI.as:182-190 does getDefinition("m" + horse) / ("m" + horse + "_2")
@@ -2155,7 +2162,7 @@ def _explore_start(database_path: Path) -> Response:
         "need_discover_rate":m["need_discover_rate"],
         "energy":0,"cost_energy":0,"add_energy":0,
         "supply":0,"cost_supply":0,"add_supply":0,
-        "discover_days":0,"add_discover_days":0,
+        "discover_days":1,"add_discover_days":0,
         # ExploreUI.as:167-168 does getDefinition("map_terrain_" + terrain) with no
         # guard, and map.swf only ships map_terrain_1 / map_terrain_2. A zero here
         # throws and leaves the page on a black background with just the HUD icons.
@@ -2198,6 +2205,7 @@ def _explore_list(database_path: Path) -> Response:
             continue
         row=_explore_map_row(gid)
         rows.append({"index":gid,"code":gid,"id":gid,"terrain":row["terrain"],
+                     "name":row["name"],
                      "star":row["star"],"max_days":row["max_days"]})
     if not rows: return _pet_error(400)
     return _protocol_response(98,{"world":world,"explore_ap":0,"max_explore_ap":0,"list":rows})

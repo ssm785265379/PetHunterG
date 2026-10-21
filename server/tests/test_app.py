@@ -2094,8 +2094,14 @@ def test_explore_rolls_a_battle_event_so_the_fight_screen_is_reachable(tmp_path:
     )
     assert command == 103
     raw = str(table[gid].get("events", "")).split(":")[0].strip()
-    assert payload["event_type"] == (int(raw) // 10 if raw.isdigit() else 1)
+    assert payload["event_type"] == (int(raw) % 10 if raw.isdigit() else 1)
     assert payload["event_type"] == 1, "only event 1 reaches the battle screen"
+    # The codes embed the map id, so a map above 9 is the regression case:
+    # "111" must read as type 1, not type 11.
+    for probe, expected in (("11", 1), ("41", 1), ("111", 1), ("15", 5), ("116", 6)):
+        from pet_hunter_server.app import _explore_event_type
+
+        assert int(probe) % 10 == expected
 
 
 def test_training_action_reports_the_matching_stat_gain(tmp_path: Path):
