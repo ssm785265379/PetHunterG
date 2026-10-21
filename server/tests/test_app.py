@@ -1232,6 +1232,14 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_hunt_task_response_carries_id_for_fight_buttons(tmp_path: Path):
+    # MainUI.as:120-122 feeds the showId=5 *response* into HunterTaskUI.data, and
+    # HunterTaskUI.as:271/284 sends `data.id` for HUNT_KEY(6)/CATCH_KEY(7).
+    database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"HidT")
+    command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":5,"uid":uid,"hid":1}))
+    assert command==5 and payload["id"]==1
+
+
 def test_hunt_map_rows_expose_client_click_fields(tmp_path: Path):
     database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"HuntT")
     command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":4,"uid":uid,"p":1,"n":9}))

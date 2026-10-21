@@ -192,13 +192,17 @@ def _log_request_metadata() -> None:
         command = "unknown"
 
     show_id = request.args.get("showId") or request.form.get("showId")
+    # hid/gid are gameplay ids, not credentials; logging them makes device
+    # failures (e.g. a hunt cell sending the wrong map id) diagnosable.
+    target = request.args.get("hid") or request.form.get("hid") or request.args.get("gid") or request.form.get("gid") or ""
     current_app.logger.info(
-        "request source=%s method=%s path=%s command=%s showId=%s fields=%s",
+        "request source=%s method=%s path=%s command=%s showId=%s target=%s fields=%s",
         request.remote_addr,
         request.method,
         request.path,
         command,
         show_id or "",
+        target,
         ",".join(fields),
     )
 
@@ -1346,7 +1350,7 @@ def _hunter_task(database_path: Path) -> Response:
         p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0",(p["id"],)).fetchall()
-    return _protocol_response(5,{"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"pets":[dict(r) for r in pets]})
+    return _protocol_response(5,{"id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"pets":[dict(r) for r in pets]})
 
 
 def _hunter_fight(database_path: Path) -> Response:
@@ -1360,7 +1364,13 @@ def _hunter_fight(database_path: Path) -> Response:
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
         ap=p["ht_ap"]-1
-    att={"team":1,"code":0,"is_pet":1,"id":1002,"name":"火龙","pre_lv":5,"lv":5,"hp":100,"img":1002}
+        rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 ORDER BY id LIMIT 1",(p["id"],)).fetchall()
+    # LOCAL DEFAULT replay: one attacking pet from the save, one local monster row.
+    if rows:
+        r=rows[0]
+        att={"team":1,"code":0,"is_pet":1,"index":r["index"],"id":r["id"],"name":r["name"] or "宠物","lv":r["lv"],"hp":100,"img":r["icon"]}
+    else:
+        att={"team":1,"code":0,"is_pet":0,"id":1001,"name":"猎人","lv":1,"hp":100,"img":1001}
     defense={"team":2,"code":0,"is_pet":0,"id":1001,"name":"烈焰怪","lv":1,"hp":50,"img":1001}
     record=[{"att":{"team":1,"code":0,"hp":100},"def":{"team":2,"code":0,"hp":0}}]
     return _protocol_response(6,{"is_win":1,"hunt_type":1,"map_id":hid,"monster_group":1,"att_list":[att],"def_list":[defense],"record":record,"ht_ap":ap,"value":"ok"})
