@@ -23,6 +23,8 @@ KNOWN_COMMANDS = {
 }
 
 LOCAL_DEFAULT_BAG_CAPACITY = 100
+# Local cap for bag expansion consumables (背包扩展卡). Not a recovered rule.
+LOCAL_MAX_BAG_CAPACITY = 200
 # Local-only pet slot rules. The original server capacities are unknown, so these
 # are explicit local defaults, not recovered rules.
 LOCAL_DEFAULT_PET_CAPACITY = 30
@@ -66,16 +68,34 @@ LOCAL_STARTER_EQUIPMENT = (
         "mag_def": 0,
     },
 )
+# Local-only prop catalogue: the effect type (`type` in prop.txt), the bag
+# interaction mode (`useType`) and the effect amount (`value`) for every prop the
+# local server can hand out. BagListUI routes by `type` (its row field `t`) and
+# shows the item clickable only when `useType` is non-zero, so both must be real.
+# Values copy the bundled prop.txt rows.
+LOCAL_PROP_CATALOG = {
+    10007: {"type": 7, "use_type": 1, "value": 20},      # 体力饮料: 恢复20点狩猎行动值
+    10002: {"type": 5, "use_type": 2, "value": 1330000},  # 宠物水果: 宠物经验+133万
+    10014: {"type": 14, "use_type": 1, "value": 3},       # 背包扩展卡: 背包+3
+    10022: {"type": 16, "use_type": 1, "value": 10000},   # 一袋银币: 银币+10000
+    10023: {"type": 17, "use_type": 1, "value": 10000},   # 一袋水晶: 水晶+10000
+}
 # Local-only shop stock. The original server's shop table is not recoverable, so
 # these rows are explicit local defaults. `shop_type` 1 = 金币商店, 2 = 银币商店,
 # 4 = 神秘商店. `price_type` 1 = money, 2 = point, 3 = crystal, 4 = goods trade.
-# Icons p10001/p10002/p10007/p10010 all exist in the bundled prop.swf.
+# Only props whose effect USE_GOODS implements are stocked (see LOCAL_PROP_CATALOG).
 LOCAL_SHOP_GOODS = (
     {"item_id": 10007, "team": 1, "shop_type": 1, "price_type": 1, "price": 80, "icon": 10007, "sort": 1},
-    {"item_id": 10001, "team": 1, "shop_type": 1, "price_type": 1, "price": 90, "icon": 10001, "sort": 2},
-    {"item_id": 10002, "team": 1, "shop_type": 1, "price_type": 1, "price": 360, "icon": 10002, "sort": 3},
-    {"item_id": 10010, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10010, "sort": 1},
+    {"item_id": 10002, "team": 1, "shop_type": 1, "price_type": 1, "price": 360, "icon": 10002, "sort": 2},
+    {"item_id": 10014, "team": 1, "shop_type": 1, "price_type": 1, "price": 200, "icon": 10014, "sort": 3},
+    # 一袋银币 is normally loot, not shop stock; price 500 point is a local default.
+    {"item_id": 10022, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10022, "sort": 1},
 )
+# Local levelling rule for pet exp items: the original curve is not recoverable.
+# Every LOCAL_PET_EXP_PER_LEVEL exp raises the pet one level (up to the cap); the
+# remainder is kept in pets.exp. Evolution gates then read the new level.
+LOCAL_PET_EXP_PER_LEVEL = 1000000
+LOCAL_MAX_PET_LEVEL = 99
 # EquipInfoUI hides the sell button when the detail's `money` field is positive
 # (EquipInfoUI.as:191). Selling (68/69) is not implemented yet, so this local value
 # keeps the unsupported button hidden. The original meaning of `money` is unknown.
@@ -167,6 +187,10 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 "ALTER TABLE players ADD COLUMN pet_capacity INTEGER NOT NULL DEFAULT 30"
             )
+        if "bag_capacity" not in player_columns:
+            connection.execute(
+                f"ALTER TABLE players ADD COLUMN bag_capacity INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_BAG_CAPACITY}"
+            )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -227,10 +251,14 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # The shop table is a local default, not player data, so it is rewritten
+        # from LOCAL_SHOP_GOODS on every start. That keeps removed goods from
+        # lingering in older saves (purchases go to `inventory`, not here).
+        connection.execute("DELETE FROM shop_goods")
         for goods in LOCAL_SHOP_GOODS:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO shop_goods (
+                INSERT INTO shop_goods (
                     item_id, team, shop_type, price_type, price, icon, sort
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -260,9 +288,24 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        pet_columns = {row[1] for row in connection.execute("PRAGMA table_info(pets)")}
+        if "exp" not in pet_columns:
+            connection.execute(
+                "ALTER TABLE pets ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_pets_player ON pets (player_id, id)"
         )
+        # Older local saves stored props with item_type/use_type 0, which makes
+        # BagListUI render them grey and non-clickable. Rewrite the known ones.
+        for item_id, prop in LOCAL_PROP_CATALOG.items():
+            connection.execute(
+                """
+                UPDATE inventory SET item_type = ?, use_type = ?
+                WHERE item_id = ? AND team IN (1, 2)
+                """,
+                (prop["type"], prop["use_type"], item_id),
+            )
 
 
 def _password_hash(password: str, salt: bytes) -> bytes:
@@ -546,7 +589,7 @@ def _player_inventory(database_path: Path) -> Response:
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
-            "SELECT id FROM players WHERE uid = ?", (uid,)
+            "SELECT id, bag_capacity FROM players WHERE uid = ?", (uid,)
         ).fetchone()
         if player is None:
             return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
@@ -582,7 +625,7 @@ def _player_inventory(database_path: Path) -> Response:
         {
             # Local interpretation: report the slots used in the viewed tab.
             "bag_size": count,
-            "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY,
+            "max_bag_size": player["bag_capacity"],
             "goods_list": goods,
         },
     )
@@ -770,12 +813,13 @@ def _shop_buy(database_path: Path) -> Response:
         )
         if updated.rowcount == 0:
             return _pet_error({1: 403, 2: 404, 3: 405}[row["price_type"]])
+        prop = LOCAL_PROP_CATALOG.get(row["item_id"], {"type": 0, "use_type": 0})
         connection.execute(
             """
             INSERT INTO inventory (
                 player_id, item_id, team, quantity, icon, item_type, use_type,
                 level, star
-            ) VALUES (?, ?, ?, ?, ?, 0, 0, 1, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
             ON CONFLICT (player_id, item_id)
             DO UPDATE SET quantity = quantity + excluded.quantity
             """,
@@ -785,9 +829,114 @@ def _shop_buy(database_path: Path) -> Response:
                 row["team"],
                 count,
                 row["icon"],
+                prop["type"],
+                prop["use_type"],
             ),
         )
     return _protocol_response(29, {"value": "ok"})
+
+
+def _player_use_goods(database_path: Path) -> Response:
+    """USE_GOODS (50) from the bag: `index` is the inventory row id, `index1` the
+    selected pet id (0 when no target). Effects are driven by LOCAL_PROP_CATALOG,
+    so only props the local server understands can be used."""
+    uid = _request_value("uid")
+    try:
+        item_index = int(_request_value("index", ""))
+        target = int(_request_value("index1", "0") or 0)
+    except ValueError:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            """
+            SELECT id, ht_ap, max_ht_ap, pet_capacity, bag_capacity
+            FROM players WHERE uid = ?
+            """,
+            (uid,),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = connection.execute(
+            """
+            SELECT id, item_id, team, quantity, item_type
+            FROM inventory WHERE id = ? AND player_id = ?
+            """,
+            (item_index, player["id"]),
+        ).fetchone()
+        if row is None:
+            return _pet_error(400)
+        prop = LOCAL_PROP_CATALOG.get(row["item_id"])
+        if prop is None or prop["type"] != row["item_type"] or row["team"] not in (1, 2):
+            # Items this local server has no rule for stay in the bag untouched.
+            return _pet_error(100)
+
+        effect = prop["type"]
+        amount = prop["value"]
+        payload: dict[str, int] = {}
+        if effect == 7:  # restore hunt action points
+            if player["ht_ap"] >= player["max_ht_ap"]:
+                return _pet_error(100)
+            new_ap = min(player["max_ht_ap"], player["ht_ap"] + amount)
+            connection.execute(
+                "UPDATE players SET ht_ap = ? WHERE id = ?", (new_ap, player["id"])
+            )
+            payload = {"value": new_ap - player["ht_ap"], "ht_ap": new_ap}
+        elif effect == 5:  # pet exp
+            if target <= 0:
+                return _pet_error(506)
+            pet = connection.execute(
+                "SELECT id, lv, exp FROM pets WHERE id = ? AND player_id = ?",
+                (target, player["id"]),
+            ).fetchone()
+            if pet is None:
+                return _pet_error(506)
+            exp = pet["exp"] + amount
+            lv = pet["lv"]
+            while exp >= LOCAL_PET_EXP_PER_LEVEL and lv < LOCAL_MAX_PET_LEVEL:
+                exp -= LOCAL_PET_EXP_PER_LEVEL
+                lv += 1
+            connection.execute(
+                "UPDATE pets SET lv = ?, exp = ? WHERE id = ?",
+                (lv, exp, pet["id"]),
+            )
+            payload = {"value": amount, "lv": lv, "exp": exp}
+        elif effect == 14:  # bag capacity
+            if player["bag_capacity"] >= LOCAL_MAX_BAG_CAPACITY:
+                return _pet_error(204)
+            new_capacity = min(
+                LOCAL_MAX_BAG_CAPACITY, player["bag_capacity"] + amount
+            )
+            connection.execute(
+                "UPDATE players SET bag_capacity = ? WHERE id = ?",
+                (new_capacity, player["id"]),
+            )
+            payload = {
+                "value": new_capacity - player["bag_capacity"],
+                "max_bag_size": new_capacity,
+            }
+        elif effect in (16, 17):  # currency bags
+            column = "point" if effect == 16 else "crystal"
+            connection.execute(
+                f"UPDATE players SET {column} = {column} + ? WHERE id = ?",
+                (amount, player["id"]),
+            )
+            payload = {"value": amount}
+        else:
+            return _pet_error(100)
+
+        if row["quantity"] > 1:
+            connection.execute(
+                "UPDATE inventory SET quantity = quantity - 1 WHERE id = ?",
+                (row["id"],),
+            )
+        else:
+            connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+        ht_ap = connection.execute(
+            "SELECT ht_ap FROM players WHERE id = ?", (player["id"],)
+        ).fetchone()["ht_ap"]
+    payload["ht_ap"] = ht_ap
+    return _protocol_response(50, payload)
 
 
 def _pet_error(error_id: int, status: int = 200) -> Response:
@@ -1146,6 +1295,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _shop_goods_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "29":
             return _shop_buy(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "50":
+            return _player_use_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":

@@ -45,6 +45,7 @@ If it does not connect, verify `adb devices -l`, `adb reverse --list`, and that 
 - `showId=22` returns the character's persisted inventory for the requested `ttype` tab; `showId=11`/`showId=12` return the pet list and pet detail from a per-character `pets` table.
 - `showId=39` returns equipment detail (`index`, `ttype=3`) from a persisted `inventory` row: `money,index,id,icon,level,star,pro,hp,phy_att,mag_att,phy_def,mag_def,speed`. The client looks up `pic[id].name`, instantiates `p<icon>` with no try/catch, and hides the sell button when `money > 0`. Selling (68/69) is not implemented, so a positive local `money` deliberately hides that button.
 - Pet mutations: `showId=18` renames (`index`, `pName`), `showId=55` toggles lock (`index`), `showId=15` releases (`index`), `showId=14` evolves (`index`), and `showId=40` expands capacity. Failures return HTTP 200 with the client's own `-1:<error.txt key>` code (204, 504, 505, 506, 514, 517, 524, plus 100/103 for malformed or unknown players) so the game shows its bundled message instead of a network error.
+- Item use: `showId=50` (`index` = inventory row id, `index1` = target pet id or 0) consumes one unit and applies the prop's effect from `LOCAL_PROP_CATALOG`: hunt action points (`type 7`), pet exp (`type 5`, local curve), bag capacity (`type 14`), silver/crystal bags (`type 16/17`). Unsupported items return `-1:100` and stay in the bag.
 - Shop: `showId=27` lists local stock for a category (`ttype` 1 金币, 2 银币, 4 神秘) and returns `{shop_type,list[]}`; `showId=28` returns `{shop_type,loc,goods,goods_ext}` for `gid,ttype,loc`; `showId=29` buys `gid,count,ttype,loc`, deducting the matching currency and stacking the item into `inventory`. Failures reuse the client's error ids (400 物品不存在, 206 数量不对, 403/404/405 货币不足).
 - Account passwords are stored as salted scrypt hashes in `server/instance/game.sqlite3`; request logs contain field names only. Unimplemented commands still return HTTP 501 rather than a guessed success.
 
@@ -74,9 +75,22 @@ Saves created before the starter equipment existed can be backfilled idempotentl
 .\.venv\Scripts\python.exe scripts\grant_starter_equipment.py
 ```
 
+### Item use
+
+`USE_GOODS` (50) is implemented for the props in `LOCAL_PROP_CATALOG`, all of them purchasable:
+
+| Prop | id | Effect | Local price |
+| --- | --- | --- | --- |
+| 体力饮料 | 10007 | `ht_ap` +20 (capped by `max_ht_ap`) | 80 money |
+| 宠物水果 | 10002 | target pet exp +1,330,000 | 360 money |
+| 背包扩展卡 | 10014 | bag capacity +3 (local cap 200) | 200 money |
+| 一袋银币 | 10022 | `point` +10,000 | 500 point |
+
+Pet exp follows a **local** rule (`LOCAL_PET_EXP_PER_LEVEL = 1,000,000`, cap 99) because the original curve is not recoverable; the remainder is stored in `pets.exp`. Bag expansion adds `players.bag_capacity`, which `showId=22` now reports as `max_bag_size`. Using an item at full action points or full bag capacity returns an error and leaves the item alone. Procs whose effect the server does not implement (growth, nature, catch, skill forgetting, buffs, chests) are not stocked and return `-1:100` if forced.
+
 ### Shop stock
 
-The original server's shop table is not recoverable, so `shop_goods` is seeded with explicit **local defaults** (all present in the bundled `prop.swf`): 金币商店 `ttype=1` sells 体力饮料 `10007` for 80, 魔幻沐浴露 `10001` for 90 and 宠物水果 `10002` for 360 money; 银币商店 `ttype=2` sells 奇异口袋 `10010` for 500 point; 神秘商店 `ttype=4` is empty because barter (`price_type=4`) is not implemented. Row `icon` is numeric here because `ShopListUI` passes it to `PropItem`, which prefixes `p` (the bag list does the opposite). Buying stacks into the same `inventory` row; purchased props are display-only (`use_type=0`) until item use is implemented.
+The original server's shop table is not recoverable, so `shop_goods` is rewritten from explicit **local defaults** on every start (the table holds no player data; purchases go to `inventory`). 金币商店 `ttype=1` sells 体力饮料 `10007` (80), 宠物水果 `10002` (360) and 背包扩展卡 `10014` (200) for money; 银币商店 `ttype=2` sells 一袋银币 `10022` for 500 point (a local price for an item that is normally loot); 神秘商店 `ttype=4` is empty because barter (`price_type=4`) is not implemented. Row `icon` is numeric here because `ShopListUI` passes it to `PropItem`, which prefixes `p` (the bag list does the opposite). Purchase stores the prop's real `item_type`/`use_type` from `LOCAL_PROP_CATALOG`, so bought items are immediately usable.
 
 `server/fixtures/data/android/server.xml` currently contains a **synthetic diagnostic node**, not an authentic server list. Its `id`, `name`, `icon`, `n`, and `url` fields follow the SWF's XML access pattern; it points to `http://127.0.0.1:8080/`, forwarded over the connected USB debugging session. `icon=clip_back_login` is a temporary known-loaded `MovieClip`; `n=0` separately selects the bundled `clip_server_0` status symbol. Do not treat this fixture as recovered production data.
 
@@ -84,7 +98,7 @@ The original server's shop table is not recoverable, so `shop_goods` is seeded w
 
 The checked-in source SWF remains unchanged. The local side-by-side AIR 51 test APK is built from a copy with the default and three fallback hosts redirected to `http://127.0.0.1:8080/`. Use the `localusb` package for USB reverse forwarding; rebuild only if the port changes, not when Wi-Fi IPs change.
 
-The OPPO phone reached this service and requested `GET /data/android/zh-CN/server.xml`; the locale route serves the synthetic node above. Account-backed registration/login, character creation, home profile (`showId=2`), inventory list (`showId=22`), the pet list/detail (`showId=11`/`12`), the pet write commands (`14`/`15`/`18`/`40`/`55`), equipment detail (`showId=39`), and the shop (`showId=27`/`28`/`29`) have all been exercised against the live database. The pet list rendered `Lv5 阿火` and the detail screen rendered 名称/星级/等级/属性/进化 plus the renamed and evolved state without a crash. The equipment tab rendered `Lv1 烈焰之剑` and its detail rendered 星级/生命 0/物攻 20/魔攻 20/物防 0/魔防 0/速度 0 with no `#1065`. The gold shop rendered 体力饮料/魔幻沐浴露/宠物水果 with prices, the detail rendered the prop remark, and tapping buy sent 29 and changed money 340→260 with 体力饮料 stacking 2→3. The pet/equipment write commands' in-game confirm taps were not automated because those controls are image assets. Remaining gameplay branches (tasks, hunting, exploration, social, item use) are still unimplemented.
+The OPPO phone reached this service and requested `GET /data/android/zh-CN/server.xml`; the locale route serves the synthetic node above. Account-backed registration/login, character creation, home profile (`showId=2`), inventory list (`showId=22`), the pet list/detail (`showId=11`/`12`), the pet write commands (`14`/`15`/`18`/`40`/`55`), equipment detail (`showId=39`), and the shop (`showId=27`/`28`/`29`), and item use (`showId=50`) have all been exercised against the live database. The pet list rendered `Lv5 阿火` and the detail screen rendered 名称/星级/等级/属性/进化 plus the renamed and evolved state without a crash. The equipment tab rendered `Lv1 烈焰之剑` and its detail rendered 星级/生命 0/物攻 20/魔攻 20/物防 0/魔防 0/速度 0 with no `#1065`. The gold shop rendered 体力饮料/魔幻沐浴露/宠物水果 with prices, the detail rendered the prop remark, and tapping buy sent 29 and changed money 340→260 with 体力饮料 stacking 2→3. Using 体力饮料 from the bag sent `showId=50` (HTTP 200, 26 bytes), changed `ht_ap` 0→20, decremented the stack 5→4, and the bag re-requested 22 and rendered `体力饮料 4` in place. The pet/equipment write commands' in-game confirm taps were not automated because those controls are image assets. Remaining gameplay branches (tasks, hunting, exploration, social, item use) are still unimplemented.
 
 ## Tests
 
@@ -92,4 +106,4 @@ The OPPO phone reached this service and requested `GET /data/android/zh-CN/serve
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The suite currently covers the account/character path, profile, inventory, equipment detail (39), the shop (27/28/29), and the full pet read/write surface (11/12/14/15/18/40/55), including cross-player isolation, currency checks and locked/battle-state guards: 49 tests pass.
+The suite currently covers the account/character path, profile, inventory, equipment detail (39), the shop (27/28/29), item use (50), and the full pet read/write surface (11/12/14/15/18/40/55), including cross-player isolation, currency/quantity checks and locked/battle-state guards: 53 tests pass.
