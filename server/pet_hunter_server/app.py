@@ -1584,6 +1584,20 @@ def _training_overview(database_path: Path) -> Response:
     return _protocol_response(504, {"list": [], "value": "ok"})
 
 
+def _pet_name(pet_id: int, fallback: object = None) -> str:
+    """Real name from pet.txt; the client falls back the same way."""
+    if fallback:
+        return str(fallback)
+    record = config_tables._table("pet.txt").get(pet_id)
+    return record["name"] if record else ""
+
+
+def _pet_list_entry(row: sqlite3.Row) -> dict[str, object]:
+    return {"index": row["index"], "id": row["id"], "icon": row["icon"],
+            "name": _pet_name(row["id"], row["name"]), "lv": row["lv"],
+            "num": 0, "energy": 0}
+
+
 def _training_list(database_path: Path) -> Response:
     uid = _request_value("uid")
     try: page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
@@ -1593,7 +1607,7 @@ def _training_list(database_path: Path) -> Response:
         if player is None: return _pet_error(103)
         rows = c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 ORDER BY id", (player["id"],)).fetchall()
     start=max(0,page-1)*size
-    return _protocol_response(505, {"list": [{"index":r["index"],"id":r["id"],"icon":r["icon"],"name":r["name"],"lv":r["lv"],"num":0,"energy":0} for r in rows[start:start+size]]})
+    return _protocol_response(505, {"list": [_pet_list_entry(r) for r in rows[start:start+size]]})
 
 
 def _training_detail(database_path: Path) -> Response:
@@ -2431,7 +2445,7 @@ def _pet_synthesis_pick(database_path: Path, command_id: int) -> Response:
         ).fetchall()
     return _protocol_response(
         command_id,
-        {"list": [dict(r) for r in rows]},
+        {"list": [_pet_list_entry(r) for r in rows]},
     )
 
 

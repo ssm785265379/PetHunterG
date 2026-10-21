@@ -1497,6 +1497,25 @@ def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
             assert row["num"] > 0
 
 
+def test_pet_lists_resolve_real_names_from_config(tmp_path: Path):
+    # DevelopUI.as:111-144 and PetSynthesisListUI.as:218 both fall back to
+    # pet.txt when `name` is absent, but a stored NULL rendered as "null" in
+    # the earlier build, so the server must resolve the real config name.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "NameFix")
+    for show_id in (505, 62):
+        _, payload = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": show_id, "uid": uid, "p": 1, "n": 9})
+        )
+        rows = payload["list"]
+        assert rows, f"{show_id} returned nothing"
+        for row in rows:
+            assert row["name"], f"{show_id} row {row['index']} has no name"
+            expected = config_tables._table("pet.txt")[row["id"]]["name"]
+            assert row["name"] == expected
+
+
 def test_pet_synthesis_pick_lists_usable_pets(tmp_path: Path):
     # PetSynthesisListUI.as:198-224 renders list[] with index/name/lv/icon, and
     # shows error 10 when the first page is empty, so only usable pets belong here.
