@@ -1558,6 +1558,9 @@ def test_pet_synthesis_consumes_vice_and_reinforces_main(tmp_path: Path):
     )
     assert command == 65
     assert payload["index"] == main_id and payload["icon"]
+    # PetSynthesisResultUI.as:139 prints `name` first and only falls back to
+    # pet.txt when it is falsy, so ship the real name rather than "".
+    assert payload["name"] == config_tables._table("pet.txt")[payload["id"]]["name"]
     assert payload["exd_generation"] == 2
     assert all(payload[f"exd_{k}_tp"] > 0 for k in
                ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"))

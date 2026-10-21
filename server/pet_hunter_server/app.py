@@ -2516,7 +2516,7 @@ def _pet_synthesis(database_path: Path) -> Response:
         "index": updated["index"],
         "id": updated["id"],
         "icon": updated["icon"],
-        "name": updated["name"] or "",
+        "name": _pet_name(updated["id"], updated["name"]),
         "lv": updated["lv"],
         "exd_generation": generation,
         "type": 1,
