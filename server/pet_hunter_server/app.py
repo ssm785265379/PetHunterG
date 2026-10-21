@@ -1983,12 +1983,32 @@ def _training_overview(database_path: Path) -> Response:
             return _pet_error(103)
         # Drop finished runs first so the list never reports a stale countdown.
         c.execute("UPDATE pets SET train_state=0, train_type=0, train_end=0 WHERE train_end>0 AND train_end<=?", (now,))
-        rows = c.execute(
+        training = c.execute(
             """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
                FROM pets WHERE player_id=? AND train_end>?
                ORDER BY train_end LIMIT 9""",
             (player["id"], now),
         ).fetchall()
+        # DevelopUI.as:120-139 renders one DevelopItem per list entry and falls back
+        # to the clip_wand placeholder for every slot with no data, so an empty
+        # response showed nine star wands. Fill the remaining slots with the
+        # player's own pets (train_state 0 => icon + name, no progress bar) so the
+        # page always shows the pet roster.
+        idle = c.execute(
+            """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
+               FROM pets WHERE player_id=? AND (train_end IS NULL OR train_end<=?)
+               ORDER BY lv DESC, id LIMIT 9""",
+            (player["id"], now),
+        ).fetchall()
+    seen: set[int] = set()
+    rows: list = []
+    for row in list(training) + list(idle):
+        if row["index"] in seen:
+            continue
+        seen.add(row["index"])
+        rows.append(row)
+        if len(rows) == 9:
+            break
     return _protocol_response(
         504,
         {
@@ -2000,7 +2020,7 @@ def _training_overview(database_path: Path) -> Response:
                     "name": _pet_name(r["id"], r["name"]),
                     "num": 0,
                     "train_state": r["train_state"],
-                    "train_time": max(0, (r["train_end"] - now) * 1000),
+                    "train_time": max(0, ((r["train_end"] or 0) - now) * 1000),
                 }
                 for r in rows
             ],
