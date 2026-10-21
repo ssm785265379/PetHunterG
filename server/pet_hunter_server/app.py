@@ -1991,6 +1991,8 @@ def _explore_map_row(gid: int) -> dict | None:
         "pass_reward_crystal": _int("passRewardCrystal"),
         "pass_reward_goods": str(record.get("passRewardGoods", "") or ""),
         "max_reward_point": _int("maxRewardPoint"),
+        "max_reward_crystal": _int("maxRewardCrystal"),
+        "max_reward_goods": str(record.get("maxRewardGoods", "") or ""),
         "is_catch": 1 if str(record.get("catchPet", "0")).strip() not in ("", "0") else 0,
         # LOCAL DEFAULT: no original expedition fee is recoverable, so the
         # shipped passRewardPoint/maxRewardPoint are shown but not charged.
@@ -2052,6 +2054,21 @@ def _explore_horse(database_path: Path, player_id: int) -> int:
 
 
 _MOUNT_SYMBOLS = {f"m10000{n}" for n in range(1, 8)}
+
+
+def _reward_block(point: int, crystal: int, goods) -> dict:
+    """One ExploreResultItem reward box.
+
+    ExploreResultItem.as:447-540 reads data.finish_reward / data.max_star_reward,
+    each shaped {reward_point, reward_crystal, reward_goods[]}, and prefers point
+    then crystal then the first goods entry. Sending nothing left both reward
+    slots blank on the WIN panel.
+    """
+    return {
+        "reward_point": int(point or 0),
+        "reward_crystal": int(crystal or 0),
+        "reward_goods": [{"id": gid, "num": num} for gid, num in goods],
+    }
 
 
 def _explore_start(database_path: Path) -> Response:
@@ -2146,6 +2163,15 @@ def _explore_start(database_path: Path) -> Response:
         # ExploreUI.as:182-190 looks up getDefinition("m" + horse); omitting the
         # field produced "mundefined" and threw right after the terrain lookup.
         "horse":horse,
+        # ExploreResultItem.as:447-540 renders these two boxes on the WIN panel.
+        "finish_reward":_reward_block(
+            reward_point, reward_crystal,
+            [(entry["id"], entry["num"]) for entry in reward_goods],
+        ),
+        "max_star_reward":_reward_block(
+            m["max_reward_point"], m["max_reward_crystal"],
+            [(gid, num) for kind, gid, num, _icon in _parse_map_goods(m["max_reward_goods"])],
+        ),
         # ExplorePveUI.as:381-510 dereferences every field below without a guard.
         "battle_result":{
             "is_win":1,"hunt_type":1,"map_id":gid,

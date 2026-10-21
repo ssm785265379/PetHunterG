@@ -1624,6 +1624,36 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
+def test_explore_ships_the_two_reward_boxes_the_win_panel_draws(tmp_path: Path):
+    # ExploreResultItem.as:447-540 reads data.finish_reward and
+    # data.max_star_reward, each {reward_point, reward_crystal, reward_goods}.
+    # Both were missing, so the WIN panel's two reward slots rendered empty even
+    # though the payout itself happened server-side.
+    table = config_tables._table("exploreMap.txt")
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "BoxOne")
+    gid = sorted(table)[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    for key in ("finish_reward", "max_star_reward"):
+        block = payload[key]
+        assert set(block) == {"reward_point", "reward_crystal", "reward_goods"}
+        assert isinstance(block["reward_point"], int)
+        assert isinstance(block["reward_crystal"], int)
+        assert isinstance(block["reward_goods"], list)
+        for entry in block["reward_goods"]:
+            assert entry["id"] > 0 and entry["num"] > 0
+    # The finish box must agree with the payout that was actually credited.
+    assert payload["finish_reward"]["reward_point"] == payload["battle_result"]["reward_point"]
+    assert payload["max_star_reward"]["reward_point"] == int(
+        str(table[gid].get("maxRewardPoint", "0")).strip() or 0
+    )
+
+
 def test_explore_reward_grammar_is_kind_id_icon_num():
     # exploreMap's reward columns are `kind:id:icon:num`, not `id:num`. Reading
     # them with the pair parser produced "item 3 x 150011", and the third field is
