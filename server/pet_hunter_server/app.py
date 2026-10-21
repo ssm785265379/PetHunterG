@@ -180,12 +180,14 @@ def _log_request_metadata() -> None:
     if command not in KNOWN_COMMANDS:
         command = "unknown"
 
+    show_id = request.args.get("showId") or request.form.get("showId")
     current_app.logger.info(
-        "request source=%s method=%s path=%s command=%s fields=%s",
+        "request source=%s method=%s path=%s command=%s showId=%s fields=%s",
         request.remote_addr,
         request.method,
         request.path,
         command,
+        show_id or "",
         ",".join(fields),
     )
 
