@@ -1232,6 +1232,16 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_explore_list_rows_match_client_fields(tmp_path: Path):
+    # ExploreMapListUI.as:200-260 needs world/explore_ap/max_explore_ap and rows
+    # carrying code,id,terrain,star,max_days; ttype selects the world.
+    database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"ExpT")
+    command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":98,"uid":uid,"ttype":1}))
+    assert command==98 and payload["world"]==1 and "explore_ap" in payload
+    row=payload["list"][0]
+    assert all(k in row for k in ("code","id","terrain","star","max_days"))
+
+
 def test_hunt_task_response_carries_id_for_fight_buttons(tmp_path: Path):
     # MainUI.as:120-122 feeds the showId=5 *response* into HunterTaskUI.data, and
     # HunterTaskUI.as:271/284 sends `data.id` for HUNT_KEY(6)/CATCH_KEY(7).

@@ -1230,10 +1230,13 @@ LOCAL_HUNT_MAPS = {
     3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 2},
     101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 2},
 }
+# terrain/star/needsComeFrom exploreMap.txt columns `terrain`/`star`/`needExploreMap`.
+# `star` is a "1500:1000:700:500" band string in the client table; the explore
+# list only passes it through, so keep it as shipped.
 LOCAL_EXPLORE_MAPS = {
-    1: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
-    2: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
-    101: {"world": 2, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+    1: {"world": 1, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+    2: {"world": 1, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+    101: {"world": 2, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
 }
 
 
@@ -1405,10 +1408,16 @@ def _explore_start(database_path: Path) -> Response:
 
 def _explore_list(database_path: Path) -> Response:
     uid=_request_value("uid")
+    try: world=int(_request_value("ttype","1"))
+    except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
-    return _protocol_response(98,{"world":1,"explore_ap":0,"max_explore_ap":0,"list":[{"id":k,"world":v["world"],"name":"探索地图"} for k,v in LOCAL_EXPLORE_MAPS.items()]})
+    # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
+    # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
+    rows=[{"index":k,"code":k,"id":k,"terrain":v["terrain"],"star":v["star"],"max_days":v["max_days"]}
+          for k,v in LOCAL_EXPLORE_MAPS.items() if v["world"]==world]
+    return _protocol_response(98,{"world":world,"explore_ap":0,"max_explore_ap":0,"list":rows})
 
 
 def _explore_detail(database_path: Path) -> Response:
