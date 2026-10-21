@@ -515,8 +515,8 @@ def test_equipment_detail_returns_the_persisted_equipment(tmp_path: Path):
     assert payload["mag_att"] == 20
     assert payload["phy_def"] == 0
     assert payload["mag_def"] == 0
-    # Positive money hides the not-yet-implemented sell button (local gate).
-    assert payload["money"] > 0
+    # EquipInfoUI shows the sell button only when `money` is 0; 68/69 are implemented.
+    assert payload["money"] == 0
 
 
 def test_equipment_detail_rejects_non_equipment_and_other_players(tmp_path: Path):
@@ -931,6 +931,146 @@ def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
         )
     )[1]
     assert bag["max_bag_size"] == 103
+
+
+def _equipment_index(client, uid: str) -> int:
+    detail = client.post(
+        "/flash.do", data={"m": "show", "showId": "22", "uid": uid, "ttype": "3", "p": "1", "n": "9"}
+    )
+    rows = json.loads(detail.get_data(as_text=True).split("\t", 1)[1])["goods_list"]
+    return rows[0]["index"]
+
+
+def test_equipment_detail_enables_sell_and_equip_persists(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqWear")
+    index = _equipment_index(client, uid)
+
+    detail = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "39", "uid": uid, "index": str(index), "ttype": "3"},
+        )
+    )[1]
+    # EquipInfoUI only renders the sell button when `money` is 0.
+    assert detail["money"] == 0
+
+    worn = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "37", "uid": uid, "index": str(index)},
+    )
+    assert _envelope(worn) == (37, {"value": "ok"})
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT equipped FROM inventory WHERE id = ?", (index,)
+        ).fetchone()[0] == 1
+
+
+def test_sale_info_and_sale_goods_pay_silver_and_delete_row(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqSell")
+    index = _equipment_index(client, uid)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET point = 0 WHERE uid = ?", (uid,))
+
+    info = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "68", "uid": uid, "index": str(index), "ttype": "3"},
+    )
+    assert _envelope(info) == (
+        68,
+        {"sold_price": 100, "sold_goods_id": 0, "sold_goods_num": 0},
+    )
+
+    sold = client.post(
+        "/flash.do",
+        data={
+            "m": "show",
+            "showId": "69",
+            "uid": uid,
+            "index": str(index),
+            "count": "1",
+            "ttype": "3",
+        },
+    )
+    assert _envelope(sold) == (
+        69,
+        {"price_point": 100, "price_goods_id": 0, "price_goods_num": 0},
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == 100
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE id = ?", (index,)
+        ).fetchone()[0] == 0
+
+
+def test_sale_goods_rejects_wrong_count_team_and_unknown_item(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqSellB")
+    index = _equipment_index(client, uid)
+
+    too_many = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "69", "uid": uid, "index": str(index), "count": "2", "ttype": "3"},
+    )
+    wrong_team = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "69", "uid": uid, "index": str(index), "count": "1", "ttype": "1"},
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)
+            SELECT id, 99999, 2, 1, 99999, 0, 0 FROM players WHERE uid = ?
+            """,
+            (uid,),
+        )
+        unknown_id = connection.execute(
+            "SELECT id FROM inventory WHERE item_id = 99999"
+        ).fetchone()[0]
+
+    unknown = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "68", "uid": uid, "index": str(unknown_id), "ttype": "2"},
+    )
+
+    assert too_many.get_data(as_text=True) == "-1:206"
+    assert wrong_team.get_data(as_text=True) == "-1:400"
+    assert unknown.get_data(as_text=True) == "-1:400"
+
+
+def test_sale_goods_sells_stack_partially(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqSellSt")
+    _set_currency(client, database, uid, money=1000)
+    index = _buy(client, uid, 10007, 3, 1)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE inventory SET team = 2 WHERE id = ?", (index,)
+        )
+        connection.execute("UPDATE players SET point = 0 WHERE uid = ?", (uid,))
+
+    sold = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "69", "uid": uid, "index": str(index), "count": "2", "ttype": "2"},
+    )
+    assert _envelope(sold) == (
+        69,
+        {"price_point": 80, "price_goods_id": 0, "price_goods_num": 0},
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT quantity FROM inventory WHERE id = ?", (index,)
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == 80
 
 
 def _create_local_player(client, nick: str) -> str:

@@ -96,10 +96,18 @@ LOCAL_SHOP_GOODS = (
 # remainder is kept in pets.exp. Evolution gates then read the new level.
 LOCAL_PET_EXP_PER_LEVEL = 1000000
 LOCAL_MAX_PET_LEVEL = 99
-# EquipInfoUI hides the sell button when the detail's `money` field is positive
-# (EquipInfoUI.as:191). Selling (68/69) is not implemented yet, so this local value
-# keeps the unsupported button hidden. The original meaning of `money` is unknown.
-LOCAL_EQUIP_SELL_HIDDEN_MONEY = 1
+# Local sell prices for commands 68 (preview) and 69 (execute). The bundled
+# configs carry `recyclePoint = 0` for every local item, so the original sell
+# value is not recoverable; these defaults are half the item's reference price
+# (equip 20001 has point=200, so it sells for 100 silver). Items not listed here
+# cannot be sold and return the client's 物品不存在 error.
+LOCAL_SELL_PRICES = {
+    20001: 100,
+    10007: 40,
+    10002: 180,
+    10014: 100,
+    10022: 250,
+}
 
 
 def _remote_address_allowed(remote_addr: str | None, networks: list[str]) -> bool:
@@ -660,8 +668,9 @@ def _player_equipment_detail(database_path: Path) -> Response:
     return _protocol_response(
         39,
         {
-            # Positive value hides the unsupported sell button (see constant note).
-            "money": LOCAL_EQUIP_SELL_HIDDEN_MONEY,
+            # EquipInfoUI shows the sell button only when `money` is 0
+            # (EquipInfoUI.as:191); 68/69 are implemented, so the button is enabled.
+            "money": 0,
             "index": row["index"],
             "id": row["id"],
             "icon": row["icon"],
@@ -937,6 +946,127 @@ def _player_use_goods(database_path: Path) -> Response:
         ).fetchone()["ht_ap"]
     payload["ht_ap"] = ht_ap
     return _protocol_response(50, payload)
+
+
+def _inventory_row(
+    connection: sqlite3.Connection, player_id: int, item_index: int
+):
+    return connection.execute(
+        """
+        SELECT id, item_id, team, quantity, item_type, icon
+        FROM inventory WHERE id = ? AND player_id = ?
+        """,
+        (item_index, player_id),
+    ).fetchone()
+
+
+def _sale_price(item_id: int) -> int | None:
+    return LOCAL_SELL_PRICES.get(item_id)
+
+
+def _player_on_equip(database_path: Path) -> Response:
+    """ON_EQUIP (37): wear the equipment row. The client leaves for the main map
+    immediately and never reads the body, but the worn state must persist."""
+    uid = _request_value("uid")
+    try:
+        item_index = int(_request_value("index", ""))
+    except ValueError:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _inventory_row(connection, player["id"], item_index)
+        if row is None or row["team"] != 3:
+            return _pet_error(400)
+        # One worn item per slot; equipment slot is the local `item_type` value.
+        connection.execute(
+            """
+            UPDATE inventory SET equipped = 0
+            WHERE player_id = ? AND team = 3 AND item_type = ? AND id <> ?
+            """,
+            (player["id"], row["item_type"], row["id"]),
+        )
+        connection.execute(
+            "UPDATE inventory SET equipped = 1 WHERE id = ?", (row["id"],)
+        )
+    return _protocol_response(37, {"value": "ok"})
+
+
+def _player_sale_info(database_path: Path) -> Response:
+    """SALE_INFO (68): EquipInfoUI asks for the silver value before confirming."""
+    uid = _request_value("uid")
+    try:
+        item_index = int(_request_value("index", ""))
+        ttype = int(_request_value("ttype", "3"))
+    except ValueError:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _inventory_row(connection, player["id"], item_index)
+    if row is None or row["team"] != ttype:
+        return _pet_error(400)
+    price = _sale_price(row["item_id"])
+    if price is None:
+        return _pet_error(400)
+    return _protocol_response(
+        68, {"sold_price": price, "sold_goods_id": 0, "sold_goods_num": 0}
+    )
+
+
+def _player_sale_goods(database_path: Path) -> Response:
+    """SALE_GOODS (69): consume `count` units and pay `price * count` silver."""
+    uid = _request_value("uid")
+    try:
+        item_index = int(_request_value("index", ""))
+        count = int(_request_value("count", "1"))
+        ttype = int(_request_value("ttype", ""))
+    except ValueError:
+        return _pet_error(100)
+    if not 1 <= count <= 99:
+        return _pet_error(206)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _inventory_row(connection, player["id"], item_index)
+        if row is None or row["team"] != ttype:
+            return _pet_error(400)
+        price = _sale_price(row["item_id"])
+        if price is None:
+            return _pet_error(400)
+        if count > row["quantity"]:
+            return _pet_error(206)
+        connection.execute(
+            "UPDATE players SET point = point + ? WHERE id = ?",
+            (price * count, player["id"]),
+        )
+        if count == row["quantity"]:
+            connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+        else:
+            connection.execute(
+                "UPDATE inventory SET quantity = quantity - ? WHERE id = ?",
+                (count, row["id"]),
+            )
+    return _protocol_response(
+        69,
+        {
+            "price_point": price * count,
+            "price_goods_id": 0,
+            "price_goods_num": 0,
+        },
+    )
 
 
 def _pet_error(error_id: int, status: int = 200) -> Response:
@@ -1297,6 +1427,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _shop_buy(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "50":
             return _player_use_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "37":
+            return _player_on_equip(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "68":
+            return _player_sale_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "69":
+            return _player_sale_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":
