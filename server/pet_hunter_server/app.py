@@ -1069,6 +1069,18 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
+def _function_flags(database_path: Path) -> Response:
+    """REQUEST_FUNCTION_KEY (502).
+
+    MainUI stores `GameUtil.fun_key = param2.value` (MainUI.as:80-83) and calls
+    this right after every TASK_INFO (46) response, so a 501 here breaks the task
+    screen on device. In this exported source `GameUtil.isFunKey()` returns true
+    unconditionally (GameUtil.as:176-179) and `fun_key` has no reader, so the
+    value is never consulted; "" is returned as a LOCAL DEFAULT.
+    """
+    return _protocol_response(502, {"value": ""})
+
+
 def _pet_error(error_id: int, status: int = 200) -> Response:
     """Client-recognised protocol error (`-1:<error.txt key>`).
 
@@ -1433,6 +1445,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_info(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "69":
             return _player_sale_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "502":
+            return _function_flags(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":

@@ -1073,6 +1073,18 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_function_flags_returns_a_parseable_envelope(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+
+    response = client.post("/flash.do", data={"m": "show", "showId": "502"})
+
+    command, payload = _envelope(response)
+    assert command == 502
+    assert payload == {"value": ""}
+
+
 def _create_local_player(client, nick: str) -> str:
     created = client.post(
         "/flash.do", data={"m": "autoReg", "nick": nick, "sex": "1"}
