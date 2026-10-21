@@ -1350,6 +1350,32 @@ def _training_action(database_path: Path) -> Response:
     return _protocol_response(10,{"pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,"add_hp_tp":1 if ttype==1 else 0,"add_phy_att_tp":1 if ttype==2 else 0,"add_mag_att_tp":1 if ttype==3 else 0,"add_speed_tp":0,"add_phy_def_tp":0,"add_mag_def_tp":0,"add_energy":0})
 
 
+def _forge_refine(database_path: Path) -> Response:
+    try: idx=int(_request_value("index",""))
+    except ValueError: return _pet_error(100)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?",(uid,)).fetchone(); row=c.execute("SELECT * FROM inventory WHERE id=? AND player_id=? AND team=3",(idx,p["id"] if p else 0)).fetchone()
+        if p is None: return _pet_error(103)
+        if row is None: return _pet_error(400)
+        next_level=row["level"]+1
+        payload={"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"],"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":100,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":0,"own_crystal":p["crystal"],"need_goods":[],"next_refine":{"level":next_level,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"]+5,"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"refine_add_skill_level":0}}
+    return _protocol_response(35,payload)
+
+
+def _forge_enchant(database_path: Path) -> Response:
+    try: idx=int(_request_value("index",""))
+    except ValueError: return _pet_error(100)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?",(uid,)).fetchone(); row=c.execute("SELECT * FROM inventory WHERE id=? AND player_id=? AND team=3",(idx,p["id"] if p else 0)).fetchone()
+        if p is None: return _pet_error(103)
+        if row is None: return _pet_error(400)
+        if p["crystal"] < 10: return _pet_error(405)
+        c.execute("UPDATE players SET crystal=crystal-10 WHERE id=?",(p["id"],)); c.execute("UPDATE inventory SET pro=pro+1 WHERE id=?",(idx,))
+    return _protocol_response(36,{"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"]+1,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":0,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":10,"own_crystal":p["crystal"]})
+
+
 def _forge_list(database_path: Path) -> Response:
     try: ttype = int(_request_value("ttype", "1")); page = int(_request_value("p", "1")); size = int(_request_value("n", "9"))
     except ValueError: return _pet_error(100)
@@ -2239,6 +2265,10 @@ def create_app(config: dict | None = None) -> Flask:
             return _training_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "10":
             return _training_action(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "35":
+            return _forge_refine(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "36":
+            return _forge_enchant(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "32":
             return _forge_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "33":
