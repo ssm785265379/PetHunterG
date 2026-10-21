@@ -270,6 +270,12 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN bag_capacity INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_BAG_CAPACITY}"
             )
+        if "cur_explore_map" not in player_columns:
+            # ExploreMapInfoUI.as:204 sends EXPLORE_KEY(103) with no gid at all, so
+            # the server has to remember the map the player opened with 99.
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN cur_explore_map INTEGER"
+            )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -1393,16 +1399,22 @@ def _hunter_catch(database_path: Path) -> Response:
 
 
 def _explore_start(database_path: Path) -> Response:
-    try: gid=int(_request_value("gid",""))
-    except ValueError: return _pet_error(100)
-    if gid not in LOCAL_EXPLORE_MAPS: return _pet_error(400)
+    # ExploreMapInfoUI.as:204 and ExplorePveUI.as:698 send EXPLORE_KEY with no gid,
+    # so fall back to the map the player opened through showId=99.
+    gid_value=_request_value("gid")
     uid=_request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,point,money,cur_explore_map FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
+        if gid_value:
+            try: gid=int(gid_value)
+            except ValueError: return _pet_error(100)
+        else:
+            gid=p["cur_explore_map"]
+        if gid not in LOCAL_EXPLORE_MAPS: return _pet_error(400)
         m=LOCAL_EXPLORE_MAPS[gid]
         if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
-        c.execute("UPDATE players SET point=point-?,money=money-? WHERE id=?",(m["cost_point"],m["cost_money"],p["id"]))
+        c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=? WHERE id=?",(m["cost_point"],m["cost_money"],gid,p["id"]))
     return _protocol_response(103,{"value":"ok","event_type":0,"world":1,"world_id":gid,"is_finish":1,"explore_ap":0,"max_explore_ap":0,"now_discover_rate":0,"add_discover_rate":0,"need_discover_rate":0,"energy":0,"cost_energy":0,"add_energy":0,"supply":0,"cost_supply":0,"add_supply":0,"discover_days":0,"add_discover_days":0,"terrain":0})
 
 
@@ -1427,8 +1439,10 @@ def _explore_detail(database_path: Path) -> Response:
     if m is None: return _pet_error(400)
     uid=_request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
+        # Remember the map so the follow-up 103, which carries no gid, can use it.
+        c.execute("UPDATE players SET cur_explore_map=? WHERE id=?",(gid,p["id"]))
     return _protocol_response(99,{"id":gid,"world":m["world"],"cost_point":m["cost_point"],"own_point":p["point"],"cost_money":m["cost_money"],"own_money":p["money"],"disaster":m["disaster"],"is_catch":m["is_catch"]})
 
 

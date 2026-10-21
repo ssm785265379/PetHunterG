@@ -1232,6 +1232,16 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_explore_start_remembers_map_from_detail(tmp_path: Path):
+    # ExploreMapInfoUI.as:204 sends EXPLORE_KEY(103) with no gid, so 99 has to
+    # persist the chosen map for the follow-up request.
+    database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"ExpStart")
+    command,_=_envelope(client.post("/flash.do",data={"m":"show","showId":99,"uid":uid,"gid":2}))
+    assert command==99
+    command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":103,"uid":uid}))
+    assert command==103 and payload["world_id"]==2 and payload["value"]=="ok"
+
+
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
     # ExploreMapListUI.as:200-260 needs world/explore_ap/max_explore_ap and rows
     # carrying code,id,terrain,star,max_days; ttype selects the world.
