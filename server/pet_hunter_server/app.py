@@ -146,7 +146,11 @@ LOCAL_TASKS = (
 )
 # TaskTrackUI draws every tracked row with no paging (TaskTrackUI.as:45-47), so
 # the tracker is capped (LOCAL DEFAULT) to keep the panel readable.
-LOCAL_TASK_TRACKER_LIMIT = 6
+# The bundled MainUI places TaskTrackUI over the left-side home controls. The
+# client has no scrolling in TaskTrackUI, and each row is 100 logical pixels
+# tall; showing the full local catalogue obscures the friend/home buttons.
+# LOCAL DEFAULT: expose one current task at a time.
+LOCAL_TASK_TRACKER_LIMIT = 1
 # Prop ids used as quest rewards; 10011/10014 are absent from LOCAL_PROP_CATALOG,
 # so their use_type/item_type are declared here to keep rewards clickable.
 LOCAL_TASK_REWARD_PROPS = {

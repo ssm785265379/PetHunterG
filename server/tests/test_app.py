@@ -389,13 +389,11 @@ def test_task_list_offers_seeded_quests_with_live_progress(tmp_path: Path):
 
     assert command == 511
     rows = {row["id"]: row["is_finish"] for row in payload["list"]}
-    # Type 0 has no condition, so it is finished immediately; the money-gated
-    # quest is not, because a new account starts with no silver.
+    # LOCAL DEFAULT: the tracker exposes only the first current task so its
+    # fixed, non-scrolling UI cannot cover the left-side home controls.
+    assert list(rows) == [1]
     assert rows[1] == 1
-    assert rows[1501] == 0
-    # Task 6 needs equip 20001 worn; the starter equipment is unequipped.
-    assert rows[6] == 0
-    assert len(payload["list"]) <= 6
+    assert len(payload["list"]) == 1
 
 
 def test_task_info_returns_icon_rewards_and_live_finish_flag(tmp_path: Path):
