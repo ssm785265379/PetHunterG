@@ -1217,6 +1217,50 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
+def _training_overview(database_path: Path) -> Response:
+    return _protocol_response(504, {"list": [], "value": "ok"})
+
+
+def _training_list(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    try: page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError: return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None: return _pet_error(103)
+        rows = c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 ORDER BY id", (player["id"],)).fetchall()
+    start=max(0,page-1)*size
+    return _protocol_response(505, {"list": [{"index":r["index"],"id":r["id"],"icon":r["icon"],"name":r["name"],"lv":r["lv"],"num":0,"energy":0} for r in rows[start:start+size]]})
+
+
+def _training_detail(database_path: Path) -> Response:
+    uid=_request_value("uid"); idx=_pet_index_from_request()
+    if idx is None: return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player,row=_find_player_pet(c,uid,idx)
+        if player is None: return _pet_error(103)
+        if row is None: return _pet_error(506)
+        total=sum(row[k] for k in ("pro_hp","pro_speed","pro_phy_att","pro_mag_att","pro_phy_def","pro_mag_def"))
+        payload={"index":idx,"id":row["pet_id"],"icon":row["icon"],"total_tp":total,"energy":0,"hp_tp":row["pro_hp"],"speed_tp":row["pro_speed"],"phy_att_tp":row["pro_phy_att"],"mag_att_tp":row["pro_mag_att"],"phy_def_tp":row["pro_phy_def"],"mag_def_tp":row["pro_mag_def"]}
+    return _protocol_response(9,payload)
+
+
+def _training_action(database_path: Path) -> Response:
+    uid=_request_value("uid"); idx=_pet_index_from_request()
+    try: ttype=int(_request_value("ttype",""))
+    except ValueError: return _pet_error(100)
+    if idx is None or ttype not in (1,2,3): return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player,row=_find_player_pet(c,uid,idx)
+        if player is None: return _pet_error(103)
+        if row is None: return _pet_error(506)
+        if row["is_locked"]: return _pet_error(100)
+        target={1:"pro_hp",2:"pro_phy_att",3:"pro_mag_att"}[ttype]
+        c.execute(f"UPDATE pets SET {target}={target}+1 WHERE id=?",(idx,))
+        pet={"id":row["pet_id"],"icon":row["icon"],"name":row["name"]}
+    return _protocol_response(10,{"pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,"add_hp_tp":1 if ttype==1 else 0,"add_phy_att_tp":1 if ttype==2 else 0,"add_mag_att_tp":1 if ttype==3 else 0,"add_speed_tp":0,"add_phy_def_tp":0,"add_mag_def_tp":0,"add_energy":0})
+
+
 def _forge_list(database_path: Path) -> Response:
     try: ttype = int(_request_value("ttype", "1")); page = int(_request_value("p", "1")); size = int(_request_value("n", "9"))
     except ValueError: return _pet_error(100)
@@ -1682,7 +1726,7 @@ def _player_pet_full_detail(database_path: Path) -> Response:
         if row is None: return _pet_error(506)
         stats = LOCAL_PET_BASE_STATS.get(row["pet_id"], LOCAL_PET_BASE_STATS[1001])
         skills = _skill_rows(row["skills"])
-        payload = {"index": row["index"], "id": row["pet_id"], "icon": row["icon"], "star": row["star"], "lv": row["lv"], "pro": row["pro"], "nature": row["nature"], "generation": 1, "skills": skills, "buffs": [], "hp": stats["hp"], "speed": stats["speed"], "phy_att": stats["phy_att"], "mag_att": stats["mag_att"], "phy_def": stats["phy_def"], "mag_def": stats["mag_def"], "hp_tp": 0, "speed_tp": 0, "phy_att_tp": 0, "mag_att_tp": 0, "phy_def_tp": 0, "mag_def_tp": 0, "hp_gw": row["gw_hp"], "speed_gw": row["gw_speed"], "phy_att_gw": row["gw_phy_att"], "mag_att_gw": row["gw_mag_att"], "phy_def_gw": row["gw_phy_def"], "mag_def_gw": row["gw_mag_def"], "total_gw": sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def")), "gw_rate": 1}
+        payload = {"index": row["index"], "id": row["pet_id"], "icon": row["icon"], "star": row["star"], "lv": row["lv"], "pro": row["pro"], "nature": row["nature"], "generation": row["generation"], "skills": skills, "buffs": [{"id": int(x)} for x in (row["buffs"] or "").split(":") if x.isdigit()], "hp": stats["hp"], "speed": stats["speed"], "phy_att": stats["phy_att"], "mag_att": stats["mag_att"], "phy_def": stats["phy_def"], "mag_def": stats["mag_def"], "hp_tp": 0, "speed_tp": 0, "phy_att_tp": 0, "mag_att_tp": 0, "phy_def_tp": 0, "mag_def_tp": 0, "hp_gw": row["gw_hp"], "speed_gw": row["gw_speed"], "phy_att_gw": row["gw_phy_att"], "mag_att_gw": row["gw_mag_att"], "phy_def_gw": row["gw_phy_def"], "mag_def_gw": row["gw_mag_def"], "total_gw": sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def")), "gw_rate": 1}
     return _protocol_response(13, payload)
 
 
@@ -2084,6 +2128,14 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_info(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "69":
             return _player_sale_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "504":
+            return _training_overview(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "505":
+            return _training_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "9":
+            return _training_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "10":
+            return _training_action(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "32":
             return _forge_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "33":
