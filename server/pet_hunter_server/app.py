@@ -752,9 +752,18 @@ ROLE_BASE_STATS = {
     "phy_def": 10,
     "mag_def": 10,
 }
-# The body layer every role wears. 100001 is the first id in skin.txt and its
-# `s100001` class is what ShowItem instantiates under the equipment layers.
-LOCAL_BASE_SKIN_LAYER = 100001
+# The bare character is THREE layers, not one. CreateUI.as:366-378 builds the
+# default skin as "100001_100002_100003" (male) / "100001_100004_100005" (female):
+# body + head + hair. Sending only 100001 drew a headless hunter, because no other
+# layer supplies the head — skin.txt has no separate head id outside these triples.
+LOCAL_BASE_SKIN_LAYERS = {
+    1: (100001, 100002, 100003),
+    2: (100001, 100004, 100005),
+}
+
+
+def _base_skin_layers(sex: int) -> tuple[int, ...]:
+    return LOCAL_BASE_SKIN_LAYERS.get(int(sex or 1) or 1, LOCAL_BASE_SKIN_LAYERS[1])
 
 
 def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int, sqlite3.Row]:
@@ -777,15 +786,18 @@ def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int,
     return worn
 
 
-def _role_skin_string(worn: dict[int, sqlite3.Row]) -> str:
+def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     """Build the ShowItem layer string.
 
-    ShowItem.as:41 splits on "_", looks each id up in skin.txt for its `z`, then
-    instantiates `s<id>`. A missing layer raises, so only ship ids present in the
-    bundled skin table. The body layer goes first; the rest are sorted by z.
+    ShowItem.as:41-59 splits on "_", keeps only ids present in skin.txt and
+    silently drops the rest, then :71 sorts by z DESCENDING and adds in that
+    order — so the lowest z paints last, i.e. on top.
+
+    The bare character needs its head and hair layers (CreateUI.as:366-378);
+    omitting them is what produced a headless hunter in battle.
     """
     skin = config_tables.skin_table()
-    layers: list[int] = [LOCAL_BASE_SKIN_LAYER]
+    layers: list[int] = [lid for lid in _base_skin_layers(sex) if lid in skin]
     for row in worn.values():
         record = config_tables.equip_record(row["item_id"])
         if not record:
@@ -793,7 +805,8 @@ def _role_skin_string(worn: dict[int, sqlite3.Row]) -> str:
         image_id = config_tables.equip_image_id(record)
         if image_id and image_id in skin and image_id not in layers:
             layers.append(image_id)
-    layers.sort(key=lambda lid: int(skin.get(lid, {}).get("z", "0") or 0))
+    # Match the client: highest z first (bottom), lowest z last (top).
+    layers.sort(key=lambda lid: int(skin.get(lid, {}).get("z", "0") or 0), reverse=True)
     return "_".join(str(lid) for lid in layers)
 
 
@@ -826,7 +839,7 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
     with _connect_database(database_path) as connection:
         player = connection.execute(
             """
-            SELECT id, nick AS name, lv, img, money, point, crystal,
+            SELECT id, nick AS name, lv, sex, img, money, point, crystal,
                    ht_ap, max_ht_ap, arena_ap, max_arena_ap
             FROM players WHERE uid = ?
             """,
@@ -844,7 +857,7 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
         # string) were all missing, which is why the panel printed `undefined`
         # and why worn gear never showed up on the character.
         payload.update(_role_stats(worn))
-        payload["img"] = _role_skin_string(worn)
+        payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
         payload["pic_num"] = pic_num
         payload["skills"] = []
         payload["buffs"] = []
@@ -1454,7 +1467,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # slots that RoleInfoUI.as:150-172 prints without any null guards.
     target=_request_value("gid") or _request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,uid,nick,lv FROM players WHERE uid=?",(target,)).fetchone()
+        p=c.execute("SELECT id,uid,nick,lv,sex FROM players WHERE uid=?",(target,)).fetchone()
         if p is None:return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=?",(p["id"],)).fetchall()
         worn=_worn_equipment(c,p["id"])
@@ -1465,7 +1478,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # FriendInfoUI and KingFightInfoUI read param2.player for the same command,
     # so both shapes are shipped.
     player_fields={"id":p["uid"],"name":p["nick"],"lv":p["lv"],
-                   "img":_role_skin_string(worn),
+                   "img":_role_skin_string(worn,p["sex"]),
                    "job":1,"guild_name":"0","guild_position":0,
                    "arena_rank":0,"pic_num":pic_num,
                    **_role_stats(worn), **slots,
@@ -1644,7 +1657,7 @@ def _hunter_fight(database_path: Path) -> Response:
     monsters=_monsters_for_map(hid)
     if not monsters: return _pet_error(400)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,nick,lv,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,nick,lv,sex,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
@@ -1658,22 +1671,73 @@ def _hunter_fight(database_path: Path) -> Response:
 
     # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
     att_list, def_list = _battle_side(
-        hunter_skin=_role_skin_string(worn),
+        hunter_skin=_role_skin_string(worn,p["sex"]),
         hunter_name=p["nick"] or "猎人",
         hunter_lv=p["lv"] or 1,
         pet_rows=rows,
         defenders=monsters,
     )
     record=_battle_record(att_list, def_list)
+    pic=_pic_entries(monsters)
     return _protocol_response(6,{
         "is_win":1,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
-        "rage_point":0,"finish_rate":100,"pic":[],
+        "rage_point":0,"finish_rate":100,"pic":pic,
         "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
         "reward_rate":1,"reward_goods":[],
         "value":"ok",
     })
+
+
+def _pic_entries(monsters) -> list[dict]:
+    """Picture-book entries for the monsters a hunt just defeated.
+
+    GetPicItem.as:170-197 instantiates `p<icon>` and then resolves the display
+    name through pic.txt -> pet.txt -> prop.txt -> exploreEquip.txt, dereferencing
+    the record without a null guard. So both fields have to resolve for real:
+
+    * `icon` must name an existing `p<icon>` symbol,
+    * `id` must exist in one of those four tables.
+
+    In the shipped data monster.txt's `iconId` is exactly that id (monster 1
+    "原味波利" has iconId 5001, pet 5001 is the same creature and `p5001` lives in
+    pet6000.swf), so it drives both fields.
+
+    LOCAL DEFAULT: the per-pic rewards come from pic.txt when the entry exists;
+    otherwise a level-scaled point payout is used because the original drop table
+    is not recoverable.
+    """
+    pics = config_tables._table("pic.txt")
+    pets = config_tables._table("pet.txt")
+    entries: list[dict] = []
+    seen: set[int] = set()
+    for monster in monsters:
+        try:
+            pid = int(str(monster["icon"]).strip())
+        except (KeyError, TypeError, ValueError):
+            continue
+        if pid in seen:
+            continue
+        seen.add(pid)
+        record = pics.get(pid)
+        if record is not None:
+            point = int(str(record.get("rewardPoint", "0")).strip() or 0)
+            crystal = int(str(record.get("rewardCrystal", "0")).strip() or 0)
+            goods = [
+                {"id": gid, "num": num}
+                for gid, num in _reward_goods_ids(str(record.get("rewardGoods", "") or ""))
+            ]
+        else:
+            level = int(monster["lv"] or 1) if "lv" in monster.keys() else 1
+            point, crystal, goods = 10 * level, 0, []
+        if pid not in pics and pid not in pets:
+            continue  # name lookup would return null and throw in GetPicItem
+        entries.append({
+            "id": pid, "icon": pid,
+            "reward_point": point, "reward_crystal": crystal, "reward_goods": goods,
+        })
+    return entries
 
 
 def _hunter_catch(database_path: Path) -> Response:
@@ -2172,7 +2236,7 @@ def _fight_payload(database_path: Path, defenders):
     """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record)."""
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        p = c.execute("SELECT id,nick,lv FROM players WHERE uid=?", (uid,)).fetchone()
+        p = c.execute("SELECT id,nick,lv,sex FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
             return None
         worn = _worn_equipment(c, p["id"])
@@ -2184,7 +2248,7 @@ def _fight_payload(database_path: Path, defenders):
             (p["id"],),
         ).fetchall()
     att_list, def_list = _battle_side(
-        hunter_skin=_role_skin_string(worn),
+        hunter_skin=_role_skin_string(worn,p["sex"]),
         hunter_name=p["nick"] or "猎人",
         hunter_lv=p["lv"] or 1,
         pet_rows=rows,

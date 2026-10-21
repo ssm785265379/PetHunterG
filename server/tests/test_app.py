@@ -583,9 +583,12 @@ def test_home_profile_reads_saved_player_and_survives_restart(tmp_path: Path):
     assert home["guild_name"] == ""
     assert home["guild_position"] == 0
     assert home["arena_rank"] == 0
-    # `img` is the paper-doll layer string ShowItem splits on "_" (ShowItem.as:41);
-    # with nothing equipped only the base body layer is present.
-    assert home["img"] == "100001"
+    # `img` is the paper-doll layer string ShowItem splits on "_" (ShowItem.as:41).
+    # With nothing equipped it is still three layers: CreateUI.as:366-378 defines
+    # the bare character as body + head + hair, and dropping the last two is what
+    # made the hunter render headless in battle.
+    assert home["img"] == "100001_100003_100002", home["img"]
+    assert set(home["img"].split("_")) >= {"100001", "100002", "100003"}
     for key in ("hp", "phy_att", "mag_att", "phy_def", "mag_def", "speed"):
         assert isinstance(home[key], int)
 
@@ -1619,6 +1622,74 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
     assert command == 42 and picker["list"]
     for row in picker["list"]:
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
+
+
+def test_hunt_result_fills_the_picture_book_panel(tmp_path: Path):
+    # HunterResultUI.as:259-261 hands param2.pic to GameUtil.getPic, which builds a
+    # GetPicItem per entry. GetPicItem.as:170-197 instantiates `p<icon>` and then
+    # resolves the name via pic.txt -> pet.txt -> prop.txt -> exploreEquip.txt,
+    # dereferencing the record with no null guard. An empty list left the
+    # 【获得图鉴】/【图鉴奖励】 panels blank; a bad id would throw.
+    from pet_hunter_server.app import _monster_table, _pick_monster
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1})
+    )
+    assert command == 6
+    pic = payload["pic"]
+    assert pic, "the picture-book panel needs at least one entry"
+
+    pics = config_tables._table("pic.txt")
+    pets = config_tables._table("pet.txt")
+    for entry in pic:
+        assert entry["id"] == entry["icon"]
+        # The display name must resolve, or GetPicItem throws on a null record.
+        assert entry["id"] in pics or entry["id"] in pets
+        assert isinstance(entry["reward_point"], int)
+        assert isinstance(entry["reward_goods"], list)
+
+    # The entries must correspond to the monsters actually fought.
+    expected = {
+        int(m["icon"]) for m in (_pick_monster(i) for i in sorted(int(k) for k in _monster_table())) if m
+    }
+    assert {entry["id"] for entry in pic} <= expected
+
+
+def test_skin_string_carries_the_head_and_hair_layers(tmp_path: Path):
+    # ShowItem.as:41-59 keeps only ids present in skin.txt (silently dropping the
+    # rest) and :71 sorts by z DESCENDING, so the lowest z paints last / on top.
+    # The bare character is three layers — CreateUI.as:366-378 uses
+    # "100001_100002_100003" (male) and "100001_100004_100005" (female).
+    # Shipping only 100001 drew a body with no head, which is the reported
+    # "进入狩猎没有人物头部图片" bug.
+    from pet_hunter_server.app import _base_skin_layers
+
+    skin = config_tables.skin_table()
+    for sex, expected in ((1, (100001, 100002, 100003)), (2, (100001, 100004, 100005))):
+        layers = _base_skin_layers(sex)
+        assert layers == expected
+        assert all(layer in skin for layer in layers), "every base layer must exist in skin.txt"
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "HeadOne")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET sex=2 WHERE uid=?", (uid,))
+        connection.commit()
+
+    command, payload = _envelope(client.post("/flash.do", data={"m": "show", "showId": "2", "uid": uid}))
+    assert command == 2
+    img = payload["img"]
+    ids = [int(part) for part in img.split("_")]
+    assert ids, "img must not be empty"
+    # The female triple must be present, and ordered high-z first so the low-z
+    # head/hair layers end up painted last (on top).
+    assert set(_base_skin_layers(2)) <= set(ids)
+    zs = [int(skin[i]["z"]) for i in ids]
+    assert zs == sorted(zs, reverse=True), f"layers must be high-z first, got {img}"
 
 
 def test_explore_supplies_a_terrain_and_mount_that_exist_in_the_swfs(tmp_path: Path):
