@@ -1597,6 +1597,21 @@ def _player_pets(database_path: Path) -> Response:
     )
 
 
+def _player_pet_full_detail(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    pet_index = _pet_index_from_request()
+    if pet_index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player, row = _find_player_pet(connection, uid, pet_index)
+        if player is None: return _pet_error(103)
+        if row is None: return _pet_error(506)
+        stats = LOCAL_PET_BASE_STATS.get(row["pet_id"], LOCAL_PET_BASE_STATS[1001])
+        skills = _skill_rows(row["skills"])
+        payload = {"index": row["index"], "id": row["pet_id"], "icon": row["icon"], "star": row["star"], "lv": row["lv"], "pro": row["pro"], "nature": row["nature"], "generation": 1, "skills": skills, "buffs": [], "hp": stats["hp"], "speed": stats["speed"], "phy_att": stats["phy_att"], "mag_att": stats["mag_att"], "phy_def": stats["phy_def"], "mag_def": stats["mag_def"], "hp_tp": 0, "speed_tp": 0, "phy_att_tp": 0, "mag_att_tp": 0, "phy_def_tp": 0, "mag_def_tp": 0, "hp_gw": row["gw_hp"], "speed_gw": row["gw_speed"], "phy_att_gw": row["gw_phy_att"], "mag_att_gw": row["gw_mag_att"], "phy_def_gw": row["gw_phy_def"], "mag_def_gw": row["gw_mag_def"], "total_gw": sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def")), "gw_rate": 1}
+    return _protocol_response(13, payload)
+
+
 def _player_pet_detail(database_path: Path) -> Response:
     uid = _request_value("uid")
     pet_index = _pet_index_from_request()
@@ -1948,6 +1963,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":
             return _player_pet_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "13":
+            return _player_pet_full_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "14":
             return _pet_evolve(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "15":
