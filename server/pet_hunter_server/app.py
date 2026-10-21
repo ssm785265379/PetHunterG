@@ -2,6 +2,7 @@ import ipaddress
 import hashlib
 import hmac
 import json
+import random
 import secrets
 import sqlite3
 import time
@@ -1740,24 +1741,84 @@ def _pic_entries(monsters) -> list[dict]:
     return entries
 
 
+def _catchable_pet(hid: int, ttype: int) -> tuple[int, dict] | None:
+    """Which pet a catch attempt on this map can yield.
+
+    HunterTaskUI and ExploreMapInfoUI both send CATCH_KEY; the latter passes
+    ttype=2 and an explore map id in `hid`. The hunt maps name their monster in
+    LOCAL_HUNT_MAPS, and monster.txt's `iconId` is the pet id that shares the
+    same artwork (monster 1 原味波利 -> iconId 5001 -> pet.txt 5001, whose own
+    iconId is also 5001, so `p5001` resolves for the catch screen).
+
+    Returns (pet_id, monster_row) or None when nothing catchable lines up.
+    """
+    pets = config_tables._table("pet.txt")
+    if ttype == 2:
+        if _explore_map_row(hid) is None:
+            return None
+        # LOCAL DEFAULT: exploreMap.txt's catchPet column is 0 on the shipped
+        # maps, so the first catchable monster is used instead.
+        candidates = _monsters_for_map(1)
+    else:
+        entry = LOCAL_HUNT_MAPS.get(hid)
+        if entry is None:
+            return None
+        monster = _pick_monster(int(entry["monster"]))
+        candidates = [monster] if monster else []
+    for monster in candidates:
+        pid = int(str(monster.get("icon", "")).strip() or 0)
+        if pid in pets:
+            return pid, monster
+    return None
+
+
 def _hunter_catch(database_path: Path) -> Response:
+    """7 (CATCH_KEY) — catch a pet.
+
+    HunterCatchUI.as:128-150 reads only index/id/icon/pic and never looks at
+    `is_success`, so the response must always describe a real, renderable pet:
+    `id` is resolved through getConfigValue("pet", id, "name") and `icon` becomes
+    `p<icon>` in Pet.as:121, both without null guards.
+
+    LOCAL DEFAULT: the original per-map catch-rate table is not recoverable, so
+    the attempt succeeds unless the roster is already at pet_capacity.
+    """
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
-    if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
+    try: ttype=int(_request_value("ttype","1") or 1)
+    except ValueError: ttype=1
     uid=_request_value("uid")
+    target=_catchable_pet(hid,ttype)
+    if target is None: return _pet_error(400)
+    pet_id,monster=target
+    pets=config_tables._table("pet.txt")
+    record=pets[pet_id]
+    try: level=max(1,int(str(monster.get("lv",1)).strip() or 1))
+    except ValueError: level=1
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,pet_capacity FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         count=c.execute("SELECT COUNT(*) FROM pets WHERE player_id=?",(p["id"],)).fetchone()[0]
         if count >= p["pet_capacity"]: return _pet_error(300)
-        # HunterCatchUI.as:134-136 reads index/id/icon directly and feeds id into
-        # getConfigValue("pet", ...) with no guard, so a real pet row is needed;
-        # the catch itself stays a LOCAL DEFAULT failure (is_success 0).
-        row=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? ORDER BY id LIMIT 1",(p["id"],)).fetchone()
-        if row is None: return _pet_error(506)
-    return _protocol_response(7,{"value":"ok","is_success":0,"hid":hid,
-        "index":row["index"],"id":row["id"],"icon":row["icon"],
-        "name":_pet_name(row["id"], row["name"]),"lv":row["lv"],"pic":[]})
+        icon=str(record.get("iconId","") or pet_id).strip()
+        star=str(record.get("star","1") or 1).strip()
+        skills=str(record.get("skills","") or "").strip()
+        nature_ids=sorted(config_tables._table("nature.txt").keys()) or [1]
+        cursor=c.execute(
+            """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation, nature)
+               VALUES (?,?,?,?,1,?,?,1,?)""",
+            (p["id"],pet_id,level,int(star) if star.isdigit() else 1,
+             int(icon) if icon.isdigit() else pet_id,
+             skills or "101:5101",
+             random.choice(nature_ids)),
+        )
+        index=cursor.lastrowid
+    return _protocol_response(7,{
+        "value":"ok","is_success":1,"hid":hid,
+        "index":index,"id":pet_id,"icon":int(icon) if icon.isdigit() else pet_id,
+        "name":_pet_name(pet_id), "lv":level,
+        "pic":_pic_entries([monster]),
+    })
 
 
 def _explore_map_table() -> dict:

@@ -1624,6 +1624,66 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
+def test_catching_a_pet_actually_adds_it_to_the_roster(tmp_path: Path):
+    # HunterCatchUI.as:128-150 renders index/id/icon/pic and never inspects
+    # is_success, so a catch must hand back a real pet that already exists in the
+    # database — the previous implementation always returned is_success 0 and
+    # reused the player's first pet, i.e. catching never added anything.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "CatchOne")
+
+    def roster() -> list[dict]:
+        command, payload = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "505", "uid": uid, "p": 1, "n": 50})
+        )
+        assert command == 505
+        return payload["list"]
+
+    before = roster()
+    command, caught = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": 1})
+    )
+    assert command == 7
+    assert caught["is_success"] == 1
+    pets = config_tables._table("pet.txt")
+    assert caught["id"] in pets, "id must resolve through getConfigValue(pet, ...)"
+    assert caught["name"] == pets[caught["id"]]["name"]
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT player_id, pet_id, icon, lv, star FROM pets WHERE id = ?", (caught["index"],)
+        ).fetchone()
+    assert row is not None, "the caught pet must be a real row"
+    assert row[1] == caught["id"] and row[2] == caught["icon"]
+    assert row[3] == caught["lv"] and row[4] >= 1
+
+    after = roster()
+    assert len(after) == len(before) + 1
+    assert caught["index"] in {entry["index"] for entry in after}
+
+    # ...and it has to be usable in battle, which is the point of catching it.
+    command, picked = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid, "index": caught["index"]})
+    )
+    assert command == 44
+
+    # The picture book panel on the catch screen needs the same contract.
+    for entry in caught["pic"]:
+        assert entry["id"] in pets or entry["id"] in config_tables._table("pic.txt")
+
+
+def test_catching_respects_pet_capacity(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "FullOne")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET pet_capacity = 0 WHERE uid = ?", (uid,))
+        connection.commit()
+    response = client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": 1})
+    assert response.get_data(as_text=True) == "-1:300"
+
+
 def test_develop_page_shows_pets_instead_of_star_wands(tmp_path: Path):
     # DevelopUI.as:120-139 renders one DevelopItem per entry in param2.list and
     # DevelopItem.as:173-184 paints `clip_wand` for every slot whose data is null.
