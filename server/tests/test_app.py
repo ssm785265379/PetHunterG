@@ -1232,6 +1232,12 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_pic_and_achievement_readonly_commands(tmp_path: Path):
+    database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"PicT")
+    for sid,data,key in ((25,{"ttype":1,"p":1,"n":9},"pics"),(26,{"gid":1001},"pics"),(48,{},"reward_goods"),(107,{"ttype":1,"p":1,"n":9},"pics")):
+        body={"m":"show","showId":sid,"uid":uid}; body.update(data); command,payload=_envelope(client.post("/flash.do",data=body)); assert command==sid and key in payload
+
+
 def test_guild_readonly_commands(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()

@@ -1221,6 +1221,33 @@ LOCAL_HUNT_MAPS = {10001: {"name": "烈焰山谷", "world": 1, "cost": 1, "monst
 LOCAL_EXPLORE_MAPS = {20001: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 1}}
 
 
+LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
+
+
+def _pic_list(database_path: Path) -> Response:
+    try: ttype=int(_request_value("ttype","1")); page=int(_request_value("p","1")); size=int(_request_value("n","9"))
+    except ValueError:return _pet_error(100)
+    if not 1<=ttype<=4 or page<1:return _pet_error(100)
+    ids=list(LOCAL_PICS); start=(page-1)*size
+    pics=[[i,LOCAL_PICS[i]["icon"],LOCAL_PICS[i]["reward"]] for i in ids[start:start+size]]
+    return _protocol_response(25,{"finish_rate":0,"pics":[{"index":x[0],"id":x[0],"icon":x[1],"is_reward":x[2]} for x in pics]})
+
+
+def _pic_info(database_path: Path) -> Response:
+    try: gid=int(_request_value("gid",""))
+    except ValueError:return _pet_error(100)
+    if gid not in LOCAL_PICS:return _pet_error(506)
+    return _protocol_response(26,{"id":gid,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"is_reward":LOCAL_PICS[gid]["reward"]}]})
+
+
+def _picstep_info(database_path: Path) -> Response:
+    return _protocol_response(48,{"id":1,"own_num":0,"need_num":1,"reward_point":0,"reward_money":0,"reward_crystal":0,"reward_goods":[],"is_finish":0})
+
+
+def _achievement_list(database_path: Path) -> Response:
+    return _protocol_response(107,{"id":1,"need_money":0,"is_reward":0,"pics":[]})
+
+
 def _guild_own(database_path: Path) -> Response:
     uid=_request_value("uid")
     with _connect_database(database_path) as c:
@@ -2299,6 +2326,14 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "103":
             return _explore_start(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "25":
+            return _pic_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "26":
+            return _pic_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "48":
+            return _picstep_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "107":
+            return _achievement_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "86":
             return _guild_own(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "88":
