@@ -363,20 +363,181 @@ def test_player_info_command_returns_fields_read_by_create_ui(tmp_path: Path):
     assert profile["lv"] == 1
 
 
-def test_initial_task_list_returns_empty_list_for_task_track_ui(tmp_path: Path):
+def test_task_list_requires_an_known_player(tmp_path: Path):
     client = create_app(
         {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
     ).test_client()
 
     response = client.post(
         "/flash.do",
-        data={"m": "show", "showId": "511", "uid": "local-test"},
+        data={"m": "show", "showId": "511", "uid": "local-missing"},
     )
 
-    command, payload = response.get_data(as_text=True).split("\t", 1)
     assert response.status_code == 200
-    assert command == "511"
-    assert json.loads(payload) == {"list": []}
+    assert response.get_data(as_text=True) == "-1:103"
+
+
+def test_task_list_offers_seeded_quests_with_live_progress(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "TaskList")
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "511", "uid": uid})
+    )
+
+    assert command == 511
+    rows = {row["id"]: row["is_finish"] for row in payload["list"]}
+    # Type 0 has no condition, so it is finished immediately; the money-gated
+    # quest is not, because a new account starts with no silver.
+    assert rows[1] == 1
+    assert rows[1501] == 0
+    # Task 6 needs equip 20001 worn; the starter equipment is unequipped.
+    assert rows[6] == 0
+    assert len(payload["list"]) <= 6
+
+
+def test_task_info_returns_icon_rewards_and_live_finish_flag(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "TaskInfo")
+
+    command, payload = _envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "46", "uid": uid, "gid": "1"}
+        )
+    )
+
+    assert command == 46
+    assert payload["id"] == 1
+    assert payload["type"] == 0
+    # n50001 exists in npc.swf; TaskUI instantiates it without a try/catch.
+    assert payload["icon"] == 50001
+    assert payload["reward_point"] == 200
+    assert payload["reward_goods"] == []
+    assert payload["is_finish"] == 1
+
+
+def test_task_info_rejects_unknown_and_missing_ids(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "TaskBad")
+
+    unknown = client.post(
+        "/flash.do", data={"m": "show", "showId": "46", "uid": uid, "gid": "9999"}
+    )
+    missing = client.post("/flash.do", data={"m": "show", "showId": "46", "uid": uid})
+
+    assert unknown.get_data(as_text=True) == "-1:211"
+    assert missing.get_data(as_text=True) == "-1:100"
+
+
+def test_task_reward_pays_once_and_marks_the_quest_claimed(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    app = create_app({"TESTING": True, "DATABASE": database})
+    client = app.test_client()
+    uid = _create_local_player(client, "TaskPay")
+
+    first = client.post(
+        "/flash.do", data={"m": "show", "showId": "47", "uid": uid, "gid": "1", "ttype": "0"}
+    )
+    assert first.status_code == 200
+    command, payload = _envelope(first)
+    assert command == 47
+    assert payload["value"] == "ok"
+    # An empty array is falsy in AS3, so the client skips its reward animation.
+    assert payload["pic"] == []
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == 200
+        assert connection.execute(
+            "SELECT is_claimed FROM player_tasks WHERE task_id = 1"
+        ).fetchone()[0] == 1
+
+    second = client.post(
+        "/flash.do", data={"m": "show", "showId": "47", "uid": uid, "gid": "1", "ttype": "0"}
+    )
+    assert second.get_data(as_text=True) == "-1:211"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == 200
+
+
+def test_task_reward_refuses_an_unfinished_quest(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    app = create_app({"TESTING": True, "DATABASE": database})
+    client = app.test_client()
+    uid = _create_local_player(client, "TaskNo")
+
+    response = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "47", "uid": uid, "gid": "1501", "ttype": "20"},
+    )
+
+    assert response.get_data(as_text=True) == "-1:107"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT is_claimed FROM player_tasks WHERE task_id = 1501"
+        ).fetchone() is None
+
+
+def test_task_reward_delivers_goods_with_clickable_prop_types(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    app = create_app({"TESTING": True, "DATABASE": database})
+    client = app.test_client()
+    uid = _create_local_player(client, "TaskGood")
+
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE pets SET battle_state = 1 WHERE player_id = ?", (player_id,)
+        )
+
+    command, payload = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "47", "uid": uid, "gid": "19", "ttype": "11"},
+        )
+    )
+    assert command == 47
+    assert payload["value"] == "ok"
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT quantity, item_type, use_type FROM inventory WHERE item_id = 10011"
+        ).fetchone()
+    assert row == (3, 5, 2)
+
+
+def test_task_finish_state_tracks_equipping_the_starter_sword(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "TaskEq")
+    index = _equipment_index(client, uid)
+
+    before = _envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "46", "uid": uid, "gid": "6"}
+        )
+    )[1]
+    client.post("/flash.do", data={"m": "show", "showId": "37", "uid": uid, "index": index})
+    after = _envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "46", "uid": uid, "gid": "6"}
+        )
+    )[1]
+
+    assert before["is_finish"] == 0
+    assert after["is_finish"] == 1
 
 
 def test_home_profile_reads_saved_player_and_survives_restart(tmp_path: Path):

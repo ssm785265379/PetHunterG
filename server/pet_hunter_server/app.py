@@ -79,6 +79,8 @@ LOCAL_PROP_CATALOG = {
     10014: {"type": 14, "use_type": 1, "value": 3},       # 背包扩展卡: 背包+3
     10022: {"type": 16, "use_type": 1, "value": 10000},   # 一袋银币: 银币+10000
     10023: {"type": 17, "use_type": 1, "value": 10000},   # 一袋水晶: 水晶+10000
+    10011: {"type": 5, "use_type": 2, "value": 1000000},  # 宠物饼干: 宠物经验道具
+    10032: {"type": 23, "use_type": 0, "value": 0},       # 蓝色晶石: 材料
 }
 # Local-only shop stock. The original server's shop table is not recoverable, so
 # these rows are explicit local defaults. `shop_type` 1 = 金币商店, 2 = 银币商店,
@@ -107,6 +109,50 @@ LOCAL_SELL_PRICES = {
     10002: 180,
     10014: 100,
     10022: 250,
+}
+
+# Local quest catalogue seeded into the `tasks` table. Every row below is a real
+# `task.txt` entry (id, name, type, iconId, needLevel, questId, value, rewards are
+# copied verbatim from client/air51-repack/src/data/zh-CN/config/task.txt), and
+# only condition types the local server can evaluate honestly are offered:
+#   0 = no condition, 7 = own a pet id, 8 = equip id, 11 = battle_state set,
+#   20 = money threshold, 21 = silver threshold.
+# Types that would require inventing facts (UI clicks, crafting, map completion,
+# item-use history, monster kills, illustrations, friends, trading, account
+# binding) are deliberately NOT seeded, so the client is never offered a task the
+# server cannot honestly judge.
+LOCAL_TASKS = (
+    {"id": 1, "type": 0, "icon": 50001, "need_level": 0, "quest_id": 0,
+     "value": "", "reward_money": 0, "reward_point": 200, "reward_crystal": 0,
+     "reward_goods": ()},
+    {"id": 6, "type": 8, "icon": 50001, "need_level": 0, "quest_id": 5,
+     "value": "20001:20004", "reward_money": 0, "reward_point": 500,
+     "reward_crystal": 0, "reward_goods": ()},
+    {"id": 15, "type": 7, "icon": 50005, "need_level": 0, "quest_id": 14,
+     "value": "1001", "reward_money": 0, "reward_point": 500, "reward_crystal": 0,
+     "reward_goods": ()},
+    {"id": 19, "type": 11, "icon": 50005, "need_level": 0, "quest_id": 18,
+     "value": "0", "reward_money": 0, "reward_point": 0, "reward_crystal": 0,
+     "reward_goods": ((10011, 3),)},
+    {"id": 1012, "type": 21, "icon": 50005, "need_level": 1, "quest_id": 1011,
+     "value": "2000", "reward_money": 0, "reward_point": 0, "reward_crystal": 0,
+     "reward_goods": ((10014, 1),)},
+    {"id": 1501, "type": 20, "icon": 50003, "need_level": 1, "quest_id": 1017,
+     "value": "3000", "reward_money": 0, "reward_point": 0, "reward_crystal": 0,
+     "reward_goods": ((10032, 60),)},
+    {"id": 1502, "type": 20, "icon": 50003, "need_level": 1, "quest_id": 1501,
+     "value": "5000", "reward_money": 0, "reward_point": 0, "reward_crystal": 0,
+     "reward_goods": ((10032, 100),)},
+)
+# TaskTrackUI draws every tracked row with no paging (TaskTrackUI.as:45-47), so
+# the tracker is capped (LOCAL DEFAULT) to keep the panel readable.
+LOCAL_TASK_TRACKER_LIMIT = 6
+# Prop ids used as quest rewards; 10011/10014 are absent from LOCAL_PROP_CATALOG,
+# so their use_type/item_type are declared here to keep rewards clickable.
+LOCAL_TASK_REWARD_PROPS = {
+    10011: {"icon": 10011, "type": 5, "use_type": 2},
+    10014: {"icon": 10014, "type": 14, "use_type": 1},
+    10032: {"icon": 10032, "type": 23, "use_type": 0},
 }
 
 
@@ -151,6 +197,7 @@ def _connect_database(database_path: Path) -> sqlite3.Connection:
     database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
@@ -300,6 +347,57 @@ def _initialize_database(database_path: Path) -> None:
         if "exp" not in pet_columns:
             connection.execute(
                 "ALTER TABLE pets ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"
+            )
+        # Reference table re-seeded at startup (no player data lives here), the
+        # same way shop_goods is, so removed quests cannot linger in old saves.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY,
+                type INTEGER NOT NULL,
+                icon INTEGER NOT NULL,
+                need_level INTEGER NOT NULL DEFAULT 0,
+                quest_id INTEGER NOT NULL DEFAULT 0,
+                value TEXT NOT NULL DEFAULT '',
+                reward_money INTEGER NOT NULL DEFAULT 0,
+                reward_point INTEGER NOT NULL DEFAULT 0,
+                reward_crystal INTEGER NOT NULL DEFAULT 0,
+                reward_goods TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_tasks (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                task_id INTEGER NOT NULL,
+                is_claimed INTEGER NOT NULL DEFAULT 0,
+                claimed_at TEXT,
+                PRIMARY KEY (player_id, task_id)
+            )
+            """
+        )
+        connection.execute("DELETE FROM tasks")
+        for task in LOCAL_TASKS:
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    id, type, icon, need_level, quest_id, value,
+                    reward_money, reward_point, reward_crystal, reward_goods
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task["id"],
+                    task["type"],
+                    task["icon"],
+                    task["need_level"],
+                    task["quest_id"],
+                    task["value"],
+                    task["reward_money"],
+                    task["reward_point"],
+                    task["reward_crystal"],
+                    "".join(f"{gid}:{num}," for gid, num in task["reward_goods"]),
+                ),
             )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_pets_player ON pets (player_id, id)"
@@ -1069,6 +1167,275 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
+def _reward_goods_ids(stored: str) -> list[tuple[int, int]]:
+    goods = []
+    for chunk in stored.split(","):
+        if not chunk:
+            continue
+        gid, _, num = chunk.partition(":")
+        if gid.isdigit() and num.isdigit():
+            goods.append((int(gid), int(num)))
+    return goods
+
+
+def _task_prerequisite_met(
+    connection: sqlite3.Connection, player_id: int, task: sqlite3.Row
+) -> bool:
+    if not task["quest_id"]:
+        return True
+    # LOCAL DEFAULT: prerequisites that are not in our honestly-checkable seed
+    # are relaxed rather than fabricated into player_tasks.
+    seeded_ids = {item["id"] for item in LOCAL_TASKS}
+    if task["quest_id"] not in seeded_ids:
+        return True
+    return connection.execute(
+        "SELECT 1 FROM player_tasks WHERE player_id = ? AND task_id = ? AND is_claimed = 1",
+        (player_id, task["quest_id"]),
+    ).fetchone() is not None
+
+
+def _task_finished(
+    connection: sqlite3.Connection, player_id: int, task: sqlite3.Row
+) -> bool:
+    """Evaluate a quest against state the local server actually owns.
+
+    Only the six honestly-checkable condition types are seeded; anything else
+    would require inventing progress, so it is never offered to the client.
+    """
+    value = (task["value"] or "").strip()
+    if task["type"] == 0:
+        return True
+    if task["type"] == 7:  # own a pet of the given config id
+        if not value.isdigit():
+            return False
+        return connection.execute(
+            "SELECT 1 FROM pets WHERE player_id = ? AND pet_id = ?",
+            (player_id, int(value)),
+        ).fetchone() is not None
+    if task["type"] == 8:  # equip an item from the id:id range
+        try:
+            low, _, high = value.partition(":")
+            low_id, high_id = int(low), int(high or low)
+        except ValueError:
+            return False
+        return connection.execute(
+            """
+            SELECT 1 FROM inventory
+            WHERE player_id = ? AND team = 3 AND equipped = 1
+              AND item_id BETWEEN ? AND ?
+            """,
+            (player_id, low_id, high_id),
+        ).fetchone() is not None
+    if task["type"] == 11:  # send a pet into battle
+        return connection.execute(
+            "SELECT 1 FROM pets WHERE player_id = ? AND battle_state != 0",
+            (player_id,),
+        ).fetchone() is not None
+    if task["type"] in (20, 21):  # money / silver threshold
+        column = "money" if task["type"] == 20 else "point"
+        if not value.isdigit():
+            return False
+        return connection.execute(
+            f"SELECT 1 FROM players WHERE id = ? AND {column} >= ?",
+            (player_id, int(value)),
+        ).fetchone() is not None
+    return False
+
+
+def _player_tasks(database_path: Path) -> Response:
+    """TASK_LIST (511): the tracker rows read by TaskTrackUI.
+
+    `is_finish` is recomputed from live state on every read and never stored,
+    so the client can never be shown a stale or invented completion flag.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, lv FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        tasks = connection.execute(
+            "SELECT * FROM tasks WHERE need_level <= ? ORDER BY id",
+            (player["lv"],),
+        ).fetchall()
+        claimed = {
+            row["task_id"]
+            for row in connection.execute(
+                "SELECT task_id FROM player_tasks WHERE player_id = ? AND is_claimed = 1",
+                (player["id"],),
+            )
+        }
+        rows = [
+            {
+                "id": task["id"],
+                "is_finish": 1 if _task_finished(connection, player["id"], task) else 0,
+            }
+            for task in tasks
+            if task["id"] not in claimed
+            and _task_prerequisite_met(connection, player["id"], task)
+        ]
+    return _protocol_response(511, {"list": rows[:LOCAL_TASK_TRACKER_LIMIT]})
+
+
+def _task_condition(connection: sqlite3.Connection, player_id: int, task: sqlite3.Row) -> object:
+    value = (task["value"] or "").strip()
+    if task["type"] == 7:
+        ids = [int(x) for x in value.split(":") if x.isdigit()]
+        return {"list": [{"need_id": pet_id, "now_value": 1 if connection.execute("SELECT 1 FROM pets WHERE player_id = ? AND pet_id = ?", (player_id, pet_id)).fetchone() else 0, "need_value": 1} for pet_id in ids]}
+    if task["type"] == 8:
+        return {"now_value": 1 if _task_finished(connection, player_id, task) else 0, "need_value": 1}
+    if task["type"] in (20, 21):
+        column = "money" if task["type"] == 20 else "point"
+        need = int(value or 0)
+        row = connection.execute(f"SELECT {column} FROM players WHERE id = ?", (player_id,)).fetchone()
+        return {"now_value": min(int(row[0] if row else 0), need), "need_value": need}
+    return None
+
+
+def _player_task_info(database_path: Path) -> Response:
+    """TASK_INFO (46): one quest as TaskUI renders it.
+
+    `ttype` is not trusted from the client; the task row is re-read by gid.
+    """
+    uid = _request_value("uid")
+    raw = _request_value("gid", "").strip()
+    if not raw.isdigit():
+        return _pet_error(100)
+    task_id = int(raw)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task is None:
+            return _pet_error(211)
+        if not _task_prerequisite_met(connection, player["id"], task):
+            return _pet_error(211)
+        finished = _task_finished(connection, player["id"], task)
+        condition = _task_condition(connection, player["id"], task)
+    return _protocol_response(
+        46,
+        {
+            "id": task["id"],
+            "type": task["type"],
+            "icon": task["icon"],
+            "condition": condition,
+            "reward_money": task["reward_money"],
+            "reward_point": task["reward_point"],
+            "reward_crystal": task["reward_crystal"],
+            "reward_goods": [
+                {"id": gid, "num": num} for gid, num in _reward_goods_ids(task["reward_goods"])
+            ],
+            "is_finish": 1 if finished else 0,
+        },
+    )
+
+
+def _player_task_reward(database_path: Path) -> Response:
+    """TASK_REWARD (47): pay a finished quest exactly once.
+
+    The client echoes `gid` and `ttype` from the 46 payload (TaskUI.as:186-189,
+    463-465); `ttype` is ignored and the task is re-read by gid.
+    """
+    uid = _request_value("uid")
+    raw = _request_value("gid", "").strip()
+    if not raw.isdigit():
+        return _pet_error(100)
+    task_id = int(raw)
+
+    with _connect_database(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task is None:
+            return _pet_error(211)
+        if not _task_prerequisite_met(connection, player["id"], task):
+            return _pet_error(211)
+        claimed = connection.execute(
+            "SELECT is_claimed FROM player_tasks WHERE player_id = ? AND task_id = ?",
+            (player["id"], task_id),
+        ).fetchone()
+        if claimed is not None and claimed["is_claimed"]:
+            return _pet_error(211)
+        if not _task_finished(connection, player["id"], task):
+            # 107 is the client's bundled "finish the task first" text.
+            return _pet_error(107)
+
+        goods = _reward_goods_ids(task["reward_goods"])
+        existing_item_ids = {
+            row["item_id"] for row in connection.execute(
+                "SELECT item_id FROM inventory WHERE player_id = ? AND team = 1",
+                (player["id"],),
+            )
+        }
+        new_rows = sum(1 for gid, _ in goods if gid not in existing_item_ids)
+        capacity_row = connection.execute(
+            "SELECT bag_capacity FROM players WHERE id = ?", (player["id"],)
+        ).fetchone()
+        used_rows = connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE player_id = ? AND team = 1",
+            (player["id"],),
+        ).fetchone()[0]
+        if used_rows + new_rows > int(capacity_row[0]):
+            return _pet_error(300)
+        if any(gid not in LOCAL_TASK_REWARD_PROPS for gid, _ in goods):
+            return _pet_error(100)
+        for gid, num in goods:
+            prop = LOCAL_TASK_REWARD_PROPS[gid]
+            connection.execute(
+                """
+                INSERT INTO inventory (
+                    player_id, item_id, team, quantity, icon, item_type, use_type
+                ) VALUES (?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT (player_id, item_id)
+                DO UPDATE SET quantity = quantity + excluded.quantity
+                """,
+                (
+                    player["id"],
+                    gid,
+                    num,
+                    gid,
+                    prop["type"] if prop else 0,
+                    prop["use_type"] if prop else 0,
+                ),
+            )
+        for column, amount in (
+            ("money", task["reward_money"]),
+            ("point", task["reward_point"]),
+            ("crystal", task["reward_crystal"]),
+        ):
+            if amount:
+                connection.execute(
+                    f"UPDATE players SET {column} = {column} + ? WHERE id = ?",
+                    (amount, player["id"]),
+                )
+        connection.execute(
+            """
+            INSERT INTO player_tasks (player_id, task_id, is_claimed, claimed_at)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT (player_id, task_id)
+            DO UPDATE SET is_claimed = 1, claimed_at = CURRENT_TIMESTAMP
+            """,
+            (player["id"], task_id),
+        )
+    # TaskUI reads only `pic` from this body (TaskUI.as:425-433); an empty array
+    # is falsy in AS3 so the client skips its reward animation instead of
+    # rendering a half-initialised one.
+    return _protocol_response(47, {"value": "ok", "pic": []})
+
+
 def _function_flags(database_path: Path) -> Response:
     """REQUEST_FUNCTION_KEY (502).
 
@@ -1447,6 +1814,10 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "502":
             return _function_flags(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "46":
+            return _player_task_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "47":
+            return _player_task_reward(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":
@@ -1462,7 +1833,7 @@ def create_app(config: dict | None = None) -> Flask:
         if command == "show" and _request_value("showId") == "55":
             return _pet_toggle_lock(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "511":
-            return _protocol_response(511, {"list": []})
+            return _player_tasks(current_app.config["DATABASE"])
         return jsonify(error="protocol_not_implemented"), 501
 
     return app

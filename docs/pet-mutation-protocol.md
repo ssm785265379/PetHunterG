@@ -353,8 +353,15 @@ button is clicked, with `index2=<skill id from link text>` and
 > similar, so no-bundled-text reuse is required for the cap.
 >
 > 1. Refuse unknown/foreign pet → `-1:506`.
-> 2. Refuse locked pet → `-1:524` (bundled 524 explicitly lists 洗练,
->    so this is on-text for the broader flush/世代 family).
+> 2. Refuse locked pet → `-1:100 非法操作，没有通过验证`. Rationale:
+>    524's bundled text only enumerates 放生 / 副宠合成 / 技能合成 and
+>    does not mention 世代 / 洗练; reusing 524 here is text-wrong.
+>    See §5 for the choice between 524 (text-wrong but related) and 100
+>    (text-loose but honest). The recommendation is **100** because the
+>    bundled 524 text would mislead the player into believing the lock
+>    prevents 放生 / 副宠合成 / 技能合成 specifically, which doesn't tell
+>    them why 增加世代 is also blocked. 100 is the only bundled code that
+>    functions as a generic "operation not permitted" gate.
 > 3. Refuse if `generation >= LOCAL_MAX_GENERATION (9)` → `-1:100`.
 >    `LOCAL_MAX_GENERATION = 9` is a local default — the original server's
 >    cap is not recoverable. The bundled config 501 提示字符串 in
@@ -448,29 +455,37 @@ the buff that was forgotten so the client can show its name. Field
 #### LOCAL DEFAULT rule for 85
 
 > **LOCAL DEFAULT.** Two-step flow. Locked pets **may** forget buffs
-> (the bundled 524 文本 提到 副宠合成/技能合成/洗练, not buff-forget,
-> so we allow locked pets here; this is a documented conservative
-> choice).
+> (the bundled 524 text only enumerates 放生/副宠合成/技能合成; buff-
+> forget is not mentioned. We allow locked pets as a conservative
+> choice and label it as such).
 >
-> Errors (parent-provided mapping of bundled `error.txt` ids):
+> Errors (parent-corrected mapping of bundled `error.txt` ids, after
+> re-reading the authoritative UTF-8 text):
 >
-> | Trigger | Code | Client text |
+> | Trigger | Code | Bundled text |
 > |---|---|---|
-> | `pets.buffs` is empty when the inner call fires | `-1:521` | "没有可遗忘的特性" |
-> | Outer call's inventory `index` does not reference a buff-forget card row | `-1:522` | "只能遗忘已有的特性使用卡牌" |
-> | Inner call's `index2` not present in `pets.buffs` | `-1:100` | "非法操作，没有通过验证" |
-> | Foreign pet | `-1:506` | "宠物不存在" |
+> | Inner call when `pets.buffs` has fewer than 2 entries | `-1:522` | 「有2个以上特性的宠物才能使用遗忘卡牌」 |
+> | Outer call's inventory row is not a buff-forget card | `-1:100` | 「非法操作，没有通过验证」 |
+> | Inner call's `index2` not present in `pets.buffs` | `-1:100` | 「非法操作，没有通过验证」 |
+> | Foreign pet / `index: 0` | `-1:506` | 「宠物不存在」 |
 >
-> Note: the parent's corrected mapping (above) supersedes the earlier
-> draft's "−1:400 / −1:522 swapped" pair. The text-ids are reused per
-> the parent's reading of `error.txt`, not literal on-text; we document
-> this to avoid future confusion.
+> **Note on 521**: the bundled text for 521 is `这里没有宠物可以捕捉`
+> (`error.txt` line 101), which is hunt/catch related, not buff-related.
+> Using 521 here would display a misleading AlertUI to the player.
+> Therefore 521 is **not** used for 85 (this replaces the earlier draft's
+> "−1:521 = 没有可遗忘的特性" mapping, which was based on garbled terminal
+> output and is now confirmed wrong).
 >
-> 1. Outer call: validate the pet exists and the bag row is a
->    buff-forget card (`pets.buffs` lookup is read-only here). Return
+> **Note on 524**: 524 is also **not** used here for the locked-pet case
+> even though it explicitly mentions 技能合成 — 85 is a buff-forget, not
+> a 技能合成, so the bundled text would be misleading.
+>
+> 1. Outer call: validate the pet exists. Return
 >    `{is_list: [], pet, name?}` and let the client pop the chooser.
-> 2. Inner call: validate `index1` (pet) and `index2` (buff id);
->    remove the chosen entry; return the single-removed shape.
+> 2. Inner call: validate `index1` (pet) and `index2` (buff id); reject
+>    with `-1:522` if `pets.buffs` has fewer than 2 entries, with
+>    `-1:100` if `index2` is not in `pets.buffs`. Remove the chosen
+>    entry on success; return the single-removed shape.
 > 3. Cost: none at this endpoint (the prop cost is paid via the prop
 >    catalogue, not at this endpoint).
 
@@ -539,11 +554,11 @@ choose target), but the server responses look different:
 > 2. Refuse if all 6 stat-pros are 0 → `-1:523` (bundled text
 >    "强化必须大于0才能使用", `error.txt:103`).
 > 3. Refuse if adding the source amount to the chosen target would
->    exceed `4000` → `-1:520` (bundled text "资质不能超过上限4000",
->    `error.txt:100`). This text fits the per-stat cap exactly **as
->    long as we treat 4000 as a per-stat ceiling**, which the prop's
->    remark's "1000..1009" range loosely supports — so this is a
->    conservative reuse with on-text intent.
+>    exceed `4000` → `-1:520` (bundled text 「每只宠物的训练强化总
+>    值上限为4000」, `error.txt:100`). On-text: the bundled 520 explicitly
+>    names the training-强化 4000 ceiling; we adopt `4000` as a
+>    per-stat ceiling (the prop's "1000..1009" range loosely supports
+>    this).
 > 4. Source = max(pro_hp..pro_speed); dest = chosen key `gid` (1..6);
 >    amount = source. Source becomes 0; dest += amount (clamped at
 >    4000).
@@ -587,28 +602,42 @@ per `TipItem1.as:189-191`) and the source was the previous maximum
 
 | Command | Cost (LOCAL DEFAULT) | Effect on `pets` row (persisted) | Refusal on ... |
 |---|---|---|---|
-| 19 flush grow | none | redistributes `gw_hp / gw_phy_att / gw_mag_att / gw_phy_def / gw_mag_def / gw_speed` (sum ≤ `pet.txt[grows].max`); `gw_rate` derived from sum. **Does not touch `nature` or `properties`.** | `-1:506` unknown; `-1:524` locked (bundled 524 explicitly mentions 洗练) |
-| 20 flush nature | none | sets `nature` to `(current + 1) % 21` | `-1:506` unknown; `-1:524` locked |
-| 21 forget skill | none | removes the entry with smallest `id` from `pets.skills` | `-1:506`; `-1:524` locked; `-1:515` (only 0/1 skills remain) |
-| 84 add generation | none | `pets.generation += 1` (LOCAL cap 9) | `-1:506`; `-1:524` locked; `-1:100` at cap |
-| 85 forget buff (outer) | none | none (read-only) | `-1:506`; `-1:100` bad inputs (malformed); refer to outer-inner split below |
-| 85 forget buff (inner) | none | removes chosen `{id}` from `pets.buffs` | `-1:506`; `-1:521` `pets.buffs` empty ("没有可遗忘的特性"); `-1:522` outer supplied an inventory row that isn't a buff-forget card ("只能遗忘已有的特性使用卡牌") |
+| 19 flush grow | none | redistributes `gw_hp / gw_phy_att / gw_mag_att / gw_phy_def / gw_mag_def / gw_speed` (sum ≤ `pet.txt[grows].max`); `gw_rate` derived from sum. **Does not touch `nature` or `properties`.** | `-1:506` unknown; **`-1:100` locked** (524's bundled text only covers 放生/副宠合成/技能合成, not 洗练 — see §5) |
+| 20 flush nature | none | sets `nature` to `(current + 1) % 21` | `-1:506` unknown; **`-1:100` locked** (same rationale as 19) |
+| 21 forget skill | none | removes the entry with smallest `id` from `pets.skills` | `-1:506`; `-1:524` locked (bundled 524 explicitly covers 技能合成); `-1:515` only 0/1 skills remain |
+| 84 add generation | none | `pets.generation += 1` (LOCAL cap 9) | `-1:506`; **`-1:100` locked** (524's text doesn't cover 世代); `-1:100` at cap |
+| 85 forget buff (outer) | none | none (read-only) | `-1:506`; `-1:100` bad inventory row (not a buff-forget card) |
+| 85 forget buff (inner) | none | removes chosen `{id}` from `pets.buffs` | `-1:506`; `-1:522` `pets.buffs` has fewer than 2 entries (bundled text: 「有2个以上特性的宠物才能使用遗忘卡牌」); `-1:100` `index2` not in buffs |
 | 114 divide pro (outer) | none | none (chooser) | `-1:506` |
-| 114 divide pro (inner) | none | source = max(pro_*); dest += amount (clamped at `LOCAL_PET_PRO_STAT_CAP = 4000` per `error.txt:100` 520 text); source = 0 | `-1:506`; `-1:523` all pros 0 ("强化必须大于0不能使用"); `-1:520` would exceed 4000 ("资质不能超过上限4000") |
+| 114 divide pro (inner) | none | source = max(pro_*); dest += amount (clamped at `LOCAL_PET_PRO_STAT_CAP = 4000` per `error.txt:100` 520 text); source = 0 | `-1:506`; `-1:523` all pros 0 (bundled: 「强化必须大于0才能使用」); `-1:520` would exceed 4000 (bundled: 「每只宠物的训练强化总值上限为4000」) |
 
-> **Re-use note (parent-corrected).** Every error code in this table is
-> **on-text** under the parent's reading of `error.txt`:
-> - 524 explicitly mentions 洗练 → covers 19/20/21/84 locked refusal.
-> - 520 资质不能超过上限4000 → covers 114 cap (a per-stat interpretation
->   of the bundled text; also consistent with prop.txt's "1000-1009"
->   range).
-> - 523 强化必须大于0不能使用 → covers 114 all-zero case.
-> - 521 没有可遗忘的特性 → 85 inner buffs empty.
-> - 522 只能遗忘已有的特性使用卡牌 → 85 outer inventory row not the card.
-> - 515 只有一个技能了不能遗忘 → 21 too few skills.
+> **Re-use note (parent-corrected, authoritative UTF-8 reading).**
 >
-> No error code is being repurposed; every id is reused for its parent
-> semantically-matched reason.
+> The authoritative `error.txt` UTF-8 text for the codes we touch here:
+>
+> - `100` 「非法操作，没有通过验证」 — generic refused/validation gate.
+> - `506` 「宠物不存在」 — used directly for foreign/empty pet id.
+> - `515` 「宠物只有一个技能,不能遗忘」 — used directly for 21 too-few-skills.
+> - `520` 「每只宠物的训练强化总值上限为4000」 — used for 114 cap (the
+>   "training强化总值 = 4000" wording is the only bundled error that
+>   names a numeric pro ceiling).
+> - `522` 「有2个以上特性的宠物才能使用遗忘卡牌」 — used directly for 85
+>   buff-not-enough case; this is the existing bundled text for the
+>   遗忘卡牌 prop's pre-condition.
+> - `523` 「强化必须大于0才能使用」 — used directly for 114 all-pros-zero.
+> - `524` 「宠物处于锁定状态，无法被放生或者作为副宠合成、技能合成」 —
+>   used **only for 21** (where 技能合成 is on-text). **Not** used for
+>   19/20/84 because the bundled 524 text explicitly does **not**
+>   mention 洗练 / 性格 / 增加世代; reusing 524 there would show the
+>   player a misleading message about 放生/副宠/技能合成.
+>
+> Codes deliberately **not used**:
+>
+> - `521` is hunt/catch text (`这里没有宠物可以捕捉`) and is unrelated to
+>   buffs; the earlier draft that mapped 85 inner → 521 was based on
+>   garbled terminal output and is corrected here.
+> - `524` is not used for 19/20/84 locked-pet refusal.
+>   See §5 for the full recommendation rationale.
 
 ---
 
@@ -690,28 +719,52 @@ ALTER TABLE pets ADD COLUMN pro_mag_def INTEGER NOT NULL DEFAULT 0;
 
 ## 5. Error-code table (final)
 
-| Condition | HTTP | Body | Bundled text (parent-corrected reading of `error.txt`) |
+Authoritative UTF-8 `error.txt` text applies throughout. Locked-pet
+codes for 19/20/84 use **`-1:100`** rather than `524` because 524 only
+covers 放生/副宠合成/技能合成 — see the rationale box below the
+table.
+
+| Condition | HTTP | Body | Bundled text |
 |---|---|---|---|
 | malformed index / no pet context (`index: 0`) | 200 | `-1:506` | 宠物不存在 |
 | unknown/foreign pet id | 200 | `-1:506` | 宠物不存在 |
-| locked pet for 19 | 200 | `-1:524` | 宠物处于锁定状态，无法…洗练 (524 文本明确包含「洗练」) |
-| locked pet for 20 | 200 | `-1:524` | 同上 |
-| locked pet for 21 | 200 | `-1:524` | 同上 (524 also covers 技能合成) |
-| locked pet for 84 | 200 | `-1:524` | 同上 (524 explicitly covers 洗练 / 技能合成 family) |
+| locked pet for 19 | 200 | `-1:100` | 非法操作，没有通过验证 |
+| locked pet for 20 | 200 | `-1:100` | 非法操作，没有通过验证 |
+| locked pet for 21 | 200 | `-1:524` | 宠物处于锁定状态，无法被放生或者作为副宠合成、技能合成 (524 显式列出技能合成, on-text) |
+| locked pet for 84 | 200 | `-1:100` | 非法操作，没有通过验证 |
 | locked pet for 114 | 200 | (allow; conservative) | n/a |
-| forget skill with only 0/1 left | 200 | `-1:515` | 宠物只有一个技能,不能遗忘 |
-| forget buff inner, `pets.buffs` empty | 200 | `-1:521` | 没有可遗忘的特性 |
-| forget buff outer, inventory row isn't buff-forget card | 200 | `-1:522` | 只能遗忘已有的特性使用卡牌 |
-| divide pro all pros = 0 | 200 | `-1:523` | 强化必须大于0才能使用 |
-| divide pro would push dest over 4000 | 200 | `-1:520` | 资质不能超过上限4000 |
-| add-gen at cap | 200 | `-1:100` | 非法操作 |
-| any other failure | 200 | `-1:100` | 非法操作 |
+| 21 with only 0/1 skill | 200 | `-1:515` | 宠物只有一个技能,不能遗忘 |
+| 85 outer with non-buff-forget inventory row | 200 | `-1:100` | 非法操作，没有通过验证 |
+| 85 inner with `pets.buffs` having fewer than 2 entries | 200 | `-1:522` | 有2个以上特性的宠物才能使用遗忘卡牌 |
+| 85 inner with `index2` not in `pets.buffs` | 200 | `-1:100` | 非法操作，没有通过验证 |
+| 114 with all pros = 0 | 200 | `-1:523` | 强化必须大于0才能使用 |
+| 114 would push dest over 4000 | 200 | `-1:520` | 每只宠物的训练强化总值上限为4000 |
+| 84 at cap | 200 | `-1:100` | 非法操作，没有通过验证 |
+| any other failure | 200 | `-1:100` | 非法操作，没有通过验证 |
 
-All errors keep HTTP 200 so Flash's `URLLoader` does not flip to its
-network-error code path; the `-1:<id>` prefix is what
-`GameUtil.isError` (`GameUtil.as:300-317`) parses into an
-`{id:int}` object that the AlertUI dispatches. This matches the
-existing `_pet_error` pattern in `app.py:1072-1080`.
+> **Rationale: locked-pet refusal at 100 not 524 for 19/20/84.**
+>
+> The bundled 524 text enumerates exactly three operations:
+> "放生" (release), "副宠合成" (vice-pet synthesis), "技能合成" (skill
+> synthesis). It explicitly does **not** mention 洗练 / 性格 / 增加世
+> 代. Two reuse options were considered:
+>
+> | Option | Pros | Cons |
+> |---|---|---|
+> | `-1:524` (reuse) | text is about "locked → refused"; close to the rejection cause | displayed Chinese only mentions 放生 / 副宠 / 技能, which would confuse the player about why 增加世代 is blocked |
+> | `-1:100` "非法操作，没有通过验证" | generic / honest gate; the player would understand "the operation didn't go through" | text is loose about the cause; in practice the TipItem's title and the prop's `remark` already explain context |
+>
+> **Recommendation: `-1:100`** for 19/20/84. It is the only bundled code
+> whose text does not actively mislead the player. 524 is reserved for
+> the cases where its text genuinely matches (which today is only 21,
+> where 技能合成 is named). This recommendation matches the parent's
+> explicit guidance that 524 does not include 洗练.
+>
+> All errors keep HTTP 200 so Flash's `URLLoader` does not flip to its
+> network-error code path; the `-1:<id>` prefix is what
+> `GameUtil.isError` (`GameUtil.as:300-317`) parses into an
+> `{id:int}` object that the AlertUI dispatches. This matches the
+> existing `_pet_error` pattern in `app.py:1072-1080`.
 
 ---
 
@@ -778,8 +831,9 @@ commands. To reach it from a real phone:
   `nature` reflects 20's cycle; `skills` reflects 21's removal;
   `buffs` empty if 85 fully removed them; `pro_hp..pro_mag_def` reflect
   114's redistribution; `generation` is +N.
-- Confirm that locked pets (`pets.is_locked=1`) refuse commands that
-  reuse `-1:524`. Unlock via existing `55`, retry.
+- Confirm that locked pets (`pets.is_locked=1`) refuse **21** with
+  `-1:524`, and refuse **19/20/84** with `-1:100`. Unlock via existing
+  `55`, retry. 114 is intentionally allowed even when locked.
 - Verify that the bag list refreshes (`showId=22` second GET) on every
   success so the prop count drops as expected (each prop is consumed
   once; the consumption is the responsibility of `USE_GOODS_KEY` (50)
@@ -826,15 +880,12 @@ These are listed explicitly so a future implementation does not guess:
 6. **Locked-pet refusal for 114.** Original server plausibly also
    allows; 114 has no client-side gate and the bundled 524 text
    doesn't list pro-conversion.
-7. **`error.txt` text accuracy.** The parent's reading of 521 ("没有
-   可遗忘的特性") and 522 ("只能遗忘已有的特性使用卡牌") was provided as
-   the semantic-correct mapping. The literal text I read at
-   `error.txt:101-102` is "这里没有宠物可以捕捉" / "有2个以上特性的宠物
-   才能使用遗忘卡牌". **The two readings differ for 521 in particular.**
-   When implementing, defer to the parent's chosen mapping per this
-   document; if the on-device AlertUI shows a misleading text, that
-   is the source of truth. (This is documented for transparency, not
-   as a blocker.)
+
+The `error.txt` text used in this document is the authoritative
+UTF-8 reading confirmed by the parent (specific lines referenced
+inline at each code id). The earlier draft's "different reading of
+521/522" disclaimer is superseded and removed — there is no remaining
+ambiguity about which bundled text belongs to which code id.
 
 ---
 
