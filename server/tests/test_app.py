@@ -148,7 +148,7 @@ def test_unimplemented_show_id_never_returns_a_transport_error(tmp_path: Path):
     # MainUI.readDatas can route it to its own branch.
     client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
     uid = _create_local_player(client, "NoErr")
-    for show_id in (73, 74, 87, 93, 105, 300, 1004):
+    for show_id in (87, 93, 300, 1004, 1005):
         response = client.post(
             "/flash.do", data={"m": "show", "showId": str(show_id), "uid": uid, "p": 1, "n": 9}
         )
@@ -1610,6 +1610,131 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
+def test_arena_and_copy_fights_share_the_hunt_replay_contract(tmp_path: Path):
+    # HunterResultUI / RingResultUI / AbyssResultUI were compared field by field:
+    # att_list, def_list and record are structurally identical, so 6, 24 and 74
+    # must produce the same shape. RingResultUI additionally needs
+    # arena_ap/max_arena_ap/rage_point (FightResultItem.as:349,405), and
+    # AbyssMapUI/AbyssResultUI guard nothing at all.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "WarOne")
+    skin = config_tables.skin_table()
+
+    def sides(command_id: int, extra: dict) -> dict:
+        data = {"m": "show", "showId": str(command_id), "uid": uid, **extra}
+        command, payload = _envelope(client.post("/flash.do", data=data))
+        assert command == command_id
+        return payload
+
+    for command_id, extra in ((6, {"hid": 1}), (24, {}), (74, {"hid": 1001})):
+        payload = sides(command_id, extra)
+        assert payload["is_win"] in (1, True)
+        lead = payload["att_list"][0]
+        assert lead["is_pet"] == 0, "the hunter must lead so ShowItem gets a skin string"
+        for layer in lead["img"].split("_"):
+            assert int(layer) in skin
+        assert payload["def_list"], f"{command_id} dereferences def_list[0] unguarded"
+        for row in payload["def_list"]:
+            assert str(row["img"]).isdigit(), "defenders use Pet.as:121's bare 'p'+id"
+            assert row["name"] and row["lv"] >= 1
+        assert payload["record"], "an empty record freezes the fight screen"
+        for step in payload["record"]:
+            for side in ("att", "def"):
+                assert {"cur_hp", "is_dead", "is_revive"} <= set(step[side])
+                assert 0 <= step[side]["code"] <= 2, "FightProcess indexes _p1 by code"
+
+    arena = sides(24, {})
+    assert isinstance(arena["arena_ap"], int)
+    assert arena["max_arena_ap"] >= arena["arena_ap"]
+    assert isinstance(arena["rage_point"], int)
+
+
+def test_copy_list_unlocks_every_tile(tmp_path: Path):
+    # AbyssMapUI.as:197-199 calls int(param2.maps.length) unguarded and
+    # MapItem.as:315 locks a tile when is_battle_able is falsy.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "CopyOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "73", "uid": uid, "p": 1, "n": 9})
+    )
+    assert command == 73
+    assert payload["maps"], "an empty maps array locks every tile"
+    assert all(row["is_battle_able"] for row in payload["maps"])
+    for row in payload["maps"]:
+        assert {"code", "id", "finish_rate", "finished_num"} <= set(row)
+
+
+def test_explore_rental_chain_round_trips_through_the_shop(tmp_path: Path):
+    # 100 needs list[] with no null guard (HireShopUI.as:201-202); 101 needs
+    # goods_ext (HireShopInfoUI.as:202); 102 is a pure ack whose callers all
+    # require value == "ok"; 104 then has to report the new rental.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RentOne")
+    table = config_tables._table("exploreEquip.txt")
+
+    def call(show_id: int, **extra):
+        data = {"m": "show", "showId": str(show_id), "uid": uid, **extra}
+        return _envelope(client.post("/flash.do", data=data))
+
+    command, shop = call(100, ttype=1, p=1, n=9)
+    assert command == 100 and shop["type"] == 1
+    assert shop["list"], "HireShopUI.as:201 dereferences list.length"
+    entry = shop["list"][0]
+    assert entry["id"] in {int(k) for k in table}
+    # `type` must echo the request ttype, not the table's own type column:
+    # HireShopUI.as:179 and HireListUI.as:266 send it back as the next ttype.
+    assert entry["type"] == 1
+    assert entry["price_type"] in (1, 2, 3, 4)
+
+    command, info = call(101, ttype=1, gid=entry["id"])
+    assert command == 101
+    assert isinstance(info["goods_ext"], dict), "HireShopInfoUI.as:202 has no null guard"
+    assert {"need_goods_id", "own_need_goods_num"} <= set(info["goods_ext"])
+    assert {"need_money", "need_point", "need_crystal", "is_rented"} <= set(info)
+
+    command, ack = call(102, ttype=1, gid=entry["id"])
+    assert command == 102 and ack["value"] == "ok", "all three callers check this string"
+
+    command, rented = call(104, ttype=1, p=1, n=9)
+    assert command == 104
+    assert rented["equip_count"] >= 1
+    ids = {row["id"] for row in rented["list"]}
+    assert entry["id"] in ids
+
+
+def test_explore_stop_must_ack_ok_or_the_client_throws(tmp_path: Path):
+    # ExplorePveUI.as:365-372 / ExploreEventResultUI.as:115-122 read only `value`.
+    # Anything else falls through to the EXPLORE_KEY branch, where
+    # param2 = param2.battle_result is undefined and _loc2_.is_win throws
+    # (ExplorePveUI.as:377).
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "StopOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "105", "uid": uid})
+    )
+    assert command == 105
+    assert payload["value"] == "ok"
+    assert "battle_result" not in payload
+
+
+def test_explore_slot_purchase_reports_both_cost_fields(tmp_path: Path):
+    # HireListUI.as:216 and :219 read need_money and own_money with no guard on
+    # the failure path; a missing one becomes NaN in the displayed price.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "SlotOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "106", "uid": uid, "ttype": 0})
+    )
+    assert command == 106
+    if payload["value"] == "ok":
+        assert "need_money" not in payload
+    else:
+        assert isinstance(payload["need_money"], int)
+        assert isinstance(payload["own_money"], int)
+
+
 def test_arena_fighter_ships_pets_because_ringui_shifts_them(tmp_path: Path):
     # RingUI.as:293-294 calls param2.pets.shift() with no null guard.
     client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
@@ -1839,8 +1964,10 @@ def test_new_character_gets_the_local_starter_pack_in_the_pet_list(tmp_path: Pat
     for pet in payload["pets"]:
         assert pet["battle_state"] == 0
         assert isinstance(pet["index"], int)
-        # A default-named pet omits "name" so the client falls back to pet.txt.
-        assert "name" not in pet
+        # The name comes from pet.txt rather than being omitted: FarmUI's
+        # PetItem and Pet.as:135 read data.name with no fallback, so a missing
+        # key rendered as "undefined" on the device.
+        assert pet["name"] == config_tables._table("pet.txt")[pet["id"]]["name"]
 
 
 def test_pet_list_pages_by_stable_index_and_reports_total(tmp_path: Path):

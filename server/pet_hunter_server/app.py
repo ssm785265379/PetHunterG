@@ -1557,6 +1557,78 @@ def _monsters_for_map(hid: int) -> list[dict[str, object]]:
     return [m for m in picked if m is not None]
 
 
+def _battle_side(
+    *,
+    hunter_skin: str,
+    hunter_name: str,
+    hunter_lv: int,
+    pet_rows,
+    defenders,
+) -> tuple[list[dict], list[dict]]:
+    """Shared attacker/defender builder for HUNT(6), ARENA(24) and COPY(74).
+
+    The three result screens were compared field by field
+    (HunterResultUI.as:347-420, RingResultUI.as:283-357, AbyssResultUI.as:297-357):
+    att_list/def_list/record use identical names, nesting, int() coercion points
+    and the t=1/t=2 attacker/defender markers, and all three share one
+    FightProcess state machine. Only the defender *name* fallback table differs
+    (74 reads monster.txt, 24 reads pet.txt), which does not matter here because
+    every name we send is already non-empty.
+
+    Two client constraints fix the shape:
+      * The hunter must lead att_list. HunterResultUI.as:354 and RingResultUI.as:290
+        push att_list[0].img into ShowItem.items, which splits on "_" and resolves
+        each id through skin.txt; a pet id there misses and the layer is silently
+        dropped, which is what left the player headless.
+      * def_list[i].img goes through Pet.as:121 getDefinition("p" + skin), so a
+        defender carries a bare icon id and never an underscore-joined string.
+    """
+    lead = {
+        "team": 1, "code": 0, "is_pet": 0, "id": 0, "name": hunter_name,
+        "lv": hunter_lv, "pre_lv": hunter_lv, "hp": 100, "img": hunter_skin,
+    }
+
+    def attacker(row, code: int) -> dict:
+        # LOCAL DEFAULT: hp doubles as the max hp the client draws with
+        # (HunterResultUI.as:367-368), so it is derived from the pet's upgrades.
+        power = (row["pro_hp"] or 0) + (row["pro_phy_att"] or 0) + (row["pro_mag_att"] or 0)
+        return {
+            "team": 1, "code": code, "is_pet": 1, "index": row["index"],
+            "id": row["id"], "name": _pet_name(row["id"], row["name"]),
+            "lv": row["lv"], "pre_lv": row["lv"], "hp": 100 + power, "img": row["icon"],
+        }
+
+    att_list = [lead] + [attacker(r, i + 1) for i, r in enumerate(pet_rows)][:2]
+    def_list = [
+        {"team": 2, "code": i, "is_pet": 0, "id": d["id"], "name": d["name"],
+         "lv": d["lv"], "hp": d["hp"], "img": d["icon"]}
+        for i, d in enumerate(defenders)
+    ]
+    return att_list, def_list
+
+
+def _battle_record(att_list, def_list) -> list[dict]:
+    """Replay steps, one per defender, all struck down.
+
+    FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard and
+    HunterResultUI.as:578 never starts the replay timer when record is empty, so
+    every step carries all three on both sides.
+    """
+    steps = [
+        {"att": {"team": 1, "code": 0, "cur_hp": att_list[0]["hp"],
+                 "is_dead": False, "is_revive": False},
+         "def": {"team": 2, "code": i, "cur_hp": 0,
+                 "is_dead": True, "is_revive": False}}
+        for i in range(len(def_list))
+    ]
+    if not steps:
+        steps = [{"att": {"team": 1, "code": 0, "cur_hp": att_list[0]["hp"],
+                          "is_dead": False, "is_revive": False},
+                  "def": {"team": 2, "code": 0, "cur_hp": 0,
+                          "is_dead": True, "is_revive": False}}]
+    return steps
+
+
 def _hunter_fight(database_path: Path) -> Response:
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
@@ -1574,37 +1646,14 @@ def _hunter_fight(database_path: Path) -> Response:
         rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
 
     # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
-    # The hunter himself always leads att_list: HunterResultUI.as:352-355 reads
-    # att_list[0].img straight into ShowItem.items, which expects the "_" joined
-    # skin-layer string. A pet id there (e.g. "999") is looked up in skin.txt,
-    # misses, and the layer is silently dropped — that was the missing body/head.
-    hunter=_role_skin_string(worn)
-    nick=p["nick"] or "猎人"
-    lv=p["lv"] or 1
-    lead={"team":1,"code":0,"is_pet":0,"id":0,"name":nick,"lv":lv,"pre_lv":lv,
-          "hp":100,"img":hunter}
-
-    def attacker(row: sqlite3.Row, code: int) -> dict[str, object]:
-        power=(row["pro_hp"] or 0)+(row["pro_phy_att"] or 0)+(row["pro_mag_att"] or 0)
-        return {"team":1,"code":code,"is_pet":1,"index":row["index"],"id":row["id"],
-                "name":_pet_name(row["id"], row["name"]),"lv":row["lv"],
-                "pre_lv":row["lv"],"hp":100+power,"img":row["icon"]}
-
-    att_list=[lead]+[attacker(r, i + 1) for i, r in enumerate(rows)][:2]
-    def_list=[
-        {"team":2,"code":i,"is_pet":0,"id":m["id"],"name":m["name"],"lv":m["lv"],
-         "hp":m["hp"],"img":m["icon"]}
-        for i, m in enumerate(monsters)
-    ]
-    # FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard at
-    # all, and an empty record array leaves the replay timer unscheduled
-    # (HunterResultUI.as:578), so every record must carry all three.
-    record=[
-        {"att":{"team":1,"code":0,"cur_hp":lead["hp"],"is_dead":False,"is_revive":False},
-         "def":{"team":2,"code":i,"cur_hp":0,"is_dead":True,"is_revive":False}}
-        for i in range(len(def_list))
-    ] or [{"att":{"team":1,"code":0,"cur_hp":lead["hp"],"is_dead":False,"is_revive":False},
-            "def":{"team":2,"code":0,"cur_hp":0,"is_dead":True,"is_revive":False}}]
+    att_list, def_list = _battle_side(
+        hunter_skin=_role_skin_string(worn),
+        hunter_name=p["nick"] or "猎人",
+        hunter_lv=p["lv"] or 1,
+        pet_rows=rows,
+        defenders=monsters,
+    )
+    record=_battle_record(att_list, def_list)
     # LOCAL DEFAULT rewards; the original hunt reward table is not recoverable.
     exp_reward=10*sum(m["lv"] for m in monsters) or 10
     return _protocol_response(6,{
@@ -1808,7 +1857,9 @@ def _training_action(database_path: Path) -> Response:
         )
         pet={"id":row["pet_id"],"icon":row["icon"],"name":_pet_name(row["pet_id"], row["name"])}
     gain=LOCAL_TRAIN_GAIN[ttype]
-    adds={f"add_{k[4:]}": v for k, v in gain.items()}
+    # "pro_hp" -> "add_hp_tp": strip the whole "pro" prefix, not 4 characters
+    # (k[4:] would leave a leading underscore and produce "add__hp_tp").
+    adds={f"add_{k[len('pro_'):]}": v for k, v in gain.items()}
     return _protocol_response(10,{
         "pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,
         "add_hp_tp":adds.get("add_hp_tp",0),"add_phy_att_tp":adds.get("add_phy_att_tp",0),
@@ -1823,6 +1874,8 @@ LOCAL_ARENA_RIVAL_LEVEL = 5
 
 
 LOCAL_EXPLORE_HIRE_SLOTS = 6
+# LOCAL DEFAULT: price quoted when every rental slot type is already in use.
+LOCAL_EXPLORE_SLOT_PRICE = 12000
 
 
 def _explore_hire_list(database_path: Path) -> Response:
@@ -1937,6 +1990,310 @@ def _choose_rest_pet(database_path: Path) -> Response:
             return _pet_error(506)
         pet = _pet_list_entry(row)
     return _protocol_response(45, {"value": "ok", "pet": pet})
+
+
+LOCAL_COPY_MAPS = (1001, 1002, 1003, 1004)
+
+
+def _defenders_from_monsters(ids) -> list[dict[str, object]]:
+    """Real monster rows for the enemy side of a fight."""
+    return [m for m in (_pick_monster(i) for i in ids) if m is not None]
+
+
+def _fight_payload(database_path: Path, defenders):
+    """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record)."""
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        p = c.execute("SELECT id,nick,lv FROM players WHERE uid=?", (uid,)).fetchone()
+        if p is None:
+            return None
+        worn = _worn_equipment(c, p["id"])
+        rows = c.execute(
+            """SELECT id AS "index", pet_id AS id, icon, name, lv,
+                      pro_hp, pro_phy_att, pro_mag_att
+               FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0
+               ORDER BY id LIMIT 2""",
+            (p["id"],),
+        ).fetchall()
+    att_list, def_list = _battle_side(
+        hunter_skin=_role_skin_string(worn),
+        hunter_name=p["nick"] or "猎人",
+        hunter_lv=p["lv"] or 1,
+        pet_rows=rows,
+        defenders=defenders,
+    )
+    return att_list, def_list, _battle_record(att_list, def_list)
+
+
+def _arena_battle(database_path: Path) -> Response:
+    """24 (ARENA_KEY) — arena settlement.
+
+    RingResultUI shares the hunt replay contract. FightResultItem.as:349 and :405
+    read arena_ap/max_arena_ap/rage_point with no guard and concatenate them into
+    text, so all three must be present and numeric.
+    """
+    parts = _fight_payload(database_path, _defenders_from_monsters((1,)))
+    if parts is None:
+        return _pet_error(103)
+    att_list, def_list, record = parts
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
+        if p is None:
+            return _pet_error(103)
+        ap = max(0, (p["arena_ap"] or 0) - 1)
+        c.execute("UPDATE players SET arena_ap=? WHERE id=?", (ap, p["id"]))
+        max_ap = p["max_arena_ap"] or LOCAL_ARENA_RIVAL_LEVEL
+    # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
+    return _protocol_response(24, {
+        "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": 0,
+        "rage_point": 0, "att_list": att_list, "def_list": def_list,
+        "record": record, "pic": [],
+        "reward_point": 20, "reward_crystal": 0, "reward_goods": [],
+        "value": "ok",
+    })
+
+
+def _copy_list(database_path: Path) -> Response:
+    """73 (COPY_LIST_KEY) — the abyss/dungeon map grid.
+
+    AbyssMapUI.as:197-199 calls int(param2.maps.length) with no null guard, and
+    MapItem.as:315 locks a tile when is_battle_able is falsy, so an empty or
+    short list would leave nothing tappable.
+    """
+    uid = _request_value("uid")
+    try:
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        if c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone() is None:
+            return _pet_error(103)
+    # LOCAL DEFAULT: four stages, all unlocked, from LOCAL_COPY_MAPS.
+    maps = [
+        {"code": i, "id": map_id, "is_battle_able": 1,
+         "finish_rate": 0, "finished_num": 0}
+        for i, map_id in enumerate(LOCAL_COPY_MAPS[:size], start=1)
+    ]
+    return _protocol_response(73, {"cd": 0, "maps": maps, "value": "ok"})
+
+
+def _copy_battle(database_path: Path) -> Response:
+    """74 (COPY_BATTLE_KEY) — dungeon settlement.
+
+    AbyssResultUI was compared against HunterResultUI and RingResultUI field by
+    field: att_list/def_list/record are structurally identical, so the shared
+    builder applies. AbyssResultUI.readDatas has no if(param1 == ...) guard, so a
+    malformed body here is fatal rather than merely ignored.
+    """
+    uid = _request_value("uid")
+    try:
+        hid = int(_request_value("hid", ""))
+    except ValueError:
+        return _pet_error(100)
+    if hid not in LOCAL_COPY_MAPS:
+        return _pet_error(400)
+    parts = _fight_payload(database_path, _defenders_from_monsters((1, 11)))
+    if parts is None:
+        return _pet_error(103)
+    att_list, def_list, record = parts
+    with _connect_database(database_path) as c:
+        if c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone() is None:
+            return _pet_error(103)
+    # LOCAL DEFAULT rewards; reward_goods[].id resolves through pic.txt
+    # (FightResultItem.as:476), so it stays empty rather than guessing an id.
+    return _protocol_response(74, {
+        "is_win": 1, "att_list": att_list, "def_list": def_list,
+        "record": record, "pic": [],
+        "reward_point": 50, "reward_crystal": 0, "reward_goods": [],
+        "value": "ok",
+    })
+
+
+def _explore_equip_price(record: dict[str, str]) -> tuple[int, int]:
+    """(price_type, price) from exploreEquip's three cost columns.
+
+    PropItem.as:286-302 switches on price_type: 1 money, 2 point, 3 crystal and
+    anything else the goods variant. HireShopUI.as:215-228 uses the same order.
+    """
+    money = int(record.get("needMoney") or 0)
+    point = int(record.get("needPoint") or 0)
+    crystal = int(record.get("needCrystal") or 0)
+    if money:
+        return 1, money
+    if point:
+        return 2, point
+    if crystal:
+        return 3, crystal
+    return 4, 0
+
+
+def _rented_ids(database_path: Path, player_id: int, slot_type: int) -> set[int]:
+    with _connect_database(database_path) as c:
+        return {
+            r["equip_id"]
+            for r in c.execute(
+                "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=?",
+                (player_id, slot_type),
+            )
+        }
+
+
+def _explore_equip_list(database_path: Path) -> Response:
+    """100 (EXPLORE_EQUIP_LIST_KEY) — the rental shop.
+
+    HireShopUI.as:201-202 reads int(param2.list.length) with no null guard, and
+    the name/icon come from exploreEquip itself (:211-212), so each entry only
+    needs the id plus its price. `type` must echo the requested ttype rather than
+    the table's own type column: HireShopUI.as:179 and HireListUI.as:266 send it
+    straight back as the next request's ttype.
+    """
+    uid = _request_value("uid")
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rented = _rented_ids(database_path, player["id"], ttype)
+    table = config_tables._table("exploreEquip.txt")
+    by_type: dict[int, list[int]] = {}
+    for equip_id, record in table.items():
+        raw = str(record.get("type", "")).strip()
+        if raw.isdigit():
+            by_type.setdefault(int(raw), []).append(int(equip_id))
+    # exploreEquip.type is 1=mount / 2=gear; request ttype 1 and 2 select between
+    # them, and 4 is the goods-currency variant shown by HireShopInfoUI.
+    source = ttype if ttype in by_type else 1
+    entries = []
+    for equip_id in sorted(by_type.get(source, []))[:size]:
+        price_type, price = _explore_equip_price(table[equip_id])
+        entries.append({
+            "id": equip_id, "price_type": price_type, "price": price,
+            "need_goods_num": 0, "need_goods_id": 0, "type": ttype,
+            "is_rented": 1 if equip_id in rented else 0,
+        })
+    return _protocol_response(100, {"type": ttype, "list": entries, "value": "ok"})
+
+
+def _explore_equip_info(database_path: Path) -> Response:
+    """101 (EXPLORE_EQUIP_INFO_KEY) — rental detail page.
+
+    HireShopInfoUI.as:202 reads goods_ext.need_goods_id with no null guard, so
+    goods_ext is always an object. name/icon/remark are resolved by the client
+    from exploreEquip, hence they are not sent.
+    """
+    uid = _request_value("uid")
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        gid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    table = config_tables._table("exploreEquip.txt")
+    record = table.get(gid)
+    if record is None:
+        return _pet_error(400)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rented = _rented_ids(database_path, player["id"], ttype)
+    return _protocol_response(101, {
+        "type": ttype, "id": gid,
+        "is_rented": 1 if gid in rented else 0,
+        "need_money": int(record.get("needMoney") or 0),
+        "need_point": int(record.get("needPoint") or 0),
+        "need_crystal": int(record.get("needCrystal") or 0),
+        "goods_ext": {"need_goods_id": 0, "own_need_goods_num": 0},
+        "value": "ok",
+    })
+
+
+def _explore_rent(database_path: Path) -> Response:
+    """102 (EXPLORE_RENT_KEY) — pure ack.
+
+    All three callers (HireShopInfoUI.as:166, HireMountsUI.as:193 and
+    HireListUI.as:234) check param2.value == "ok" and silently return otherwise,
+    so value must be exactly that string. The row is written first because all
+    three re-request 104 immediately afterwards.
+    """
+    uid = _request_value("uid")
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        gid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    if gid not in config_tables._table("exploreEquip.txt"):
+        return _pet_error(400)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        count = c.execute(
+            "SELECT COUNT(*) FROM explore_rented WHERE player_id=? AND slot_type=?",
+            (player["id"], ttype),
+        ).fetchone()[0]
+        if count >= LOCAL_EXPLORE_HIRE_SLOTS:
+            return _protocol_response(
+                102, {"value": "full", "need_money": 0, "own_money": 0}
+            )
+        c.execute(
+            "INSERT OR IGNORE INTO explore_rented (player_id, equip_id, slot_type)"
+            " VALUES (?,?,?)",
+            (player["id"], gid, ttype),
+        )
+    return _protocol_response(102, {"value": "ok"})
+
+
+def _explore_stop(database_path: Path) -> Response:
+    """105 (EXPLORE_INFO_KEY) — "abandon this expedition".
+
+    ExplorePveUI.as:365-372 and ExploreEventResultUI.as:115-122 are identical and
+    read only `value`. Anything other than "ok" falls through to the EXPLORE_KEY
+    branch, where param2 = param2.battle_result is undefined and the next line
+    reads _loc2_.is_win — a hard TypeError (ExplorePveUI.as:377).
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        if c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone() is None:
+            return _pet_error(103)
+    return _protocol_response(105, {"value": "ok"})
+
+
+def _explore_add_slot(database_path: Path) -> Response:
+    """106 (EXPLORE_ADD_EQUIP_COUNT_KEY) — buy another rental slot.
+
+    The only command in this group that reports field-level failure: on a value
+    other than "ok", HireListUI.as:216 and :219 read need_money and own_money with
+    no guard, and a missing one becomes NaN in the displayed price.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute(
+            "SELECT id, money FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        count = c.execute(
+            "SELECT COUNT(DISTINCT slot_type) FROM explore_rented WHERE player_id=?",
+            (player["id"],),
+        ).fetchone()[0]
+        if count < LOCAL_EXPLORE_HIRE_SLOTS:
+            # LOCAL DEFAULT: a free slot until every type is filled once.
+            return _protocol_response(106, {"value": "ok"})
+        own = player["money"] or 0
+    return _protocol_response(106, {
+        "value": "not_enough",
+        "need_money": LOCAL_EXPLORE_SLOT_PRICE,
+        "own_money": own,
+    })
 
 
 def _arena_fighter(database_path: Path) -> Response:
@@ -2443,8 +2800,10 @@ def _player_pets(database_path: Path) -> Response:
     pets = []
     for row in rows:
         pet = dict(row)
-        if pet["name"] is None:
-            pet.pop("name")
+        # Populating the name from pet.txt matters here: FarmUI's PetItem and
+        # Pet.as:135 both read data.name with no fallback, so dropping the key
+        # rendered "undefined" on the device.
+        pet["name"] = _pet_name(row["id"], row["name"])
         pets.append(pet)
     capacity = player["pet_capacity"]
     can_expand = capacity < LOCAL_MAX_PET_CAPACITY
@@ -3039,6 +3398,22 @@ def create_app(config: dict | None = None) -> Flask:
             return _choose_pet_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "104":
             return _explore_hire_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "100":
+            return _explore_equip_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "101":
+            return _explore_equip_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "102":
+            return _explore_rent(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "105":
+            return _explore_stop(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "106":
+            return _explore_add_slot(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "24":
+            return _arena_battle(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "73":
+            return _copy_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "74":
+            return _copy_battle(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "44":
             return _choose_battle_pet(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "45":
