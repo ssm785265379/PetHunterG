@@ -1253,7 +1253,10 @@ def _hunter_fight(database_path: Path) -> Response:
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
         ap=p["ht_ap"]-1
-    return _protocol_response(6,{"is_win":1,"hunt_type":1,"map_id":hid,"monster_group":[],"att_list":[],"def_list":[],"record":[],"ht_ap":ap,"value":"ok"})
+    att={"team":1,"code":0,"is_pet":1,"id":1002,"name":"火龙","pre_lv":5,"lv":5,"hp":100,"img":1002}
+    defense={"team":2,"code":0,"is_pet":0,"id":1001,"name":"烈焰怪","lv":1,"hp":50,"img":1001}
+    record=[{"att":{"team":1,"code":0,"hp":100},"def":{"team":2,"code":0,"hp":0}}]
+    return _protocol_response(6,{"is_win":1,"hunt_type":1,"map_id":hid,"monster_group":1,"att_list":[att],"def_list":[defense],"record":record,"ht_ap":ap,"value":"ok"})
 
 
 def _hunter_catch(database_path: Path) -> Response:
