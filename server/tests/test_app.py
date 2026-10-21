@@ -1624,7 +1624,112 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
-def test_catching_a_pet_actually_adds_it_to_the_roster(tmp_path: Path):
+def test_hunting_awards_pet_exp_and_levels_the_squad(tmp_path: Path):
+    # Levelling used to be reachable only by feeding exp items; battles returned a
+    # reward_exp figure but never wrote it anywhere, so a freshly caught lv-1 pet
+    # could never reach the evolution gates. Every hunt now credits the pets that
+    # fought (LOCAL DEFAULT: full reward_exp to each participant).
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ExpHunt")
+    with sqlite3.connect(database) as connection:
+        pet_ids = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 2"
+        )]
+        connection.execute("UPDATE pets SET lv = 1, exp = 0")
+        connection.execute("UPDATE players SET ht_ap = 20, max_ht_ap = 20")
+        connection.commit()
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1})
+    )
+    assert command == 6
+    assert payload["reward_exp"] > 0
+    assert payload["pet_exp"], "the response should report the exp each pet gained"
+    assert {entry["index"] for entry in payload["pet_exp"]} == set(pet_ids)
+
+    with sqlite3.connect(database) as connection:
+        gained = connection.execute(
+            "SELECT id, lv, exp FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
+        ).fetchall()
+    for pet_id, lv, exp in gained:
+        assert (lv, exp) == (1, payload["reward_exp"]), "one hunt is below one level"
+
+    # Enough hunts must actually cross the level boundary.
+    for _ in range(11):
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1})
+        with sqlite3.connect(database) as connection:
+            connection.execute("UPDATE players SET ht_ap = 20")
+            connection.commit()
+    with sqlite3.connect(database) as connection:
+        levels = [r[0] for r in connection.execute(
+            "SELECT lv FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
+        )]
+    assert all(lv >= 2 for lv in levels), f"pets should have levelled up, got {levels}"
+
+
+def test_evolving_a_pet_rewrites_it_to_the_real_next_species(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EvoOne")
+    from pet_hunter_server.app import LOCAL_PET_EVOLUTION
+
+    pets = config_tables._table("pet.txt")
+    # Pick a pet that has an evolution target and enough level to qualify.
+    with sqlite3.connect(database) as connection:
+        index = connection.execute("SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1").fetchone()[0]
+        current = connection.execute("SELECT pet_id FROM pets WHERE id = ?", (index,)).fetchone()[0]
+    target = LOCAL_PET_EVOLUTION.get(current)
+    assert target is not None, f"pet {current} needs an evolution entry"
+    assert target["id"] in pets, "the evolved species must exist in pet.txt"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE pets SET lv = ? WHERE id = ?", (target["need_lv"], index))
+        connection.commit()
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "14", "uid": uid, "index": index})
+    )
+    assert command == 14
+    assert payload["id"] == target["id"]
+    assert payload["icon"] == target["icon"]
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT pet_id, icon, star FROM pets WHERE id = ?", (index,)
+        ).fetchone()
+    assert row == (target["id"], target["icon"], target["star"])
+
+
+def test_synthesis_consumes_the_vice_pet_and_raises_generation(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SynOne")
+    with sqlite3.connect(database) as connection:
+        indexes = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 2"
+        )]
+        generation = connection.execute(
+            "SELECT generation FROM pets WHERE id = ?", (indexes[0],)
+        ).fetchone()[0]
+    command, payload = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "65", "uid": uid, "main": indexes[0], "vice": indexes[1]},
+        )
+    )
+    assert command == 65
+    assert payload["index"] == indexes[0]
+    assert payload["exd_generation"] == (generation or 1) + 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE id = ?", (indexes[1],)
+        ).fetchone()[0] == 0, "the vice pet is consumed"
+        row = connection.execute(
+            "SELECT generation, pro_hp FROM pets WHERE id = ?", (indexes[0],)
+        ).fetchone()
+    assert row[0] == (generation or 1) + 1
+
+
+
     # HunterCatchUI.as:128-150 renders index/id/icon/pic and never inspects
     # is_success, so a catch must hand back a real pet that already exists in the
     # database — the previous implementation always returned is_success 0 and

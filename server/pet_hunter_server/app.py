@@ -103,11 +103,43 @@ LOCAL_SHOP_GOODS = (
     # 一袋银币 is normally loot, not shop stock; price 500 point is a local default.
     {"item_id": 10022, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10022, "sort": 1},
 )
-# Local levelling rule for pet exp items: the original curve is not recoverable.
-# Every LOCAL_PET_EXP_PER_LEVEL exp raises the pet one level (up to the cap); the
-# remainder is kept in pets.exp. Evolution gates then read the new level.
+# Local levelling rule for pet exp: the original curve is not recoverable.
+# LOCAL DEFAULT: a flat 1,000,000 exp per level. The bundled exp items carry real
+# per-item values in this range (prop.txt's 宠物经验道具 grants 1,330,000), so the
+# per-level cost stays in that scale and battle rewards below are scaled to match.
 LOCAL_PET_EXP_PER_LEVEL = 1000000
 LOCAL_MAX_PET_LEVEL = 99
+# LOCAL DEFAULT: exp a single battle awards to each pet that took part, per
+# monster level. 100,000 means a lv-1 hunt is ~10% of a level.
+LOCAL_HUNT_EXP_PER_LEVEL = 100000
+LOCAL_EXPLORE_EXP = 300000
+# LOCAL DEFAULT: silver awarded per monster level on a hunt win.
+LOCAL_HUNT_POINT_REWARD = 50
+
+
+def _grant_pet_exp(connection, pet_ids, amount: int) -> list[dict]:
+    """Add battle exp to the pets that fought, returning their new levels.
+
+    LOCAL DEFAULT: the original battle exp split is not recoverable, so every
+    participating pet receives the full reward_exp.
+    """
+    if amount <= 0 or not pet_ids:
+        return []
+    granted: list[dict] = []
+    for pet_id in pet_ids:
+        row = connection.execute(
+            "SELECT id, lv, exp FROM pets WHERE id = ?", (pet_id,)
+        ).fetchone()
+        if row is None:
+            continue
+        exp = (row["exp"] or 0) + amount
+        lv = row["lv"] or 1
+        while exp >= LOCAL_PET_EXP_PER_LEVEL and lv < LOCAL_MAX_PET_LEVEL:
+            exp -= LOCAL_PET_EXP_PER_LEVEL
+            lv += 1
+        connection.execute("UPDATE pets SET lv = ?, exp = ? WHERE id = ?", (lv, exp, pet_id))
+        granted.append({"index": pet_id, "lv": lv, "exp": exp, "add": amount})
+    return granted
 # Local sell prices for commands 68 (preview) and 69 (execute). The bundled
 # configs carry `recyclePoint = 0` for every local item, so the original sell
 # value is not recoverable; these defaults are half the item's reference price
@@ -1666,9 +1698,12 @@ def _hunter_fight(database_path: Path) -> Response:
         worn=_worn_equipment(c,p["id"])
         rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
         # LOCAL DEFAULT rewards; the original hunt payout table is not recoverable.
-        exp_reward=10*sum(m["lv"] for m in monsters) or 10
-        point_reward=5*exp_reward
+        exp_reward=LOCAL_HUNT_EXP_PER_LEVEL*(sum(m["lv"] for m in monsters) or 1)
+        point_reward=LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
         _credit_battle_rewards(c,p["id"],point=point_reward,crystal=0)
+        # The pets that actually fought gain the battle exp, so levelling (and the
+        # evolution level gates) can advance through normal play.
+        pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
 
     # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
     att_list, def_list = _battle_side(
@@ -1686,6 +1721,7 @@ def _hunter_fight(database_path: Path) -> Response:
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
         "rage_point":0,"finish_rate":100,"pic":pic,
         "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
+        "pet_exp":pet_exp,
         "reward_rate":1,"reward_goods":[],
         "value":"ok",
     })
@@ -1952,6 +1988,12 @@ def _explore_start(database_path: Path) -> Response:
         # LOCAL DEFAULT: an expedition always resolves against the first monsters
         # in monster.txt, since the per-map spawn table is not recoverable.
         _credit_battle_rewards(c,p["id"],point=LOCAL_EXPLORE_REWARD,crystal=0)
+        # Expedition battles train the squad too, so exploring is a viable way to
+        # level pets for evolution (LOCAL DEFAULT exp amount).
+        explore_pets=[r[0] for r in c.execute(
+            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            (p["id"],))]
+        _grant_pet_exp(c,explore_pets,LOCAL_EXPLORE_EXP)
     horse=_explore_horse(database_path, p["id"])
     att_list, def_list, record=_fight_payload(
         database_path,_defenders_from_monsters((1,)))
