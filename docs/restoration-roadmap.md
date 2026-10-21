@@ -161,6 +161,84 @@
 | 探险租赁 | 100 / 101 / 102 / 104 / 106 | ✓ | 驴/马/陆行鸟（exploreEquip.txt 真实数据）|
 | 狩猎人物纸娃娃 | 6 | ✓ | **见下方专项** |
 
+### 第二阶段：狩猎全链路与探险（2026-10-22）
+
+| 模块 | 命令 | 状态 | 证据 |
+|---|---|---|---|
+| 狩猎战斗结算 | 6 | ✓ 真机 | OCR 读到 水炮龟 / 原味波利lv1 / 奇异龙猫lv5 / 喷火龙lv5 / ssm；四个图像区域非背景占比 90–99% |
+| 竞技场结算 | 24 | ✓ | 与 6/74 共用生成器 |
+| 副本列表 / 战斗 | 73 / 74 | ✓ | 4 个 `is_battle_able=1`；共用生成器 |
+| 探险地图列表 | 98 | ✓ 真机 | 23 个真实地图（改用 exploreMap.txt 后从 2 个增至 23 个）|
+| 探险地图详情 | 99 | ✓ 真机 | 「要根据地图的地形和灾害来租赁坐骑和装备」|
+| 探险战斗 | 103 | ⚠ 见下 | 链路通、返回 1035 字节，但 ExplorePveUI 页面黑屏 |
+| 牧场养成槽位 | 504 / 10 | ✓ 真机 | 三个槽位非背景占比 99.6% / 99.7% / 99.9% |
+
+### 本阶段新发现的四个缺陷
+
+全部是**只有真机点击或代码交叉验证才能发现**的问题：
+
+#### 1. 战斗奖励只显示不入账
+
+`_hunter_fight` / `_arena_battle` / `_copy_battle` 返回 `reward_point`、`reward_crystal`
+但**从不写库**。`FightResultItem.as:285,296` 直接渲染响应里的数字，
+所以结算面板展示了一笔玩家从未拿到的钱。
+
+修复：新增 `_credit_battle_rewards()`，在同一个连接事务里 `point=point+?`。
+测试 `test_battle_rewards_are_actually_credited` 锁定「响应数字 == 实际到账」。
+
+#### 2. 探险战斗缺 `battle_result`（致命）
+
+`ExplorePveUI.as:377` 是 `param2 = param2.battle_result;`，
+紧接着 `:381` 读 `_loc2_.is_win`。响应里没有 `battle_result` 时，
+`param2` 变成 undefined，**下一行直接抛 TypeError**，页面无法渲染。
+
+修复：103 现在内嵌完整 `battle_result`，复用 `_battle_side` / `_battle_record`
+（`ExplorePveUI.as:381-510` 的字段契约与 `HunterResultUI` 一致）。
+
+#### 3. 训练增益字段名映射错误（静默失效）
+
+数据库列是 `pro_hp`，客户端字段是 `add_hp_tp`。
+原映射生成的是 `add_hp`，查 `add_hp_tp` 恒得 0 ——
+**三种训练的收益全部显示为 0，且不报错**。
+
+修复：`f"add_{k.split('_', 1)[1]}_tp"`。
+测试 `test_training_action_reports_the_matching_stat_gain` 逐项断言三种类型。
+
+#### 4. 探险地图用的是硬编码 LOCAL DEFAULT
+
+`LOCAL_EXPLORE_MAPS` 只有 3 条硬编码，而随包的 `exploreMap.txt` 有 185 条真实数据
+（`worldId` / `terrain` / `star` / `name` / 奖励列）。`ExplorePveUI.as:385`
+还要用 `map_id` 去 `exploreMap` 查 `iconId`，硬编码 id 必然对不上。
+
+修复：改为 `_explore_map_row()` 读真实表。真机验证地图列表从 2 个变为 **23 个**。
+
+### 未解决：ExplorePveUI 黑屏（客户端侧）
+
+点「一出即发」进入探险战斗后，屏幕 **97.8% 为纯黑**，且内部返回键无响应
+（返回键直接退出应用到安卓桌面）。
+
+**已排除服务端原因**，实验证据：
+
+1. 把 `battle_result` 键改名使其不存在 → 仍然 97.7% 黑屏。
+2. 逐字段比对 `ExplorePveUI.as:381-510` 与 `HunterResultUI.as:347-420`：
+   `is_win` / `hunt_type` / `map_id` / `monster_group` / `att_list` / `def_list` / `record`
+   契约完全一致，且 `HunterResultUI` 在同一台设备上**渲染正常**。
+3. 用 `tools/swf_symbols.py`（解压后扫描）验证 `map_1`、`map_3`、`p1001`、`p5001`
+   符号**全部存在**，且 `LoadingUI.as:348-380` 加载了全部 pet 分卷。
+
+结论：`ExplorePveUI` 的**构造期**（`initPve()`，`ExplorePveUI.as:121-177`）在本 AIR 版本下
+存在客户端缺陷。它在 `readDatas` 之前执行，因此与服务端数据无关。
+这一项需要修改客户端 SWF 才能解决，超出当前"服务端还原"的范围。
+
+### 工具修正：swf_symbols.py
+
+早期删除的 `scan_symbols.py` 直接在原始字节里搜符号名，对 `CWS`（zlib 压缩）SWF
+几乎什么都搜不到，会把存在的符号误报为 MISSING。
+
+新工具先按文件头 `CWS`/`ZWS`/`FWS` 解压再扫描。
+验证：`map_1`、`map_3` 正确报告为存在；`p5001` 正确报告只在 `pet6000.swf` 中
+（这解释了为什么按文件名猜测分卷是不可靠的）。
+
 ### 专项：进入狩猎没有人物头部图片
 
 这是用户报告的核心缺陷。根因是**数据类型不匹配**，不是缺数据：
