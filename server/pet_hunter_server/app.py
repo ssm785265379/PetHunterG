@@ -8,6 +8,8 @@ from pathlib import Path
 
 from flask import Flask, Response, current_app, jsonify, request, send_file
 
+from . import config_tables
+
 
 KNOWN_COMMANDS = {
     "autoLogin",
@@ -22,9 +24,9 @@ KNOWN_COMMANDS = {
     "show",
 }
 
-LOCAL_DEFAULT_BAG_CAPACITY = 100
+LOCAL_DEFAULT_BAG_CAPACITY = 1000
 # Local cap for bag expansion consumables (背包扩展卡). Not a recovered rule.
-LOCAL_MAX_BAG_CAPACITY = 200
+LOCAL_MAX_BAG_CAPACITY = 2000
 # Local-only pet slot rules. The original server capacities are unknown, so these
 # are explicit local defaults, not recovered rules.
 LOCAL_DEFAULT_PET_CAPACITY = 30
@@ -721,6 +723,87 @@ def _auto_register_player(database_path: Path) -> Response:
     return _protocol_response(4099, {"value": player["uid"]})
 
 
+# equip.txt `type` -> the three slots RoleInfoUI prints (weapon/clothes/hat).
+EQUIP_SLOT_FIELD = {1: "weapon", 2: "clothes", 3: "hat"}
+ROLE_BASE_STATS = {
+    # LOCAL DEFAULT: the original per-level base stats are not recoverable. These
+    # are fixed starting values so equipment bonuses are visible in the panel.
+    "hp": 100,
+    "speed": 10,
+    "phy_att": 10,
+    "mag_att": 10,
+    "phy_def": 10,
+    "mag_def": 10,
+}
+# The body layer every role wears. 100001 is the first id in skin.txt and its
+# `s100001` class is what ShowItem instantiates under the equipment layers.
+LOCAL_BASE_SKIN_LAYER = 100001
+
+
+def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int, sqlite3.Row]:
+    """Return {slot: inventory row} for the equipment the player is wearing."""
+    rows = connection.execute(
+        """
+        SELECT id, item_id, item_type, icon, level, star, hp, speed,
+               phy_att, mag_att, phy_def, mag_def
+        FROM inventory WHERE player_id = ? AND team = 3 AND equipped = 1
+        """,
+        (player_id,),
+    ).fetchall()
+    worn: dict[int, sqlite3.Row] = {}
+    for row in rows:
+        # Prefer the config slot; fall back to the stored item_type.
+        record = config_tables.equip_record(row["item_id"])
+        slot = config_tables.equip_slot(record) if record else row["item_type"]
+        if slot in EQUIP_SLOT_FIELD:
+            worn[slot] = row
+    return worn
+
+
+def _role_skin_string(worn: dict[int, sqlite3.Row]) -> str:
+    """Build the ShowItem layer string.
+
+    ShowItem.as:41 splits on "_", looks each id up in skin.txt for its `z`, then
+    instantiates `s<id>`. A missing layer raises, so only ship ids present in the
+    bundled skin table. The body layer goes first; the rest are sorted by z.
+    """
+    skin = config_tables.skin_table()
+    layers: list[int] = [LOCAL_BASE_SKIN_LAYER]
+    for row in worn.values():
+        record = config_tables.equip_record(row["item_id"])
+        if not record:
+            continue
+        image_id = config_tables.equip_image_id(record)
+        if image_id and image_id in skin and image_id not in layers:
+            layers.append(image_id)
+    layers.sort(key=lambda lid: int(skin.get(lid, {}).get("z", "0") or 0))
+    return "_".join(str(lid) for lid in layers)
+
+
+def _role_stats(worn: dict[int, sqlite3.Row]) -> dict[str, int]:
+    """Base stats plus the summed bonuses of every worn equipment."""
+    totals = dict(ROLE_BASE_STATS)
+    for row in worn.values():
+        for key in totals:
+            totals[key] += row[key] or 0
+    return totals
+
+
+def _equipped_slot_fields(worn: dict[int, sqlite3.Row]) -> dict[str, object]:
+    """RoleInfoUI.as:170-172 reads weapon/clothes/hat plus a *_level each."""
+    payload: dict[str, object] = {}
+    for slot, field in EQUIP_SLOT_FIELD.items():
+        row = worn.get(slot)
+        if row is None:
+            payload[field] = 0
+            payload[f"{field}_level"] = 0
+            continue
+        record = config_tables.equip_record(row["item_id"])
+        payload[field] = row["item_id"] if record else 0
+        payload[f"{field}_level"] = row["level"] or 0
+    return payload
+
+
 def _player_info(database_path: Path, command_id: int = 510) -> Response:
     uid = _request_value("uid")
     with _connect_database(database_path) as connection:
@@ -732,13 +815,27 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
             """,
             (uid,),
         ).fetchone()
-    if player is None:
-        return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
-    payload = dict(player)
-    if command_id == 2:
-        # Local starting state; guild and arena systems are not restored yet.
-        # HomeUI resolves job through the bundled upRole configuration.
-        payload.update(job=1, guild_name="", guild_position=0, arena_rank=0)
+        if player is None:
+            return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
+        worn = _worn_equipment(connection, player["id"])
+        pic_num = connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id = ?", (player["id"],)
+        ).fetchone()[0]
+        payload = dict(player)
+        # RoleInfoUI.as:137-186 and HomeUI.as:184-196 read every field below; the
+        # six stats, the three equipment slots and `img` (the paper-doll layer
+        # string) were all missing, which is why the panel printed `undefined`
+        # and why worn gear never showed up on the character.
+        payload.update(_role_stats(worn))
+        payload["img"] = _role_skin_string(worn)
+        payload["pic_num"] = pic_num
+        payload["skills"] = []
+        payload["buffs"] = []
+        payload.update(_equipped_slot_fields(worn))
+        if command_id == 2:
+            # Local starting state; guild and arena systems are not restored yet.
+            # HomeUI resolves job through the bundled upRole configuration.
+            payload.update(job=1, guild_name="", guild_position=0, arena_rank=0)
     return _protocol_response(command_id, payload)
 
 
@@ -821,8 +918,13 @@ def _player_equipment_detail(database_path: Path) -> Response:
     if row is None:
         return _pet_error(400)
 
-    # EquipInfoUI looks up pic[id].name locally and instantiates "p"+icon, and has
-    # no try/catch around that lookup, so only real equip ids/icons may be returned.
+    # EquipInfoUI.as:191-246 resolves the display name from pic.txt (which does
+    # carry an entry for every equip.txt id, type=2) and instantiates
+    # "p"+icon with no try/catch, so only real ids/icons may be returned.
+    # skills/buffs come from equip.txt `skills` ("101:5101"); getSkill() reads
+    # each entry's `id`.
+    record = config_tables.equip_record(row["id"])
+    skill_ids = config_tables.equip_skills(record) if record else []
     return _protocol_response(
         39,
         {
@@ -841,6 +943,8 @@ def _player_equipment_detail(database_path: Path) -> Response:
             "phy_def": row["phy_def"],
             "mag_def": row["mag_def"],
             "speed": row["speed"],
+            "skills": [{"id": sid} for sid in skill_ids],
+            "buffs": [],
         },
     )
 
@@ -1333,12 +1437,32 @@ def _player_detail_social(database_path: Path) -> Response:
 
 
 def _social_detail_response(database_path: Path, command_id: int) -> Response:
-    target=_request_value("gid"); uid=_request_value("uid")
+    # HomeUI.as:233-235 opens ROLE_INFO(3) for the player themselves and sends no
+    # gid; FriendInfoUI.as:200 passes another player's uid. Fall back to `uid` so
+    # the role page is reachable, and merge the paper doll / stats / equipment
+    # slots that RoleInfoUI.as:150-172 prints without any null guards.
+    target=_request_value("gid") or _request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,uid,nick,lv,img FROM players WHERE uid=?",(target,)).fetchone()
+        p=c.execute("SELECT id,uid,nick,lv FROM players WHERE uid=?",(target,)).fetchone()
         if p is None:return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=?",(p["id"],)).fetchall()
-    return _protocol_response(command_id,{"show_type":0,"player":{"id":p["uid"],"name":p["nick"],"lv":p["lv"],"img":p["img"]},"pets":[dict(r) for r in pets]})
+        worn=_worn_equipment(c,p["id"])
+        pic_num=c.execute("SELECT COUNT(*) FROM pets WHERE player_id=?",(p["id"],)).fetchone()[0]
+        slots=_equipped_slot_fields(worn)
+    # RoleInfoUI.as:144-172 reads name/lv/job/stats/weapon/... straight off
+    # param2 (NOT param2.player), so the role page fields must be top level.
+    # FriendInfoUI and KingFightInfoUI read param2.player for the same command,
+    # so both shapes are shipped.
+    player_fields={"id":p["uid"],"name":p["nick"],"lv":p["lv"],
+                   "img":_role_skin_string(worn),
+                   "job":1,"guild_name":"0","guild_position":0,
+                   "arena_rank":0,"pic_num":pic_num,
+                   **_role_stats(worn), **slots,
+                   "skills":[],"buffs":[]}
+    payload={**player_fields,
+             "show_type":0,"player":player_fields,
+             "pets":[dict(r) for r in pets]}
+    return _protocol_response(command_id,payload)
 
 
 def _hunter_list(database_path: Path) -> Response:
@@ -2266,6 +2390,124 @@ def _pet_evolve(database_path: Path) -> Response:
     return _protocol_response(14, _pet_detail_payload(updated))
 
 
+def _pet_synthesis_pick(database_path: Path, command_id: int) -> Response:
+    """62/63 (MAKE_MAIN_PET_KEY / MAKE_VICE_PET_KEY).
+
+    PetSynthesisListUI.as:198-224 renders `list[]` rows with index/name/lv/icon;
+    the name falls back to pet.txt when absent, so `name` may be left empty.
+    An empty first page shows error 10 ("没有可用的宠物"), which is the correct
+    behaviour when the player has nothing to offer.
+    """
+    uid = _request_value("uid")
+    try:
+        page = int(_request_value("p", "1"))
+        page_size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= page_size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player = connection.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        # LOCKED pets cannot be consumed or used as material.
+        rows = connection.execute(
+            """
+            SELECT id AS "index", pet_id AS id, icon, name, lv FROM pets
+            WHERE player_id=? AND battle_state=0 AND is_locked=0
+            ORDER BY id LIMIT ? OFFSET ?
+            """,
+            (player["id"], page_size, (page - 1) * page_size),
+        ).fetchall()
+    return _protocol_response(
+        command_id,
+        {"list": [dict(r) for r in rows]},
+    )
+
+
+def _pet_synthesis(database_path: Path) -> Response:
+    """65 (MAKE_PET_KEY): fuse the main pet with the vice pet.
+
+    PetSynthesisUI.as:254-264 sends {main, vice, ttype}. PetSynthesisResultUI
+    .as:124-197 needs index (for follow-ups), icon (instantiates "p"+icon with
+    no guard), name|id, lv, type, skills[]|buffs[] and the exd_* reinforcement
+    fields.
+
+    The fusion outcome itself is a LOCAL DEFAULT: the original server's synthesis
+    table is not recoverable, so the vice pet is consumed and the main pet keeps
+    its identity while gaining one generation of reinforcement.
+    """
+    uid = _request_value("uid")
+    main_raw = _request_value("main")
+    vice_raw = _request_value("vice")
+    if not main_raw or not vice_raw:
+        return _pet_error(100)
+    try:
+        main_index, vice_index = int(main_raw), int(vice_raw)
+    except ValueError:
+        return _pet_error(100)
+    if main_index == vice_index:
+        return _pet_error(100)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, pet_capacity FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        main_row = connection.execute(
+            "SELECT * FROM pets WHERE id=? AND player_id=?", (main_index, player["id"])
+        ).fetchone()
+        vice_row = connection.execute(
+            "SELECT * FROM pets WHERE id=? AND player_id=?", (vice_index, player["id"])
+        ).fetchone()
+        if main_row is None or vice_row is None:
+            return _pet_error(506)
+        if main_row["is_locked"] or vice_row["is_locked"]:
+            return _pet_error(524)
+        if vice_row["battle_state"] != 0 or main_row["battle_state"] != 0:
+            return _pet_error(524)
+
+        # LOCAL DEFAULT: one generation, +1 to each of the six reinforcements.
+        # pets stores them as pro_* (pro_hp … pro_mag_def), matching the
+        # *_tp fields DevelopPetInfoUI reads on command 9.
+        step = {"pro_hp": 5, "pro_speed": 5, "pro_phy_att": 5,
+                "pro_mag_att": 5, "pro_phy_def": 5, "pro_mag_def": 5}
+        for column, delta in step.items():
+            connection.execute(
+                f"UPDATE pets SET {column} = {column} + ? WHERE id = ?", (delta, main_index)
+            )
+        generation = (main_row["generation"] or 1) + 1
+        connection.execute("UPDATE pets SET generation=? WHERE id=?", (generation, main_index))
+        connection.execute("DELETE FROM pets WHERE id=?", (vice_index,))
+        updated = connection.execute(
+            """SELECT id AS "index", pet_id AS id, icon, name, lv, star, pro, skills,
+                      pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
+               FROM pets WHERE id=?""",
+            (main_index,),
+        ).fetchone()
+
+    skills = [s for s in str(updated["skills"] or "").replace(";", ":").split(":") if s.strip()]
+    payload = {
+        "index": updated["index"],
+        "id": updated["id"],
+        "icon": updated["icon"],
+        "name": updated["name"] or "",
+        "lv": updated["lv"],
+        "exd_generation": generation,
+        "type": 1,
+        "skills": [{"id": int(s)} for s in skills if s.isdigit()],
+        "buffs": [],
+        "exd_hp_tp": updated["pro_hp"],
+        "exd_speed_tp": updated["pro_speed"],
+        "exd_phy_att_tp": updated["pro_phy_att"],
+        "exd_mag_att_tp": updated["pro_mag_att"],
+        "exd_phy_def_tp": updated["pro_phy_def"],
+        "exd_mag_def_tp": updated["pro_mag_def"],
+    }
+    return _protocol_response(65, payload)
+
+
 def _pet_expand_capacity(database_path: Path) -> Response:
     uid = _request_value("uid")
     with _connect_database(database_path) as connection:
@@ -2431,6 +2673,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _training_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "10":
             return _training_action(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "62":
+            return _pet_synthesis_pick(current_app.config["DATABASE"], 62)
+        if command == "show" and _request_value("showId") == "63":
+            return _pet_synthesis_pick(current_app.config["DATABASE"], 63)
+        if command == "show" and _request_value("showId") == "65":
+            return _pet_synthesis(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "35":
             return _forge_refine(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "36":

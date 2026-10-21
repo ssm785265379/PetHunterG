@@ -5,6 +5,8 @@ import sqlite3
 import xml.etree.ElementTree as ET
 
 from pet_hunter_server import create_app
+from pet_hunter_server import config_tables, seed_items
+from pet_hunter_server.app import LOCAL_DEFAULT_BAG_CAPACITY
 
 
 def test_health_check_is_available_to_local_client():
@@ -559,7 +561,11 @@ def test_home_profile_reads_saved_player_and_survives_restart(tmp_path: Path):
     assert home["guild_name"] == ""
     assert home["guild_position"] == 0
     assert home["arena_rank"] == 0
-    assert home["img"] == "100001_100002_100003"
+    # `img` is the paper-doll layer string ShowItem splits on "_" (ShowItem.as:41);
+    # with nothing equipped only the base body layer is present.
+    assert home["img"] == "100001"
+    for key in ("hp", "phy_att", "mag_att", "phy_def", "mag_def", "speed"):
+        assert isinstance(home[key], int)
 
 
 def test_home_profile_rejects_unknown_player(tmp_path: Path):
@@ -588,7 +594,7 @@ def test_empty_inventory_is_persistent_per_player_and_accepts_bag_pages(tmp_path
     assert command == "22"
     assert json.loads(payload) == {
         "bag_size": 0,
-        "max_bag_size": 100,
+        "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY,
         "goods_list": [],
     }
 
@@ -620,7 +626,7 @@ def test_new_character_gets_the_local_starter_equipment_in_the_bag(tmp_path: Pat
     )[1]
 
     assert payload["bag_size"] == 1
-    assert payload["max_bag_size"] == 100
+    assert payload["max_bag_size"] == LOCAL_DEFAULT_BAG_CAPACITY
     assert len(payload["goods_list"]) == 1
     item = payload["goods_list"][0]
     assert item["id"] == 20001
@@ -1051,7 +1057,7 @@ def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
     )
     assert _envelope(bag_response) == (
         50,
-        {"value": 3, "max_bag_size": 103, "ht_ap": 20},
+        {"value": 3, "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY + 3, "ht_ap": 20},
     )
 
     silver_bag = _buy(client, uid, 10022, 1, 2)
@@ -1082,14 +1088,14 @@ def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
 
     assert point == 10000
     assert crystal == 10000
-    assert capacity == 103
+    assert capacity == LOCAL_DEFAULT_BAG_CAPACITY + 3
     bag = _envelope(
         client.post(
             "/flash.do",
             data={"m": "show", "showId": "22", "uid": uid, "ttype": "1", "p": "1", "n": "9"},
         )
     )[1]
-    assert bag["max_bag_size"] == 103
+    assert bag["max_bag_size"] == LOCAL_DEFAULT_BAG_CAPACITY + 3
 
 
 def _equipment_index(client, uid: str) -> int:
@@ -1366,6 +1372,205 @@ def _create_local_player(client, nick: str) -> str:
 def _envelope(response):
     command, payload = response.get_data(as_text=True).split("\t", 1)
     return int(command), json.loads(payload)
+
+
+def test_config_tables_load_shipped_equipment():
+    """equip.txt / prop.txt ship with a UTF-8 BOM; a plain utf-8 read silently
+    drops every row because the header's first column becomes '﻿id'."""
+    equips = config_tables.equip_table()
+    props = config_tables.prop_table()
+    assert len(equips) > 900 and len(props) > 100
+    record = config_tables.equip_record(20001)
+    assert config_tables.equip_slot(record) == 1
+    assert config_tables.equip_icon(record) == 20001
+    # imageId must resolve in skin.txt or ShowItem cannot instantiate the layer.
+    skin = config_tables.skin_table()
+    assert all(
+        config_tables.equip_image_id(r) in skin
+        for r in equips.values()
+        if config_tables.equip_image_id(r)
+    )
+
+
+def test_role_info_reports_stats_equipment_and_paper_doll(tmp_path: Path):
+    # RoleInfoUI.as:152-172 prints the six stats plus weapon/clothes/hat with no
+    # null guards, and :151 feeds `img` to ShowItem as a "_"-joined skin string.
+    # HomeUI.as:233-235 opens this page without a gid, so `uid` must be the
+    # fallback target (before this it answered -1:103 and the page was empty).
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RoleBare")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": 3, "uid": uid})
+    )
+    assert command == 3
+    # RoleInfoUI reads these off the top level, not param2.player.
+    bare = payload
+    for key in ("hp", "phy_att", "mag_att", "phy_def", "mag_def", "speed"):
+        assert isinstance(bare[key], int), f"{key} missing from role info"
+    assert bare["weapon"] == 0 and bare["clothes"] == 0 and bare["hat"] == 0
+    assert bare["name"] and bare["job"] == 1
+    # FriendInfoUI/KingFightInfoUI read the same fields under `player`.
+    assert payload["player"]["name"] == bare["name"]
+    skin = config_tables.skin_table()
+    for layer in bare["img"].split("_"):
+        assert int(layer) in skin
+
+    record = config_tables.equip_record(20001)
+    with sqlite3.connect(database) as connection:
+        # the starter pack already ships one 20001, so wear that row instead of
+        # inserting a duplicate (inventory has UNIQUE(player_id, item_id)).
+        connection.execute(
+            """UPDATE inventory SET equipped=1, phy_att=20, mag_att=20
+               WHERE player_id=1 AND item_id=20001"""
+        )
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": 3, "uid": uid})
+    )
+    worn = payload
+    assert worn["weapon"] == 20001 and worn["weapon_level"] == 1
+    assert worn["phy_att"] == bare["phy_att"] + 20
+    assert worn["mag_att"] == bare["mag_att"] + 20
+    # the worn weapon's skin layer must now be part of the paper doll string
+    assert str(config_tables.equip_image_id(record)) in worn["img"].split("_")
+
+
+def test_equipment_detail_reports_config_stats_and_skills(tmp_path: Path):
+    # EquipInfoUI.as:192 resolves the name from pic.txt (type=2 equipment rows)
+    # and :197 instantiates "p"+icon; :225 reads skills[] entries' `id`.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqInfo2")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": 22, "uid": uid, "ttype": 3})
+    )
+    assert command == 22 and payload["goods_list"]
+    index = payload["goods_list"][0]["index"]
+    command, detail = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": 39, "uid": uid, "index": index})
+    )
+    assert command == 39
+    assert detail["icon"] and isinstance(detail["skills"], list)
+
+
+def test_seed_items_fills_bag_from_shipped_tables(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SeedTest")
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE player_id=1 AND team=3"
+        ).fetchone()[0]
+    added = seed_items.seed_player_bag(database, uid, quantity=3)
+    assert added["props"] > 90 and added["equipment"] > 900
+    with sqlite3.connect(database) as connection:
+        counts = dict(
+            connection.execute(
+                "SELECT team, COUNT(*) FROM inventory WHERE player_id=1 GROUP BY team"
+            ).fetchall()
+        )
+    # the starter equipment ships with the player, so seeded rows plus what was
+    # already there must equal the total equipment in the shipped table.
+    assert counts.get(3) == before + added["equipment"]
+    assert counts.get(1, 0) + counts.get(2, 0) == added["props"]
+    # re-running must not duplicate rows
+    again = seed_items.seed_player_bag(database, uid, quantity=3)
+    assert again == {"props": 0, "equipment": 0}
+
+
+def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SeedList")
+    seed_items.seed_player_bag(database, uid, quantity=2)
+    for team in (1, 2, 3):
+        command, payload = _envelope(
+            client.post(
+                "/flash.do",
+                data={"m": "show", "showId": 22, "uid": uid, "ttype": team, "p": 1, "n": 9},
+            )
+        )
+        assert command == 22
+        for row in payload["goods_list"]:
+            # BagListUI.as:285 feeds `icon` to IconItem which resolves "p"+icon
+            assert row["icon"].startswith("p")
+            assert row["num"] > 0
+
+
+def test_pet_synthesis_pick_lists_usable_pets(tmp_path: Path):
+    # PetSynthesisListUI.as:198-224 renders list[] with index/name/lv/icon, and
+    # shows error 10 when the first page is empty, so only usable pets belong here.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SynPick")
+    with sqlite3.connect(database) as connection:
+        locked = connection.execute("SELECT id FROM pets WHERE player_id=1 ORDER BY id").fetchall()
+        connection.execute("UPDATE pets SET is_locked=1 WHERE id=?", (locked[1][0],))
+    for show_id in (62, 63):
+        command, payload = _envelope(
+            client.post(
+                "/flash.do",
+                data={"m": "show", "showId": show_id, "uid": uid, "p": 1, "n": 9},
+            )
+        )
+        assert command == show_id
+        assert payload["list"], f"{show_id} returned no selectable pet"
+        for row in payload["list"]:
+            assert {"index", "id", "icon", "lv"} <= set(row)
+            assert row["index"] != locked[1][0]
+
+
+def test_pet_synthesis_consumes_vice_and_reinforces_main(tmp_path: Path):
+    # PetSynthesisUI.as:254-264 sends {main,vice,ttype}; PetSynthesisResultUI
+    # .as:124-197 needs index/icon/name|lv/type/skills and the exd_* fields.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SynMake")
+    with sqlite3.connect(database) as connection:
+        main_id, vice_id = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
+        ).fetchall()]
+    command, payload = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "65", "uid": uid,
+                  "main": main_id, "vice": vice_id, "ttype": 1},
+        )
+    )
+    assert command == 65
+    assert payload["index"] == main_id and payload["icon"]
+    assert payload["exd_generation"] == 2
+    assert all(payload[f"exd_{k}_tp"] > 0 for k in
+               ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"))
+    assert isinstance(payload["skills"], list)
+    with sqlite3.connect(database) as connection:
+        remaining = connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
+        ).fetchall()
+    assert [r[0] for r in remaining] == [main_id]
+
+
+def test_pet_synthesis_rejects_locked_and_self(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SynBad")
+    with sqlite3.connect(database) as connection:
+        ids = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
+        ).fetchall()]
+        connection.execute("UPDATE pets SET is_locked=1 WHERE id=?", (ids[1],))
+    response = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "65", "uid": uid,
+              "main": ids[0], "vice": ids[1], "ttype": 1},
+    )
+    assert response.get_data(as_text=True) == "-1:524"
+    response = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "65", "uid": uid,
+              "main": ids[0], "vice": ids[0], "ttype": 1},
+    )
+    assert response.get_data(as_text=True) == "-1:100"
 
 
 def test_pet_flush_grow_consumes_item_and_persists_growth_fields(tmp_path: Path):
