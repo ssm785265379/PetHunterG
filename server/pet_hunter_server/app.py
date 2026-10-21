@@ -1720,6 +1720,10 @@ def _explore_map_row(gid: int) -> dict | None:
                 world = int(raw)
             else:
                 terrain = int(raw)
+    def _int(key: str, default: int = 0) -> int:
+        raw = str(record.get(key, "")).strip()
+        return int(raw) if raw.lstrip("-").isdigit() else default
+
     return {
         "world": world,
         "terrain": terrain,
@@ -1727,19 +1731,71 @@ def _explore_map_row(gid: int) -> dict | None:
         # explore list only passes it through, so keep it as shipped.
         "star": record.get("star", "1500:1000:700:500"),
         "name": record.get("name", ""),
+        "need_discover_rate": _int("needDiscoverRate"),
+        "pass_reward_point": _int("passRewardPoint"),
+        "pass_reward_crystal": _int("passRewardCrystal"),
+        "max_reward_point": _int("maxRewardPoint"),
+        "is_catch": 1 if str(record.get("catchPet", "0")).strip() not in ("", "0") else 0,
         # LOCAL DEFAULT: no original expedition fee is recoverable, so the
         # shipped passRewardPoint/maxRewardPoint are shown but not charged.
         "cost_point": 0,
         "cost_money": 0,
         "max_days": 1,
         "disaster": 0,
-        "is_catch": 0,
     }
 
 
 def _explore_map_world(gid: int) -> int:
     raw = str(_explore_map_table()[gid].get("worldId", "")).strip()
     return int(raw) if raw.isdigit() else 1
+
+
+def _explore_event_type(gid: int) -> int:
+    """Which expedition event the map rolls, read from exploreMap.txt.
+
+    The shipped `events` column holds two-digit codes ("11:12:13:14:15") and
+    `eventProbability` a parallel weight list ("5700:2000:500:500:1300").
+    GameUtil.getExploreEvent:482 switches on the *tens* digit (0,2,3,5,6,7,8,9)
+    and ExploreUI.as:100 compares against 1, so the raw code is divided by 10.
+
+    LOCAL DEFAULT: always the first entry (the battle), because the original
+    weighted roll and its persistent per-map state are not recoverable.
+    """
+    record = _explore_map_table().get(gid)
+    if record is None:
+        return 1
+    first = str(record.get("events", "")).split(":")[0].strip()
+    return int(first) // 10 if first.isdigit() else 1
+
+
+# ExploreUI.as:182-190 does getDefinition("m" + horse) / ("m" + horse + "_2")
+# with no null guard, so `horse` has to be a mount id that actually exists in
+# mounts.swf. That SWF exports m100001..m100007 (and their _2 walk cycles),
+# which are the exploreEquip.txt mount ids — NOT a 1..7 slot number.
+LOCAL_EXPLORE_DEFAULT_HORSE = 100001
+
+
+def _explore_horse(database_path: Path, player_id: int) -> int:
+    """The mount drawn on the expedition page.
+
+    Prefers a mount the player actually rented (slot_type=1 in exploreEquip.txt
+    is the mount category); otherwise falls back to LOCAL DEFAULT 100001 (驴),
+    which is the first mount in the shipped table and always has artwork.
+    """
+    try:
+        rented = sorted(_rented_ids(database_path, player_id, 1))
+    except Exception:  # noqa: BLE001 - a missing rental table must not break 103
+        rented = []
+    table = config_tables._table("exploreEquip.txt")
+    for candidate in rented:
+        if f"m{candidate}" in _MOUNT_SYMBOLS:
+            return candidate
+    if LOCAL_EXPLORE_DEFAULT_HORSE in table:
+        return LOCAL_EXPLORE_DEFAULT_HORSE
+    return LOCAL_EXPLORE_DEFAULT_HORSE
+
+
+_MOUNT_SYMBOLS = {f"m10000{n}" for n in range(1, 8)}
 
 
 def _explore_start(database_path: Path) -> Response:
@@ -1771,16 +1827,30 @@ def _explore_start(database_path: Path) -> Response:
         # LOCAL DEFAULT: an expedition always resolves against the first monsters
         # in monster.txt, since the per-map spawn table is not recoverable.
         _credit_battle_rewards(c,p["id"],point=LOCAL_EXPLORE_REWARD,crystal=0)
+    horse=_explore_horse(database_path, p["id"])
     att_list, def_list, record=_fight_payload(
         database_path,_defenders_from_monsters((1,)))
     if att_list is None: return _pet_error(103)
     return _protocol_response(103,{
-        "value":"ok","event_type":0,"world":m["world"],"world_id":m["world"],
+        # ExploreUI.as:100 routes to the battle screen only when event_type == 1;
+        # anything else (0 here previously) went to ExploreEventResultUI, which
+        # never renders a fight, so the expedition silently produced a black page.
+        "value":"ok","event_type":_explore_event_type(gid),
+        "world":m["world"],"world_id":m["world"],
+        "is_tired":0,
         "is_finish":1,"explore_ap":0,"max_explore_ap":0,
-        "now_discover_rate":0,"add_discover_rate":0,"need_discover_rate":0,
+        "now_discover_rate":0,"add_discover_rate":0,
+        "need_discover_rate":m["need_discover_rate"],
         "energy":0,"cost_energy":0,"add_energy":0,
         "supply":0,"cost_supply":0,"add_supply":0,
-        "discover_days":0,"add_discover_days":0,"terrain":0,
+        "discover_days":0,"add_discover_days":0,
+        # ExploreUI.as:167-168 does getDefinition("map_terrain_" + terrain) with no
+        # guard, and map.swf only ships map_terrain_1 / map_terrain_2. A zero here
+        # throws and leaves the page on a black background with just the HUD icons.
+        "terrain":m["terrain"],
+        # ExploreUI.as:182-190 looks up getDefinition("m" + horse); omitting the
+        # field produced "mundefined" and threw right after the terrain lookup.
+        "horse":horse,
         # ExplorePveUI.as:381-510 dereferences every field below without a guard.
         "battle_result":{
             "is_win":1,"hunt_type":1,"map_id":gid,

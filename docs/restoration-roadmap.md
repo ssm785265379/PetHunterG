@@ -212,25 +212,59 @@
 
 修复：改为 `_explore_map_row()` 读真实表。真机验证地图列表从 2 个变为 **23 个**。
 
-### 未解决：ExplorePveUI 黑屏（客户端侧）
+### 探险战斗黑屏（已修复，此前结论作废）
 
-点「一出即发」进入探险战斗后，屏幕 **97.8% 为纯黑**，且内部返回键无响应
-（返回键直接退出应用到安卓桌面）。
+**现象**：点「一出即发」后屏幕 97.8% 纯黑，只有顶部两排图标，内部返回键无响应。
 
-**已排除服务端原因**，实验证据：
+**此前错误结论**：曾判断为「ExplorePveUI 构造期的客户端缺陷，超出服务端范围」。
+这个结论是错的，作废。当时的排除实验有漏洞 —— 把 `battle_result` 键改名后
+`ExplorePveUI.as:381` 读 undefined 本来就会抛异常，所以「仍然黑屏」无法区分原因。
 
-1. 把 `battle_result` 键改名使其不存在 → 仍然 97.7% 黑屏。
-2. 逐字段比对 `ExplorePveUI.as:381-510` 与 `HunterResultUI.as:347-420`：
-   `is_win` / `hunt_type` / `map_id` / `monster_group` / `att_list` / `def_list` / `record`
-   契约完全一致，且 `HunterResultUI` 在同一台设备上**渲染正常**。
-3. 用 `tools/swf_symbols.py`（解压后扫描）验证 `map_1`、`map_3`、`p1001`、`p5001`
-   符号**全部存在**，且 `LoadingUI.as:348-380` 加载了全部 pet 分卷。
+**真正原因**：`ExploreUI.readDatas` 在两个地方无守卫查 SWF 符号，而我的响应给了非法值。
 
-结论：`ExplorePveUI` 的**构造期**（`initPve()`，`ExplorePveUI.as:121-177`）在本 AIR 版本下
-存在客户端缺陷。它在 `readDatas` 之前执行，因此与服务端数据无关。
-这一项需要修改客户端 SWF 才能解决，超出当前"服务端还原"的范围。
+| 位置 | 代码 | 我返回的值 | 结果 |
+|---|---|---|---|
+| `ExploreUI.as:167-168` | `getDefinition("map_terrain_" + terrain)` | `terrain: 0` | `map_terrain_0` 不存在 → `new null()` 抛错 |
+| `ExploreUI.as:182-190` | `getDefinition("m" + horse)` | 字段**缺失** | `"mundefined"` → 抛错 |
 
-### 工具修正：swf_symbols.py
+崩溃点发生在 `_back.bitmapData` 赋值**之前**，所以地形背景从未绘制 ——
+而 5 个 HUD 图标在 147-166 行已设置完毕，于是画面只剩图标 + 黑底。
+
+**修复**（全部是服务端数据修正，不需要改客户端 SWF）：
+
+1. `terrain` 改为从 `exploreMap.txt` 的 `terrain` 列读取（真实值是 1 或 2，
+   `map.swf` 恰好只导出 `map_terrain_1` / `map_terrain_2`）。
+2. `horse` 改为坐骑 id 并加入响应。**关键**：`mounts.swf` 导出的类名是
+   `m100001`..`m100007`（含 `_2` 走路帧），而这正是 `exploreEquip.txt` 里
+   驴/马/陆行鸟/狗拉雪橇/骆驼/羊驼/大象的 id —— 不是 1..7 的槽位号。
+   没有租坐骑时用 LOCAL DEFAULT `100001`（驴）。
+3. `is_tired` 显式返回 0，走 `m{horse}` 而非 `m{horse}_2` 分支。
+
+**真机验证**（逐帧抓取 + 目视）：
+
+| 阶段 | 证据 |
+|---|---|
+| 地形背景 | 暗色占比 **97.8% → 8.6%**，内容占屏幕高度 94.1% |
+| 战斗页 | `ExplorePveUI.showResult1()` 创建 `ExploreResultItem`；整屏插画 → WIN 横幅 |
+| 奖励 | 屏幕显示银币 **×30**，等于 `LOCAL_EXPLORE_REWARD=30`；库里 point 由 700 增至 1140 |
+| 返回 | 点地图图标后正常回到「樱花之岛」地图列表（9 个平原 + 翻页） |
+
+### 工具修正：符号解析器的两处 bug
+
+这两处 bug 曾让我得出完全错误的结论，必须记下来：
+
+1. `symbol_classes()` 里 `pos += 4` 应为 `pos += 2`，导致每个 SymbolClass
+   类名被截掉前 2 个字符 —— `m100001` 被读成 `00001`，
+   一度误判「坐骑符号不存在、客户端永远崩」。
+2. `walk()` 从偏移 8 开始读 tag，但 SWF 头后面还有 RECT + 帧率 + 帧数，
+   导致 tag code 解析错乱（读出 120/281/1020 这种不可能的 tag）。
+   修正后 `map.swf` 从「0 个导出」变成「57 个导出，50 个是位图」，
+   `map_1`/`map_3` 也由假 MISSING 变回存在。
+
+教训：**怀疑客户端缺陷之前，先验证自己的解析器**。两次误判都源于工具 bug，
+而它们是同一类错误 —— 对二进制格式的偏移假设没做交叉验证。
+
+### 专项：进入狩猎没有人物头部图片
 
 早期删除的 `scan_symbols.py` 直接在原始字节里搜符号名，对 `CWS`（zlib 压缩）SWF
 几乎什么都搜不到，会把存在的符号误报为 MISSING。

@@ -1621,6 +1621,79 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
+def test_explore_supplies_a_terrain_and_mount_that_exist_in_the_swfs(tmp_path: Path):
+    # ExploreUI.as:167-168 and :182-190 call getDefinition() with no null guard:
+    #   "map_terrain_" + terrain   and   "m" + horse
+    # map.swf only ships map_terrain_1 / map_terrain_2, and mounts.swf only ships
+    # m100001..m100007 (+ _2 walk cycles), which are exploreEquip.txt mount ids.
+    # A zero terrain or a missing horse throws and leaves the page black behind the
+    # HUD icons, so both fields have to be values the shipped artwork defines.
+    table = config_tables._table("exploreMap.txt")
+    equips = config_tables._table("exploreEquip.txt")
+    mounts = {f"m{i}" for i in equips if f"m{i}" in _mount_symbols()}
+    assert mounts, "mounts.swf must export at least one m<exploreEquip id>"
+
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "HorseOne")
+    gid = sorted(table)[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert payload["terrain"] in (1, 2), "map.swf only defines map_terrain_1 / _2"
+    assert payload["terrain"] == int(str(table[gid]["terrain"]).strip() or 1)
+    assert f"m{payload['horse']}" in mounts
+    assert payload["need_discover_rate"] == int(
+        str(table[gid].get("needDiscoverRate", "0")).strip() or 0
+    )
+    assert payload["battle_result"]["map_id"] == gid
+
+
+def _mount_symbols() -> set[str]:
+    """Mount class names exported by the shipped mounts.swf.
+
+    Parsed straight out of the SWF rather than hardcoded, so the test fails if the
+    artwork set ever changes underneath the server's chosen `horse` value.
+    """
+    import sys as _sys
+
+    root = Path(__file__).resolve().parents[2]
+    tools = root / "tools"
+    if str(tools) not in _sys.path:
+        _sys.path.insert(0, str(tools))
+    import swf_symbol_list as swf
+
+    path = root / "client" / "air51-repack" / "build" / "input" / "data" / "mounts.swf"
+    if not path.is_file():
+        path = root / "client" / "air51-repack" / "src" / "data" / "mounts.swf"
+    data = swf.inflate_body(path.read_bytes())
+    return set(swf.symbol_classes(data)) | set(swf.export_assets(data))
+
+
+def test_explore_rolls_a_battle_event_so_the_fight_screen_is_reachable(tmp_path: Path):
+    # ExploreUI.as:100 only flows to FIGHT_EXPLORE_PVE when data.event_type == 1;
+    # every other value goes to ExploreEventResultUI, which renders no battle at
+    # all. exploreMap.txt stores two-digit codes ("11:12:13"), and
+    # GameUtil.getExploreEvent:482 switches on the tens digit, so the raw code is
+    # divided by ten.
+    table = config_tables._table("exploreMap.txt")
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "EvtOne")
+    gid = sorted(table)[0]
+    command, _ = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid})
+    )
+    assert command == 99
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    raw = str(table[gid].get("events", "")).split(":")[0].strip()
+    assert payload["event_type"] == (int(raw) // 10 if raw.isdigit() else 1)
+    assert payload["event_type"] == 1, "only event 1 reaches the battle screen"
+
+
 def test_training_action_reports_the_matching_stat_gain(tmp_path: Path):
     # DevelopResultUI.as:164-336 reads add_hp_tp / add_phy_att_tp / add_mag_att_tp /
     # add_phy_def_tp / add_mag_def_tp. The database columns are named pro_hp,
