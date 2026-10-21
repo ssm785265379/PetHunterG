@@ -1263,7 +1263,27 @@ def _hunter_catch(database_path: Path) -> Response:
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
     if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,pet_capacity FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+        count=c.execute("SELECT COUNT(*) FROM pets WHERE player_id=?",(p["id"],)).fetchone()[0]
+        if count >= p["pet_capacity"]: return _pet_error(300)
     return _protocol_response(7,{"value":"ok","is_success":0,"hid":hid})
+
+
+def _explore_start(database_path: Path) -> Response:
+    try: gid=int(_request_value("gid",""))
+    except ValueError: return _pet_error(100)
+    if gid not in LOCAL_EXPLORE_MAPS: return _pet_error(400)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+        m=LOCAL_EXPLORE_MAPS[gid]
+        if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
+        c.execute("UPDATE players SET point=point-?,money=money-? WHERE id=?",(m["cost_point"],m["cost_money"],p["id"]))
+    return _protocol_response(103,{"value":"ok","event_type":0,"world":1,"world_id":gid,"is_finish":1,"explore_ap":0,"max_explore_ap":0,"now_discover_rate":0,"add_discover_rate":0,"need_discover_rate":0,"energy":0,"cost_energy":0,"add_energy":0,"supply":0,"cost_supply":0,"add_supply":0,"discover_days":0,"add_discover_days":0,"terrain":0})
 
 
 def _explore_list(database_path: Path) -> Response:
@@ -2197,6 +2217,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_info(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "69":
             return _player_sale_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "103":
+            return _explore_start(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "4":
             return _hunter_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "5":

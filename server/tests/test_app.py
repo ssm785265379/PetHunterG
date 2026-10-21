@@ -1246,6 +1246,8 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     assert command == 98 and payload["list"]
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"99","uid":uid,"gid":20001}))
     assert command == 99 and payload["id"] == 20001
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"103","uid":uid,"gid":20001}))
+    assert command == 103 and payload["is_finish"] == 1
 
 
 def test_forge_list_detail_and_make_transaction(tmp_path: Path):
