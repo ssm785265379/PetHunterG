@@ -1217,6 +1217,72 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
+LOCAL_HUNT_MAPS = {10001: {"name": "烈焰山谷", "world": 1, "cost": 1, "monster": 1001}}
+LOCAL_EXPLORE_MAPS = {20001: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 1}}
+
+
+def _hunter_list(database_path: Path) -> Response:
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+    return _protocol_response(4,{"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"list":[{"id":k,"name":v["name"],"world":v["world"]} for k,v in LOCAL_HUNT_MAPS.items()]})
+
+
+def _hunter_task(database_path: Path) -> Response:
+    try: hid=int(_request_value("hid",""))
+    except ValueError: return _pet_error(100)
+    m=LOCAL_HUNT_MAPS.get(hid)
+    if m is None: return _pet_error(400)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+        pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0",(p["id"],)).fetchall()
+    return _protocol_response(5,{"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"pets":[dict(r) for r in pets]})
+
+
+def _hunter_fight(database_path: Path) -> Response:
+    try: hid=int(_request_value("hid",""))
+    except ValueError: return _pet_error(100)
+    if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+        if p["ht_ap"] < 1: return _pet_error(100)
+        c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
+        ap=p["ht_ap"]-1
+    return _protocol_response(6,{"is_win":1,"hunt_type":1,"map_id":hid,"monster_group":[],"att_list":[],"def_list":[],"record":[],"ht_ap":ap,"value":"ok"})
+
+
+def _hunter_catch(database_path: Path) -> Response:
+    try: hid=int(_request_value("hid",""))
+    except ValueError: return _pet_error(100)
+    if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
+    return _protocol_response(7,{"value":"ok","is_success":0,"hid":hid})
+
+
+def _explore_list(database_path: Path) -> Response:
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+    return _protocol_response(98,{"world":1,"explore_ap":0,"max_explore_ap":0,"list":[{"id":k,"world":v["world"],"name":"探索地图"} for k,v in LOCAL_EXPLORE_MAPS.items()]})
+
+
+def _explore_detail(database_path: Path) -> Response:
+    try: gid=int(_request_value("gid",""))
+    except ValueError: return _pet_error(100)
+    m=LOCAL_EXPLORE_MAPS.get(gid)
+    if m is None: return _pet_error(400)
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT point,money FROM players WHERE uid=?",(uid,)).fetchone()
+        if p is None: return _pet_error(103)
+    return _protocol_response(99,{"id":gid,"world":m["world"],"cost_point":m["cost_point"],"own_point":p["point"],"cost_money":m["cost_money"],"own_money":p["money"],"disaster":m["disaster"],"is_catch":m["is_catch"]})
+
+
 def _training_overview(database_path: Path) -> Response:
     return _protocol_response(504, {"list": [], "value": "ok"})
 
@@ -2128,6 +2194,18 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_info(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "69":
             return _player_sale_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "4":
+            return _hunter_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "5":
+            return _hunter_task(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "6":
+            return _hunter_fight(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "7":
+            return _hunter_catch(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "98":
+            return _explore_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "99":
+            return _explore_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "504":
             return _training_overview(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "505":
