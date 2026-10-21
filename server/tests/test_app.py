@@ -1497,6 +1497,161 @@ def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
             assert row["num"] > 0
 
 
+def test_hunt_task_enables_buttons_and_names_pets(tmp_path: Path):
+    # HunterTaskUI.as:100-101 disables hunt/catch when these are not > 0, and
+    # :337-337 calls param2.pets.shift() with no null guard.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "HuntTsk")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "5", "uid": uid, "hid": 1})
+    )
+    assert command == 5
+    assert payload["isHunter"] == 1 and payload["isCatch"] == 1
+    assert payload["rage_point"] == 0
+    assert payload["pets"], "HunterTaskUI shifts pets[] unguarded"
+    for row in payload["pets"]:
+        assert row["name"], "a null name renders as the string null on device"
+    # running out of AP must switch both buttons off
+    with sqlite3.connect(tmp_path / "game.sqlite3") as connection:
+        connection.execute("UPDATE players SET ht_ap=0")
+    _, empty = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "5", "uid": uid, "hid": 1})
+    )
+    assert empty["isHunter"] == 0 and empty["isCatch"] == 0
+
+
+def test_hunt_fight_leads_with_hunter_skin_and_replay_fields(tmp_path: Path):
+    # HunterResultUI.as:352-355 reads att_list[0].img into ShowItem.items, which
+    # splits on "_" and resolves each id through skin.txt — a pet id there is
+    # silently dropped, which is what made the hunter headless.
+    # FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard and
+    # HunterResultUI.as:578 never starts the replay timer on an empty record.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "HuntFit")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1})
+    )
+    assert command == 6
+    assert payload["is_win"] in (1, True), "is_win drives img_win vs img_lose"
+    lead = payload["att_list"][0]
+    assert lead["is_pet"] == 0, "the hunter, not a pet, must lead att_list"
+    skin = config_tables.skin_table()
+    for layer in lead["img"].split("_"):
+        assert int(layer) in skin, f"layer {layer} is not in skin.txt and would be dropped"
+    # pets follow, and carry a bare id for Pet.as:121's "p" + skin lookup
+    for row in payload["att_list"][1:]:
+        assert row["is_pet"] == 1
+        assert str(row["img"]).isdigit()
+    assert payload["def_list"], "HunterResultUI.as:387 dereferences def_list[0] unguarded"
+    for row in payload["def_list"]:
+        assert row["name"] and row["lv"] >= 1 and row["hp"] >= 0
+        assert str(row["img"]).isdigit()
+    assert payload["record"], "an empty record array freezes the fight screen"
+    for step in payload["record"]:
+        for side in ("att", "def"):
+            assert {"cur_hp", "is_dead", "is_revive"} <= set(step[side])
+
+
+def test_hunt_uses_real_monster_rows(tmp_path: Path):
+    # HunterResultUI.as:398 falls back to the *monster* table for the defender
+    # name, and Pet.as:121 instantiates "p" + img, so the icon has to be the
+    # monster's own iconId rather than a pet id.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "HuntMon")
+    _, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1})
+    )
+    monsters = config_tables._table("monster.txt")
+    known = {int(k): v for k, v in monsters.items()}
+    for row in payload["def_list"]:
+        assert row["id"] in known, "defender id must come from monster.txt"
+        assert row["name"] == known[row["id"]]["name"]
+        assert row["img"] == int(known[row["id"]]["iconId"])
+
+
+def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
+    # HunterCatchUI.as:134-136 needs index/id/icon; FightPetListUI.as:173 walks
+    # list[] unguarded.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "HuntCat")
+    command, caught = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": 1})
+    )
+    assert command == 7
+    assert {"index", "id", "icon", "name", "lv"} <= set(caught)
+    command, picker = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "42", "uid": uid, "p": 1, "n": 9})
+    )
+    assert command == 42 and picker["list"]
+    for row in picker["list"]:
+        assert {"index", "id", "icon", "name", "lv"} <= set(row)
+
+
+def test_arena_fighter_ships_pets_because_ringui_shifts_them(tmp_path: Path):
+    # RingUI.as:293-294 calls param2.pets.shift() with no null guard.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "RingOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "506", "uid": uid})
+    )
+    assert command == 506
+    assert payload["name"] and payload["lv"] >= 1
+    assert payload["arena_ap"] >= 0 and payload["max_arena_ap"] >= payload["arena_ap"]
+    assert isinstance(payload["pets"], list) and payload["pets"]
+    for row in payload["pets"]:
+        assert str(row["icon"]).isdigit() and row["name"]
+
+
+def test_explore_hire_list_reads_explore_equip_table(tmp_path: Path):
+    # HireListUI.as:242-266 walks list[] unguarded and resolves the name/icon
+    # from exploreEquip itself, so only id and type are needed per entry.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "HireOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid, "ttype": 1, "p": 1, "n": 9})
+    )
+    assert command == 104
+    assert payload["type"] == 1
+    assert payload["max_equip_count"] >= 1
+    table = config_tables._table("exploreEquip.txt")
+    ids = {int(k) for k in table}
+    assert payload["list"], "an empty hire list leaves every slot locked"
+    for row in payload["list"]:
+        assert row["id"] in ids and row["type"] == 1
+
+
+def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Path):
+    # DevelopItem.as:178 loads clip_wand whenever slot data is null, which is
+    # what the player saw; DevelopUI.as:133-134 needs train_state and train_time
+    # to show a running countdown.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "TrnSlot")
+    _, empty = _envelope(client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid}))
+    assert empty["list"] == [], "nothing training yet"
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute("SELECT id FROM pets WHERE player_id=1 ORDER BY id").fetchone()[0]
+    command, started = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "10", "uid": uid, "index": pet_id, "ttype": 1})
+    )
+    assert command == 10 and started["train_type"] == 1
+    _, slots = _envelope(client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid}))
+    assert len(slots["list"]) == 1
+    slot = slots["list"][0]
+    assert slot["index"] == pet_id
+    assert str(slot["icon"]).isdigit() and slot["icon"], "a missing icon keeps clip_wand"
+    assert slot["name"]
+    assert slot["train_state"] == 1
+    assert slot["train_time"] > 0, "DevelopItem.as:150 needs a positive countdown"
+
+
+def test_arena_fighter_rejects_unknown_player(tmp_path: Path):
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    response = client.post("/flash.do", data={"m": "show", "showId": "506", "uid": "missing"})
+    assert response.get_data(as_text=True) == "-1:103"
+
+
 def test_pet_lists_resolve_real_names_from_config(tmp_path: Path):
     # DevelopUI.as:111-144 and PetSynthesisListUI.as:218 both fall back to
     # pet.txt when `name` is absent, but a stored NULL rendered as "null" in

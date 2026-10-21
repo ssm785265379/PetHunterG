@@ -4,6 +4,7 @@ import hmac
 import json
 import secrets
 import sqlite3
+import time
 from pathlib import Path
 
 from flask import Flask, Response, current_app, jsonify, request, send_file
@@ -304,6 +305,17 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS explore_rented (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                equip_id INTEGER NOT NULL,
+                slot_type INTEGER NOT NULL DEFAULT 1,
+                UNIQUE (player_id, equip_id)
+            )
+            """
+        )
         inventory_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(inventory)")
         }
@@ -391,6 +403,11 @@ def _initialize_database(database_path: Path) -> None:
             ("gw_mag_def", "ALTER TABLE pets ADD COLUMN gw_mag_def INTEGER NOT NULL DEFAULT 0"),
             ("gw_flush_count", "ALTER TABLE pets ADD COLUMN gw_flush_count INTEGER NOT NULL DEFAULT 0"),
             ("generation", "ALTER TABLE pets ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"),
+            # Farm training (DevelopUI.as:133-134): 1=training 2=work 3=vacation,
+            # mirrored straight off DevelopPetInfoUI's three ttype buttons.
+            ("train_state", "ALTER TABLE pets ADD COLUMN train_state INTEGER NOT NULL DEFAULT 0"),
+            ("train_type", "ALTER TABLE pets ADD COLUMN train_type INTEGER NOT NULL DEFAULT 0"),
+            ("train_end", "ALTER TABLE pets ADD COLUMN train_end INTEGER NOT NULL DEFAULT 0"),
             ("buffs", "ALTER TABLE pets ADD COLUMN buffs TEXT NOT NULL DEFAULT ''"),
             ("pro_hp", "ALTER TABLE pets ADD COLUMN pro_hp INTEGER NOT NULL DEFAULT 0"),
             ("pro_speed", "ALTER TABLE pets ADD COLUMN pro_speed INTEGER NOT NULL DEFAULT 0"),
@@ -1483,7 +1500,61 @@ def _hunter_task(database_path: Path) -> Response:
         p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0",(p["id"],)).fetchall()
-    return _protocol_response(5,{"id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"pets":[dict(r) for r in pets]})
+    return _protocol_response(5,{
+        "id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],
+        # HunterTaskUI.as:100-101 disables the hunt/catch buttons when these
+        # are not > 0, and :322 hides the plain button when rage_point hits 100.
+        "isHunter":1 if p["ht_ap"] >= 1 else 0,
+        "isCatch":1 if p["ht_ap"] >= 1 else 0,
+        "rage_point":0,
+        "pets":[_pet_list_entry(r) for r in pets],
+    })
+
+
+LOCAL_HUNT_WIN_RATE = 100
+LOCAL_HUNT_MONSTER_COUNT = 1
+
+
+def _monster_table() -> dict:
+    return config_tables._table("monster.txt")
+
+
+def _pick_monster(monster_id: int) -> dict[str, object] | None:
+    """Real monster row from monster.txt.
+
+    HunterResultUI.as:398 resolves the defender name from the *monster* table,
+    and Pet.as:121 instantiates "p" + skin with no null guard, so `img` must
+    be the monster's own iconId (a real MovieClip linkage), never a pet id.
+    """
+    record = _monster_table().get(monster_id)
+    if record is None:
+        return None
+    icon = record.get("iconId", "").strip()
+    if not icon.isdigit():
+        return None
+    def stat(column: str, fallback: int) -> int:
+        raw = str(record.get(column, "")).strip()
+        return int(raw) if raw.isdigit() else fallback
+    return {
+        "id": monster_id,
+        "icon": int(icon),
+        "name": record.get("name", ""),
+        "lv": stat("level", 1),
+        "hp": stat("hp", 50),
+        "phy_att": stat("phyAtt", 10),
+    }
+
+
+def _monsters_for_map(hid: int) -> list[dict[str, object]]:
+    """Monster group for a hunt map.
+
+    The original per-map spawn table is not recoverable, so this walks
+    monster.txt in id order — REAL data, but the grouping is a LOCAL DEFAULT.
+    """
+    table = _monster_table()
+    ids = sorted(int(m) for m in table)
+    picked = [_pick_monster(m) for m in ids[:LOCAL_HUNT_MONSTER_COUNT]]
+    return [m for m in picked if m is not None]
 
 
 def _hunter_fight(database_path: Path) -> Response:
@@ -1491,22 +1562,60 @@ def _hunter_fight(database_path: Path) -> Response:
     except ValueError: return _pet_error(100)
     if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
     uid=_request_value("uid")
+    monsters=_monsters_for_map(hid)
+    if not monsters: return _pet_error(400)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,nick,lv,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
         ap=p["ht_ap"]-1
-        rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 ORDER BY id LIMIT 1",(p["id"],)).fetchall()
-    # LOCAL DEFAULT replay: one attacking pet from the save, one local monster row.
-    if rows:
-        r=rows[0]
-        att={"team":1,"code":0,"is_pet":1,"index":r["index"],"id":r["id"],"name":r["name"] or "宠物","lv":r["lv"],"hp":100,"img":r["icon"]}
-    else:
-        att={"team":1,"code":0,"is_pet":0,"id":1001,"name":"猎人","lv":1,"hp":100,"img":1001}
-    defense={"team":2,"code":0,"is_pet":0,"id":1001,"name":"烈焰怪","lv":1,"hp":50,"img":1001}
-    record=[{"att":{"team":1,"code":0,"hp":100},"def":{"team":2,"code":0,"hp":0}}]
-    return _protocol_response(6,{"is_win":1,"hunt_type":1,"map_id":hid,"monster_group":1,"att_list":[att],"def_list":[defense],"record":record,"ht_ap":ap,"value":"ok"})
+        worn=_worn_equipment(c,p["id"])
+        rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+
+    # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
+    # The hunter himself always leads att_list: HunterResultUI.as:352-355 reads
+    # att_list[0].img straight into ShowItem.items, which expects the "_" joined
+    # skin-layer string. A pet id there (e.g. "999") is looked up in skin.txt,
+    # misses, and the layer is silently dropped — that was the missing body/head.
+    hunter=_role_skin_string(worn)
+    nick=p["nick"] or "猎人"
+    lv=p["lv"] or 1
+    lead={"team":1,"code":0,"is_pet":0,"id":0,"name":nick,"lv":lv,"pre_lv":lv,
+          "hp":100,"img":hunter}
+
+    def attacker(row: sqlite3.Row, code: int) -> dict[str, object]:
+        power=(row["pro_hp"] or 0)+(row["pro_phy_att"] or 0)+(row["pro_mag_att"] or 0)
+        return {"team":1,"code":code,"is_pet":1,"index":row["index"],"id":row["id"],
+                "name":_pet_name(row["id"], row["name"]),"lv":row["lv"],
+                "pre_lv":row["lv"],"hp":100+power,"img":row["icon"]}
+
+    att_list=[lead]+[attacker(r, i + 1) for i, r in enumerate(rows)][:2]
+    def_list=[
+        {"team":2,"code":i,"is_pet":0,"id":m["id"],"name":m["name"],"lv":m["lv"],
+         "hp":m["hp"],"img":m["icon"]}
+        for i, m in enumerate(monsters)
+    ]
+    # FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard at
+    # all, and an empty record array leaves the replay timer unscheduled
+    # (HunterResultUI.as:578), so every record must carry all three.
+    record=[
+        {"att":{"team":1,"code":0,"cur_hp":lead["hp"],"is_dead":False,"is_revive":False},
+         "def":{"team":2,"code":i,"cur_hp":0,"is_dead":True,"is_revive":False}}
+        for i in range(len(def_list))
+    ] or [{"att":{"team":1,"code":0,"cur_hp":lead["hp"],"is_dead":False,"is_revive":False},
+            "def":{"team":2,"code":0,"cur_hp":0,"is_dead":True,"is_revive":False}}]
+    # LOCAL DEFAULT rewards; the original hunt reward table is not recoverable.
+    exp_reward=10*sum(m["lv"] for m in monsters) or 10
+    return _protocol_response(6,{
+        "is_win":1,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
+        "att_list":att_list,"def_list":def_list,"record":record,
+        "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
+        "rage_point":0,"finish_rate":100,"pic":[],
+        "reward_exp":exp_reward,"reward_point":5*exp_reward,"reward_crystal":0,
+        "reward_rate":1,"reward_goods":[],
+        "value":"ok",
+    })
 
 
 def _hunter_catch(database_path: Path) -> Response:
@@ -1519,7 +1628,14 @@ def _hunter_catch(database_path: Path) -> Response:
         if p is None: return _pet_error(103)
         count=c.execute("SELECT COUNT(*) FROM pets WHERE player_id=?",(p["id"],)).fetchone()[0]
         if count >= p["pet_capacity"]: return _pet_error(300)
-    return _protocol_response(7,{"value":"ok","is_success":0,"hid":hid})
+        # HunterCatchUI.as:134-136 reads index/id/icon directly and feeds id into
+        # getConfigValue("pet", ...) with no guard, so a real pet row is needed;
+        # the catch itself stays a LOCAL DEFAULT failure (is_success 0).
+        row=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? ORDER BY id LIMIT 1",(p["id"],)).fetchone()
+        if row is None: return _pet_error(506)
+    return _protocol_response(7,{"value":"ok","is_success":0,"hid":hid,
+        "index":row["index"],"id":row["id"],"icon":row["icon"],
+        "name":_pet_name(row["id"], row["name"]),"lv":row["lv"],"pic":[]})
 
 
 def _explore_start(database_path: Path) -> Response:
@@ -1571,17 +1687,52 @@ def _explore_detail(database_path: Path) -> Response:
 
 
 def _training_overview(database_path: Path) -> Response:
-    """504 (REQUEST_TRAIN_KEY): the nine training slots.
+    """504 (REQUEST_TRAIN_KEY): the nine farm training slots.
 
-    DevelopUI.as:111-144 reads `list[]` rows with index/id/icon/name/num/
-    train_state/train_time. `train_time` is a millisecond countdown in
-    DevelopItem.as:216 and it re-sends 504 when it reaches zero
-    (DevelopItem.as:226), so a finished slot must not report a positive time.
-    An empty list leaves all nine slots blank but clickable, which is the
-    correct "nothing is training" state; LOCAL DEFAULT active slots are not
-    invented here.
+    DevelopUI.as:117-135 walks `param2.list[i]` with no null guard and falls
+    back to `DevelopItem.data = null` for anything missing, which makes
+    DevelopItem.as:178 load the `clip_wand` placeholder. That is exactly the
+    "star wand instead of a pet" symptom: every slot renders empty because this
+    command used to answer with an empty list. A pet only occupies a slot while
+    its train_end is in the future, so a finished run drops back to the
+    placeholder automatically — the client re-requests 504 when the countdown
+    hits zero (DevelopItem.as:226) and the slot simply disappears.
+
+    The training duration is a LOCAL DEFAULT; the original duration table is
+    not recoverable.
     """
-    return _protocol_response(504, {"list": [], "value": "ok"})
+    uid = _request_value("uid")
+    now = int(time.time())
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        # Drop finished runs first so the list never reports a stale countdown.
+        c.execute("UPDATE pets SET train_state=0, train_type=0, train_end=0 WHERE train_end>0 AND train_end<=?", (now,))
+        rows = c.execute(
+            """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
+               FROM pets WHERE player_id=? AND train_end>?
+               ORDER BY train_end LIMIT 9""",
+            (player["id"], now),
+        ).fetchall()
+    return _protocol_response(
+        504,
+        {
+            "list": [
+                {
+                    "index": r["index"],
+                    "id": r["id"],
+                    "icon": r["icon"],
+                    "name": _pet_name(r["id"], r["name"]),
+                    "num": 0,
+                    "train_state": r["train_state"],
+                    "train_time": max(0, (r["train_end"] - now) * 1000),
+                }
+                for r in rows
+            ],
+            "value": "ok",
+        },
+    )
 
 
 def _pet_name(pet_id: int, fallback: object = None) -> str:
@@ -1622,20 +1773,212 @@ def _training_detail(database_path: Path) -> Response:
     return _protocol_response(9,payload)
 
 
+LOCAL_TRAIN_SECONDS = 60
+# LOCAL DEFAULT gains per training type; the original duration/gain tables are
+# not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
+LOCAL_TRAIN_GAIN = {
+    1: {"pro_hp": 1},
+    2: {"pro_phy_att": 1, "pro_mag_att": 1},
+    3: {"pro_phy_def": 1, "pro_mag_def": 1},
+}
+
+
 def _training_action(database_path: Path) -> Response:
+    """10 (TRAIN_KEY): start a farm training run for one pet.
+
+    DevelopPetInfoUI.as:172-194 sends {index, ttype:1|2|3}; DevelopResultUI
+    .as:164-336 then reads pet{name,icon,id}, reward_point/reward_crystal and the
+    add_*_tp set. Starting a run puts the pet into a 504 slot so it renders as a
+    pet instead of the clip_wand placeholder.
+    """
     uid=_request_value("uid"); idx=_pet_index_from_request()
     try: ttype=int(_request_value("ttype",""))
     except ValueError: return _pet_error(100)
     if idx is None or ttype not in (1,2,3): return _pet_error(100)
+    now=int(time.time())
     with _connect_database(database_path) as c:
         player,row=_find_player_pet(c,uid,idx)
         if player is None: return _pet_error(103)
         if row is None: return _pet_error(506)
         if row["is_locked"]: return _pet_error(100)
-        target={1:"pro_hp",2:"pro_phy_att",3:"pro_mag_att"}[ttype]
-        c.execute(f"UPDATE pets SET {target}={target}+1 WHERE id=?",(idx,))
-        pet={"id":row["pet_id"],"icon":row["icon"],"name":row["name"]}
-    return _protocol_response(10,{"pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,"add_hp_tp":1 if ttype==1 else 0,"add_phy_att_tp":1 if ttype==2 else 0,"add_mag_att_tp":1 if ttype==3 else 0,"add_speed_tp":0,"add_phy_def_tp":0,"add_mag_def_tp":0,"add_energy":0})
+        if row["train_end"] and row["train_end"] > now: return _pet_error(100)
+        c.execute(
+            "UPDATE pets SET train_state=?, train_type=?, train_end=? WHERE id=?",
+            (ttype, ttype, now + LOCAL_TRAIN_SECONDS, idx),
+        )
+        pet={"id":row["pet_id"],"icon":row["icon"],"name":_pet_name(row["pet_id"], row["name"])}
+    gain=LOCAL_TRAIN_GAIN[ttype]
+    adds={f"add_{k[4:]}": v for k, v in gain.items()}
+    return _protocol_response(10,{
+        "pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,
+        "add_hp_tp":adds.get("add_hp_tp",0),"add_phy_att_tp":adds.get("add_phy_att_tp",0),
+        "add_mag_att_tp":adds.get("add_mag_att_tp",0),"add_speed_tp":0,
+        "add_phy_def_tp":adds.get("add_phy_def_tp",0),"add_mag_def_tp":adds.get("add_mag_def_tp",0),
+        "add_energy":0,
+    })
+
+
+LOCAL_ARENA_RIVAL_NAME = "试炼对手"
+LOCAL_ARENA_RIVAL_LEVEL = 5
+
+
+LOCAL_EXPLORE_HIRE_SLOTS = 6
+
+
+def _explore_hire_list(database_path: Path) -> Response:
+    """104 (EXPLORE_CANCEL_RENT_KEY) — despite the name this is the hire list.
+
+    HireListUI.as:242-266 reads type/equip_count/max_equip_count off the payload
+    and then walks `param2.list` with no null guard; each entry only needs `id`
+    and `type` because the name and icon come from the exploreEquip table
+    (HireListUI.as:258-259). ttype=1 is mounts, anything else is the roster.
+    """
+    uid = _request_value("uid")
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    table = config_tables._table("exploreEquip.txt")
+    # LOCAL DEFAULT: one entry per type from the shipped table, in id order.
+    by_type: dict[int, list[int]] = {}
+    for equip_id, record in table.items():
+        raw = str(record.get("type", "")).strip()
+        if raw.isdigit():
+            by_type.setdefault(int(raw), []).append(equip_id)
+    entries = [{"id": i, "type": ttype} for i in sorted(by_type.get(ttype, []))[:size]]
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rented = c.execute(
+            "SELECT COUNT(*) FROM explore_rented WHERE player_id=?", (player["id"],)
+        ).fetchone()[0]
+    return _protocol_response(
+        104,
+        {
+            "type": ttype,
+            "equip_count": rented,
+            "max_equip_count": LOCAL_EXPLORE_HIRE_SLOTS,
+            "list": entries,
+            "value": "ok",
+        },
+    )
+
+
+def _choose_pet_list(database_path: Path) -> Response:
+    """42 (CHOOSE_HUNT_PET_LIST_KEY): the picker behind the two hunt slots.
+
+    FightPetListUI.as:173 indexes `param2.list` with no null guard, so the
+    array is always present even when the roster is empty.
+    """
+    uid = _request_value("uid")
+    try:
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rows = c.execute(
+            """SELECT id AS "index", pet_id AS id, icon, name, lv FROM pets
+               WHERE player_id=? AND is_locked=0 ORDER BY id LIMIT ? OFFSET ?""",
+            (player["id"], size, (page - 1) * size),
+        ).fetchall()
+    return _protocol_response(42, {"list": [_pet_list_entry(r) for r in rows]})
+
+
+def _choose_battle_pet(database_path: Path) -> Response:
+    """44 (CHOOSE_BATTLE_PET_KEY): park the picked pet in a hunt slot.
+
+    MainUI has no case for 44, so the payload is handed to the current item and
+    HunterTaskUI.as:316-320 immediately re-requests 5. Only a parseable body
+    matters; the state itself is re-read from command 5.
+    """
+    uid = _request_value("uid")
+    index = _pet_index_from_request()
+    slot = _request_value("ttype", "1")
+    if index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player, row = _find_player_pet(c, uid, index)
+        if player is None:
+            return _pet_error(103)
+        if row is None:
+            return _pet_error(506)
+        if slot == "1":
+            c.execute("UPDATE pets SET battle_state=1 WHERE id=?", (index,))
+        else:
+            c.execute("UPDATE pets SET battle_state=0 WHERE id=?", (index,))
+        pet = _pet_list_entry(row)
+    return _protocol_response(44, {"value": "ok", "pet": pet})
+
+
+def _choose_rest_pet(database_path: Path) -> Response:
+    """45 (CHOOSE_REST_PET_KEY): toggle a pet on or off the bench.
+
+    Like 44 the body is discarded and HunterTaskUI re-issues 5; it only has to
+    be valid JSON.
+    """
+    uid = _request_value("uid")
+    index = _pet_index_from_request()
+    if index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player, row = _find_player_pet(c, uid, index)
+        if player is None:
+            return _pet_error(103)
+        if row is None:
+            return _pet_error(506)
+        pet = _pet_list_entry(row)
+    return _protocol_response(45, {"value": "ok", "pet": pet})
+
+
+def _arena_fighter(database_path: Path) -> Response:
+    """506 (REQUEST_ARENA_FIGHTER_KEY).
+
+    RingUI.as:286-294 reads id/name/lv/arena_ap/max_arena_ap off the payload and
+    then calls `param2.pets.shift()` with no null guard, so an empty or missing
+    `pets` array throws. The single rival is a LOCAL DEFAULT stand-in: the real
+    ladder of other players is not recoverable, and the player is the only
+    account in this offline server.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute(
+            "SELECT id, lv, arena_ap, max_arena_ap FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        # LOCAL DEFAULT: the rival borrows the player's own roster so the two
+        # Pet widgets resolve real `p<icon>` artwork instead of empty slots.
+        pets = c.execute(
+            """SELECT id AS "index", pet_id AS id, icon, lv FROM pets
+               WHERE player_id=? AND battle_state=0 ORDER BY id LIMIT 2""",
+            (player["id"],),
+        ).fetchall()
+        rival_pets = [
+            {"index": r["index"], "id": r["id"], "icon": r["icon"],
+             "name": _pet_name(r["id"]), "lv": LOCAL_ARENA_RIVAL_LEVEL}
+            for r in pets
+        ]
+    return _protocol_response(
+        506,
+        {
+            "id": LOCAL_ARENA_RIVAL_NAME,
+            "name": LOCAL_ARENA_RIVAL_NAME,
+            "lv": LOCAL_ARENA_RIVAL_LEVEL,
+            "arena_ap": player["arena_ap"],
+            "max_arena_ap": player["max_arena_ap"],
+            "skin": _role_skin_string({}),
+            "pets": rival_pets,
+        },
+    )
 
 
 def _forge_refine(database_path: Path) -> Response:
@@ -2027,7 +2370,8 @@ def _find_player_pet(
         """
         SELECT id AS "index", id, pet_id, icon, name, lv, star, pro, battle_state, is_locked,
                nature, skills, gw_hp, gw_speed, gw_phy_att, gw_mag_att, gw_phy_def, gw_mag_def, gw_flush_count,
-               generation, buffs, pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
+               generation, buffs, pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def,
+               train_state, train_type, train_end
         FROM pets WHERE id = ? AND player_id = ?
         """,
         (pet_index, player["id"]),
@@ -2689,6 +3033,16 @@ def create_app(config: dict | None = None) -> Flask:
             return _explore_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "99":
             return _explore_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "506":
+            return _arena_fighter(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "42":
+            return _choose_pet_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "104":
+            return _explore_hire_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "44":
+            return _choose_battle_pet(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "45":
+            return _choose_rest_pet(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "504":
             return _training_overview(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "505":
