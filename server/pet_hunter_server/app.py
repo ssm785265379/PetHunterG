@@ -1357,14 +1357,8 @@ LOCAL_HUNT_MAPS = {
     3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 2},
     101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 2},
 }
-# terrain/star/needsComeFrom exploreMap.txt columns `terrain`/`star`/`needExploreMap`.
-# `star` is a "1500:1000:700:500" band string in the client table; the explore
-# list only passes it through, so keep it as shipped.
-LOCAL_EXPLORE_MAPS = {
-    1: {"world": 1, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
-    2: {"world": 1, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
-    101: {"world": 2, "terrain": 1, "star": "1500:1000:700:500", "max_days": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
-}
+# Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
+# exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
 
 LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
@@ -1629,6 +1623,19 @@ def _battle_record(att_list, def_list) -> list[dict]:
     return steps
 
 
+def _credit_battle_rewards(c: sqlite3.Connection, player_id: int, *, point: int, crystal: int) -> None:
+    """Persist the reward figures a battle response just advertised.
+
+    FightResultItem.as:285 and :296 render reward_point/reward_crystal from the
+    response alone, so returning numbers without writing them made the settlement
+    panel show a payout the player never received.
+    """
+    c.execute(
+        "UPDATE players SET point=point+?, crystal=crystal+? WHERE id=?",
+        (max(0, point), max(0, crystal), player_id),
+    )
+
+
 def _hunter_fight(database_path: Path) -> Response:
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
@@ -1644,6 +1651,10 @@ def _hunter_fight(database_path: Path) -> Response:
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
         rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+        # LOCAL DEFAULT rewards; the original hunt payout table is not recoverable.
+        exp_reward=10*sum(m["lv"] for m in monsters) or 10
+        point_reward=5*exp_reward
+        _credit_battle_rewards(c,p["id"],point=point_reward,crystal=0)
 
     # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
     att_list, def_list = _battle_side(
@@ -1654,14 +1665,12 @@ def _hunter_fight(database_path: Path) -> Response:
         defenders=monsters,
     )
     record=_battle_record(att_list, def_list)
-    # LOCAL DEFAULT rewards; the original hunt reward table is not recoverable.
-    exp_reward=10*sum(m["lv"] for m in monsters) or 10
     return _protocol_response(6,{
         "is_win":1,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
         "rage_point":0,"finish_rate":100,"pic":[],
-        "reward_exp":exp_reward,"reward_point":5*exp_reward,"reward_crystal":0,
+        "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
         "reward_rate":1,"reward_goods":[],
         "value":"ok",
     })
@@ -1687,24 +1696,100 @@ def _hunter_catch(database_path: Path) -> Response:
         "name":_pet_name(row["id"], row["name"]),"lv":row["lv"],"pic":[]})
 
 
+def _explore_map_table() -> dict:
+    """REAL rows from the shipped exploreMap.txt.
+
+    Replaces the earlier hardcoded LOCAL_EXPLORE_MAPS placeholder: the client
+    table carries name, worldId, terrain, star and the reward columns, and
+    ExplorePveUI.as:385 resolves map_id through getConfigValue("exploreMap",
+    map_id, "iconId"), so the ids have to be the real ones.
+    """
+    return config_tables._table("exploreMap.txt")
+
+
+def _explore_map_row(gid: int) -> dict | None:
+    table = _explore_map_table()
+    record = table.get(gid)
+    if record is None:
+        return None
+    world, terrain = 1, 1
+    for key, target in (("worldId", "world"), ("terrain", "terrain")):
+        raw = str(record.get(key, "")).strip()
+        if raw.isdigit():
+            if target == "world":
+                world = int(raw)
+            else:
+                terrain = int(raw)
+    return {
+        "world": world,
+        "terrain": terrain,
+        # star is a "1500:1000:700:500" band string in the client table; the
+        # explore list only passes it through, so keep it as shipped.
+        "star": record.get("star", "1500:1000:700:500"),
+        "name": record.get("name", ""),
+        # LOCAL DEFAULT: no original expedition fee is recoverable, so the
+        # shipped passRewardPoint/maxRewardPoint are shown but not charged.
+        "cost_point": 0,
+        "cost_money": 0,
+        "max_days": 1,
+        "disaster": 0,
+        "is_catch": 0,
+    }
+
+
+def _explore_map_world(gid: int) -> int:
+    raw = str(_explore_map_table()[gid].get("worldId", "")).strip()
+    return int(raw) if raw.isdigit() else 1
+
+
 def _explore_start(database_path: Path) -> Response:
-    # ExploreMapInfoUI.as:204 and ExplorePveUI.as:698 send EXPLORE_KEY with no gid,
-    # so fall back to the map the player opened through showId=99.
+    """103 (EXPLORE_KEY) — the expedition battle.
+
+    ExploreMapInfoUI.as:204 and ExplorePveUI.as:698 send EXPLORE_KEY with no gid,
+    so fall back to the map the player opened through showId=99.
+
+    ExplorePveUI.as:377 assigns param2 = param2.battle_result and the very next
+    line reads _loc2_.is_win with no guard, so a response without battle_result is
+    a hard TypeError, not an empty screen. Inside it the page needs the same
+    is_win/hunt_type/map_id/monster_group/att_list/def_list/record contract as the
+    hunt screen, so the shared battle builder applies.
+    """
     gid_value=_request_value("gid")
     uid=_request_value("uid")
+    try:
+        gid=int(gid_value) if gid_value else None
+    except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,point,money,cur_explore_map FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
-        if gid_value:
-            try: gid=int(gid_value)
-            except ValueError: return _pet_error(100)
-        else:
+        if gid is None:
             gid=p["cur_explore_map"]
-        if gid not in LOCAL_EXPLORE_MAPS: return _pet_error(400)
-        m=LOCAL_EXPLORE_MAPS[gid]
+        m=_explore_map_row(gid)
+        if m is None: return _pet_error(400)
         if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
         c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=? WHERE id=?",(m["cost_point"],m["cost_money"],gid,p["id"]))
-    return _protocol_response(103,{"value":"ok","event_type":0,"world":1,"world_id":gid,"is_finish":1,"explore_ap":0,"max_explore_ap":0,"now_discover_rate":0,"add_discover_rate":0,"need_discover_rate":0,"energy":0,"cost_energy":0,"add_energy":0,"supply":0,"cost_supply":0,"add_supply":0,"discover_days":0,"add_discover_days":0,"terrain":0})
+        # LOCAL DEFAULT: an expedition always resolves against the first monsters
+        # in monster.txt, since the per-map spawn table is not recoverable.
+        _credit_battle_rewards(c,p["id"],point=LOCAL_EXPLORE_REWARD,crystal=0)
+    att_list, def_list, record=_fight_payload(
+        database_path,_defenders_from_monsters((1,)))
+    if att_list is None: return _pet_error(103)
+    return _protocol_response(103,{
+        "value":"ok","event_type":0,"world":m["world"],"world_id":m["world"],
+        "is_finish":1,"explore_ap":0,"max_explore_ap":0,
+        "now_discover_rate":0,"add_discover_rate":0,"need_discover_rate":0,
+        "energy":0,"cost_energy":0,"add_energy":0,
+        "supply":0,"cost_supply":0,"add_supply":0,
+        "discover_days":0,"add_discover_days":0,"terrain":0,
+        # ExplorePveUI.as:381-510 dereferences every field below without a guard.
+        "battle_result":{
+            "is_win":1,"hunt_type":1,"map_id":gid,
+            "monster_group":len(def_list)+3,
+            "att_list":att_list,"def_list":def_list,"record":record,
+            "reward_point":LOCAL_EXPLORE_REWARD,"reward_crystal":0,
+            "reward_goods":[],"pic":[],
+        },
+    })
 
 
 def _explore_list(database_path: Path) -> Response:
@@ -1716,15 +1801,21 @@ def _explore_list(database_path: Path) -> Response:
         if p is None: return _pet_error(103)
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
-    rows=[{"index":k,"code":k,"id":k,"terrain":v["terrain"],"star":v["star"],"max_days":v["max_days"]}
-          for k,v in LOCAL_EXPLORE_MAPS.items() if v["world"]==world]
+    rows=[]
+    for gid in sorted(_explore_map_table()):
+        if _explore_map_world(gid) != world:
+            continue
+        row=_explore_map_row(gid)
+        rows.append({"index":gid,"code":gid,"id":gid,"terrain":row["terrain"],
+                     "star":row["star"],"max_days":row["max_days"]})
+    if not rows: return _pet_error(400)
     return _protocol_response(98,{"world":world,"explore_ap":0,"max_explore_ap":0,"list":rows})
 
 
 def _explore_detail(database_path: Path) -> Response:
     try: gid=int(_request_value("gid",""))
     except ValueError: return _pet_error(100)
-    m=LOCAL_EXPLORE_MAPS.get(gid)
+    m=_explore_map_row(gid)
     if m is None: return _pet_error(400)
     uid=_request_value("uid")
     with _connect_database(database_path) as c:
@@ -1857,9 +1948,11 @@ def _training_action(database_path: Path) -> Response:
         )
         pet={"id":row["pet_id"],"icon":row["icon"],"name":_pet_name(row["pet_id"], row["name"])}
     gain=LOCAL_TRAIN_GAIN[ttype]
-    # "pro_hp" -> "add_hp_tp": strip the whole "pro" prefix, not 4 characters
-    # (k[4:] would leave a leading underscore and produce "add__hp_tp").
-    adds={f"add_{k[len('pro_'):]}": v for k, v in gain.items()}
+    # "pro_hp" -> "add_hp_tp". The client field names carry a "_tp" suffix
+    # (DevelopResultUI.as:164-336 reads add_hp_tp and friends), so the mapping has
+    # to produce that exact name — "pro_hp".split("_")[1] would yield "hp" and
+    # every add_*_tp would come back as 0.
+    adds={f"add_{k.split('_', 1)[1]}_tp": v for k, v in gain.items()}
     return _protocol_response(10,{
         "pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,
         "add_hp_tp":adds.get("add_hp_tp",0),"add_phy_att_tp":adds.get("add_phy_att_tp",0),
@@ -1993,6 +2086,11 @@ def _choose_rest_pet(database_path: Path) -> Response:
 
 
 LOCAL_COPY_MAPS = (1001, 1002, 1003, 1004)
+# LOCAL DEFAULT payouts. The original arena/dungeon reward tables are not
+# recoverable, so these are flat and are credited to players.point on a win.
+LOCAL_ARENA_REWARD = 20
+LOCAL_COPY_REWARD = 50
+LOCAL_EXPLORE_REWARD = 30
 
 
 def _defenders_from_monsters(ids) -> list[dict[str, object]]:
@@ -2044,12 +2142,13 @@ def _arena_battle(database_path: Path) -> Response:
         ap = max(0, (p["arena_ap"] or 0) - 1)
         c.execute("UPDATE players SET arena_ap=? WHERE id=?", (ap, p["id"]))
         max_ap = p["max_arena_ap"] or LOCAL_ARENA_RIVAL_LEVEL
+        _credit_battle_rewards(c, p["id"], point=LOCAL_ARENA_REWARD, crystal=0)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
         "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": 0,
         "rage_point": 0, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
-        "reward_point": 20, "reward_crystal": 0, "reward_goods": [],
+        "reward_point": LOCAL_ARENA_REWARD, "reward_crystal": 0, "reward_goods": [],
         "value": "ok",
     })
 
@@ -2100,14 +2199,16 @@ def _copy_battle(database_path: Path) -> Response:
         return _pet_error(103)
     att_list, def_list, record = parts
     with _connect_database(database_path) as c:
-        if c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone() is None:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
             return _pet_error(103)
+        _credit_battle_rewards(c, player["id"], point=LOCAL_COPY_REWARD, crystal=0)
     # LOCAL DEFAULT rewards; reward_goods[].id resolves through pic.txt
     # (FightResultItem.as:476), so it stays empty rather than guessing an id.
     return _protocol_response(74, {
         "is_win": 1, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
-        "reward_point": 50, "reward_crystal": 0, "reward_goods": [],
+        "reward_point": LOCAL_COPY_REWARD, "reward_crystal": 0, "reward_goods": [],
         "value": "ok",
     })
 

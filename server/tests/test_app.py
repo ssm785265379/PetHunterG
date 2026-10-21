@@ -1267,7 +1267,18 @@ def test_explore_start_remembers_map_from_detail(tmp_path: Path):
     command,_=_envelope(client.post("/flash.do",data={"m":"show","showId":99,"uid":uid,"gid":2}))
     assert command==99
     command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":103,"uid":uid}))
-    assert command==103 and payload["world_id"]==2 and payload["value"]=="ok"
+    # ExplorePveUI.as:399 builds "sound_event_" + (200 + world_id), so world_id is
+    # the world number, not the map id the request carried.
+    assert command==103 and payload["world_id"]==1 and payload["value"]=="ok"
+    # ExplorePveUI.as:377 assigns param2 = param2.battle_result and :381 reads
+    # _loc2_.is_win from it with no guard, so a missing battle_result throws.
+    result=payload["battle_result"]
+    assert result["is_win"] in (1,True)
+    assert result["att_list"] and result["def_list"] and result["record"]
+    lead=result["att_list"][0]
+    assert lead["is_pet"]==0
+    for layer in lead["img"].split("_"):
+        assert int(layer) in config_tables.skin_table()
 
 
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
@@ -1608,6 +1619,82 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
     assert command == 42 and picker["list"]
     for row in picker["list"]:
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
+
+
+def test_training_action_reports_the_matching_stat_gain(tmp_path: Path):
+    # DevelopResultUI.as:164-336 reads add_hp_tp / add_phy_att_tp / add_mag_att_tp /
+    # add_phy_def_tp / add_mag_def_tp. The database columns are named pro_hp,
+    # pro_phy_att, ... so the mapping has to bridge the pro_ prefix *and* the
+    # client's _tp suffix; getting it wrong silently reports every gain as 0.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GainOne")
+
+    def train(index: int, ttype: int) -> dict:
+        data = {"m": "show", "showId": "10", "uid": uid, "index": index, "ttype": ttype}
+        _, payload = _envelope(client.post("/flash.do", data=data))
+        return payload
+
+    with sqlite3.connect(database) as connection:
+        indexes = [r[0] for r in connection.execute("SELECT id FROM pets ORDER BY id")]
+        # A fresh character starts with two pets; add one more straight into the
+        # table so the test does not depend on the starter pack size.
+        while len(indexes) < 3:
+            connection.execute(
+                "INSERT INTO pets (player_id, pet_id, name, lv, star, icon)"
+                " VALUES (1, 1003, NULL, 5, 1, 1003)"
+            )
+            connection.commit()
+            indexes = [r[0] for r in connection.execute("SELECT id FROM pets ORDER BY id")]
+
+    hp = train(indexes[0], 1)
+    assert hp["add_hp_tp"] == 1 and hp["train_type"] == 1
+    assert hp["add_phy_att_tp"] == 0 and hp["add_mag_def_tp"] == 0
+
+    att = train(indexes[1], 2)
+    assert att["add_phy_att_tp"] == 1 and att["add_mag_att_tp"] == 1
+    assert att["add_hp_tp"] == 0
+
+    defence = train(indexes[2], 3)
+    assert defence["add_phy_def_tp"] == 1 and defence["add_mag_def_tp"] == 1
+    assert defence["add_hp_tp"] == 0
+
+    for payload in (hp, att, defence):
+        assert payload["pet"]["name"], "a null name renders as the string null"
+        assert payload["pet"]["icon"]
+
+
+def test_battle_rewards_are_actually_credited(tmp_path: Path):
+    # FightResultItem.as:285 and :296 render reward_point/reward_crystal straight
+    # from the response, so advertising a payout without writing it left the
+    # settlement panel promising money the player never received.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "Payout")
+
+    def point() -> int:
+        with sqlite3.connect(database) as connection:
+            return connection.execute(
+                "SELECT point FROM players WHERE uid=?", (uid,)
+            ).fetchone()[0]
+
+    def fight(show_id: int, **extra) -> dict:
+        data = {"m": "show", "showId": str(show_id), "uid": uid, **extra}
+        _, payload = _envelope(client.post("/flash.do", data=data))
+        return payload
+
+    before = point()
+    hunt = fight(6, hid=1)
+    assert point() == before + hunt["reward_point"], "hunt reward was never credited"
+
+    before = point()
+    arena = fight(24)
+    assert point() == before + arena["reward_point"]
+
+    before = point()
+    dungeon = fight(74, hid=1001)
+    assert point() == before + dungeon["reward_point"]
+    assert all(p["reward_point"] > 0 for p in (hunt, arena, dungeon))
 
 
 def test_arena_and_copy_fights_share_the_hunt_replay_contract(tmp_path: Path):
