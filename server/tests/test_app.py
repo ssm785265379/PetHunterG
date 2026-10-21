@@ -1256,6 +1256,47 @@ def _envelope(response):
     return int(command), json.loads(payload)
 
 
+def test_pet_flush_grow_consumes_item_and_persists_growth_fields(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GrowPet")
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute("SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (1,10001,1,1,10001,1,2)")
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"19","uid":uid,"index":pet_id}))
+    assert command == 19
+    assert "total_gw" in payload and "hp_gw" in payload
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT quantity FROM inventory WHERE item_id=10001").fetchone() is None
+        assert connection.execute("SELECT gw_flush_count FROM pets WHERE id=?", (pet_id,)).fetchone()[0] == 1
+
+
+def test_pet_flush_nature_and_forget_skill_use_real_pet_context(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MutPet")
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute("SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (1,10009,1,1,10009,9,2)")
+        connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (1,10028,1,1,10028,2,2)")
+    assert _envelope(client.post("/flash.do", data={"m":"show","showId":"20","uid":uid,"index":pet_id}))[0] == 20
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"21","uid":uid,"index":pet_id}))
+    assert command == 21
+    assert len(payload["skills"]) >= 1
+
+
+def test_pet_forget_skill_rejects_single_skill_pet(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "OneSkill")
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute("SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1").fetchone()[0]
+        connection.execute("UPDATE pets SET skills='101' WHERE id=?", (pet_id,))
+        connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (1,10028,1,1,10028,2,2)")
+    response = client.post("/flash.do", data={"m":"show","showId":"21","uid":uid,"index":pet_id})
+    assert response.get_data(as_text=True) == "-1:515"
+
+
 def test_new_character_gets_the_local_starter_pack_in_the_pet_list(tmp_path: Path):
     client = create_app(
         {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}

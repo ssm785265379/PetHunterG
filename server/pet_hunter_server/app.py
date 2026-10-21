@@ -81,6 +81,9 @@ LOCAL_PROP_CATALOG = {
     10023: {"type": 17, "use_type": 1, "value": 10000},   # 一袋水晶: 水晶+10000
     10011: {"type": 5, "use_type": 2, "value": 1000000},  # 宠物饼干: 宠物经验道具
     10032: {"type": 23, "use_type": 0, "value": 0},       # 蓝色晶石: 材料
+    10001: {"type": 1, "use_type": 2, "value": 0},       # 魔幻沐浴露: 洗练成长
+    10009: {"type": 9, "use_type": 2, "value": 0},       # 小丑面具: 洗练性格
+    10028: {"type": 2, "use_type": 2, "value": 0},       # 遗忘之锤: 遗忘技能
 }
 # Local-only shop stock. The original server's shop table is not recoverable, so
 # these rows are explicit local defaults. `shop_type` 1 = 金币商店, 2 = 银币商店,
@@ -352,6 +355,28 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 "ALTER TABLE pets ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"
             )
+        for column, ddl in (
+            ("nature", "ALTER TABLE pets ADD COLUMN nature INTEGER NOT NULL DEFAULT 0"),
+            ("skills", "ALTER TABLE pets ADD COLUMN skills TEXT NOT NULL DEFAULT ''"),
+            ("gw_hp", "ALTER TABLE pets ADD COLUMN gw_hp INTEGER NOT NULL DEFAULT 0"),
+            ("gw_speed", "ALTER TABLE pets ADD COLUMN gw_speed INTEGER NOT NULL DEFAULT 0"),
+            ("gw_phy_att", "ALTER TABLE pets ADD COLUMN gw_phy_att INTEGER NOT NULL DEFAULT 0"),
+            ("gw_mag_att", "ALTER TABLE pets ADD COLUMN gw_mag_att INTEGER NOT NULL DEFAULT 0"),
+            ("gw_phy_def", "ALTER TABLE pets ADD COLUMN gw_phy_def INTEGER NOT NULL DEFAULT 0"),
+            ("gw_mag_def", "ALTER TABLE pets ADD COLUMN gw_mag_def INTEGER NOT NULL DEFAULT 0"),
+            ("gw_flush_count", "ALTER TABLE pets ADD COLUMN gw_flush_count INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in pet_columns:
+                connection.execute(ddl)
+        for seeded_pet_id, seeded_skills in (
+            (1001, "101:5101"), (1002, "101:102:5101:5102"),
+            (1003, "101:102:103:5101:5102"), (2019, "103:5101"),
+            (2020, "103:5101:5102"), (2021, "103:5101:5102"),
+        ):
+            connection.execute(
+                "UPDATE pets SET skills = ? WHERE skills = '' AND pet_id = ?",
+                (seeded_skills, seeded_pet_id),
+            )
         # Reference table re-seeded at startup (no player data lives here), the
         # same way shop_goods is, so removed quests cannot linger in old saves.
         connection.execute(
@@ -515,10 +540,10 @@ def _insert_starter_pets(connection: sqlite3.Connection, player_id: int) -> int:
             continue
         connection.execute(
             """
-            INSERT INTO pets (player_id, pet_id, lv, star, pro, icon)
-            VALUES (?, ?, 1, ?, ?, ?)
+            INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills)
+            VALUES (?, ?, 1, ?, ?, ?, ?)
             """,
-            (player_id, pet["pet_id"], pet["star"], pet["pro"], pet["icon"]),
+            (player_id, pet["pet_id"], pet["star"], pet["pro"], pet["icon"], "101:5101" if pet["pet_id"] == 1001 else "103:5101"),
         )
         added += 1
     return added
@@ -1480,7 +1505,8 @@ def _find_player_pet(
         return None, None
     row = connection.execute(
         """
-        SELECT id AS "index", pet_id, icon, name, lv, star, pro, battle_state, is_locked
+        SELECT id AS "index", id, pet_id, icon, name, lv, star, pro, battle_state, is_locked,
+               nature, skills, gw_hp, gw_speed, gw_phy_att, gw_mag_att, gw_phy_def, gw_mag_def, gw_flush_count
         FROM pets WHERE id = ? AND player_id = ?
         """,
         (pet_index, player["id"]),
@@ -1584,6 +1610,102 @@ def _player_pet_detail(database_path: Path) -> Response:
     if row is None:
         return _pet_error(506, status=404)
     return _protocol_response(12, _pet_detail_payload(row))
+
+
+LOCAL_PET_BASE_STATS = {
+    1001: {"hp": 39, "speed": 65, "phy_att": 52, "mag_att": 60, "phy_def": 43, "mag_def": 50},
+    2019: {"hp": 56, "speed": 76, "phy_att": 78, "mag_att": 45, "phy_def": 48, "mag_def": 43},
+}
+
+
+def _mutation_inventory(connection, player_id: int, item_id: int):
+    return connection.execute(
+        "SELECT id, quantity, item_type, team FROM inventory WHERE player_id = ? AND item_id = ?",
+        (player_id, item_id),
+    ).fetchone()
+
+
+def _consume_mutation_item(connection, row):
+    if row["quantity"] <= 1:
+        connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+    else:
+        connection.execute("UPDATE inventory SET quantity = quantity - 1 WHERE id = ?", (row["id"],))
+
+
+def _mutation_pet(connection, uid: str, pet_index: int):
+    player, pet = _find_player_pet(connection, uid, pet_index)
+    return player, pet
+
+
+def _pet_flush_grow(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    pet_index = _pet_index_from_request()
+    if pet_index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player, pet = _mutation_pet(connection, uid, pet_index)
+        if player is None: return _pet_error(103)
+        if pet is None: return _pet_error(506)
+        if pet["is_locked"]: return _pet_error(100)
+        item = _mutation_inventory(connection, player["id"], 10001)
+        if item is None or item["quantity"] <= 0: return _pet_error(400)
+        stats = LOCAL_PET_BASE_STATS.get(pet["pet_id"], LOCAL_PET_BASE_STATS[1001])
+        values = [int(pet[k]) for k in ("gw_hp", "gw_speed", "gw_phy_att", "gw_mag_att", "gw_phy_def", "gw_mag_def")]
+        total = sum(values)
+        if total == 0: values[0] = 1; total = 1
+        shift = (int(pet["gw_flush_count"]) + pet["id"]) % 6
+        values = values[shift:] + values[:shift]
+        columns = ("gw_hp", "gw_speed", "gw_phy_att", "gw_mag_att", "gw_phy_def", "gw_mag_def")
+        connection.execute("UPDATE pets SET " + ", ".join(f"{c} = ?" for c in columns) + ", gw_flush_count = gw_flush_count + 1 WHERE id = ?", (*values, pet_index))
+        _consume_mutation_item(connection, item)
+        payload = {"value": "ok", "hp": stats["hp"], "hp_gw": values[0], "speed": stats["speed"], "speed_gw": values[1], "phy_att": stats["phy_att"], "phy_att_gw": values[2], "mag_att": stats["mag_att"], "mag_att_gw": values[3], "phy_def": stats["phy_def"], "phy_def_gw": values[4], "mag_def": stats["mag_def"], "mag_def_gw": values[5], "total_gw": total, "gw_rate": min(5, max(1, total // 20 + 1))}
+    return _protocol_response(19, payload)
+
+
+def _pet_flush_nature(database_path: Path) -> Response:
+    uid = _request_value("uid"); pet_index = _pet_index_from_request()
+    if pet_index is None: return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player, pet = _mutation_pet(connection, uid, pet_index)
+        if player is None: return _pet_error(103)
+        if pet is None: return _pet_error(506)
+        if pet["is_locked"]: return _pet_error(100)
+        item = _mutation_inventory(connection, player["id"], 10009)
+        if item is None or item["quantity"] <= 0: return _pet_error(400)
+        nature = (int(pet["nature"]) + 1) % 21
+        connection.execute("UPDATE pets SET nature = ? WHERE id = ?", (nature, pet_index))
+        _consume_mutation_item(connection, item)
+        payload = {"id": pet["pet_id"], "name": pet["name"], "nature": nature, "value": "ok"}
+    return _protocol_response(20, payload)
+
+
+def _skill_rows(skill_text: str):
+    result = []
+    for token in (skill_text or "").split(":"):
+        if not token.isdigit(): continue
+        sid = int(token)
+        dm_type = 2 if str(sid).startswith("51") else 1
+        result.append({"id": sid, "dm_type": dm_type})
+    return result
+
+
+def _pet_forget_skill(database_path: Path) -> Response:
+    uid = _request_value("uid"); pet_index = _pet_index_from_request()
+    if pet_index is None: return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player, pet = _mutation_pet(connection, uid, pet_index)
+        if player is None: return _pet_error(103)
+        if pet is None: return _pet_error(506)
+        if pet["is_locked"]: return _pet_error(524)
+        skills = [x for x in (pet["skills"] or "").split(":") if x.isdigit()]
+        if len(skills) <= 1: return _pet_error(515)
+        item = _mutation_inventory(connection, player["id"], 10028)
+        if item is None or item["quantity"] <= 0: return _pet_error(400)
+        skills.pop(0)
+        connection.execute("UPDATE pets SET skills = ? WHERE id = ?", (":".join(skills), pet_index))
+        _consume_mutation_item(connection, item)
+        payload = {"id": pet["pet_id"], "skills": _skill_rows(":".join(skills)), "value": "ok"}
+    return _protocol_response(21, payload)
 
 
 def _pet_change_name(database_path: Path) -> Response:
@@ -1832,6 +1954,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _pet_release(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "18":
             return _pet_change_name(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "19":
+            return _pet_flush_grow(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "20":
+            return _pet_flush_nature(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "21":
+            return _pet_forget_skill(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "40":
             return _pet_expand_capacity(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "55":
