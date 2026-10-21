@@ -190,13 +190,15 @@ python -m pet_hunter_server.seed_items --uid <uid> --quantity 20 --pets 8
 ### 4. 宠物养成与合成
 
 - 合成链 62/63/65 此前完全未实现（返回 501）。按 `PetSynthesisListUI.as:190-234`、`PetSynthesisUI.as:254-264`、`PetSynthesisResultUI.as:124-200` 的字段契约实现：选宠列表排除锁定与上阵宠物；合成消费副宠、主宠获得一代强化（LOCAL DEFAULT，六项各 +5）；结果页返回 `index/icon/name/lv/type/skills/exd_generation/exd_*_tp`。
-- 合成按钮的真机点击未完成：`FarmUI` 的三角位图布局中，命中区中心与视觉位置偏移严重，自动化点击反复落空。该流程服务端与测试均已验证，真机点击建议手动确认一次。
+- 合成按钮的真机点击未能完成，根因已定位清楚：`FarmUI.as:51-87` 三个按钮都用 `new BitmapData(200,200)` 作为命中位图，AIR 舞台从 540×800 拉伸到 1080×2412 后命中区被同比放大。`initButton` 里 `img_develop_t`（养成）**最后 addChild，位于最上层**，实测点击牧场页几乎任意位置都会进入养成页（504→505→9），合成按钮无法被触达。这属于客户端自身的命中区缺陷，不是协议问题。合成服务端链路已用 HTTP 实测走通：`62` 返回 `奇异龙猫/火龙/喷火龙`，`65` 返回 `name:"奇异龙猫" exd_generation:3 exd_*_tp:10`。
+- **宠物养成页真机已验证跑通**：设备端实际发出 504 → 505 → 9，服务端依次响应，养成页正确显示 `强化值/体力值/生命强化/物攻强化/魔攻强化/物防强化/魔防强化/速度强化` 八项数值。
+- **宠物名字真实化**：`DevelopUI.as:111-144` 与 `PetSynthesisListUI.as:218` 在 `name` 缺失时会回落到 pet.txt，但数据库中 `pets.name` 为 NULL 时界面显示 `null`。现统一由 `_pet_name()` 从 pet.txt 解析真实中文名，合成结果页同样修复。
 
 ### 配置表加载器的一个隐蔽 bug
 
 `equip.txt` 与 `prop.txt` 带 UTF-8 BOM，`skin.txt` 不带。用普通 `utf-8` 读会让 BOM 变成表头第一列名，导致 `id` 匹配失败、**整张表解析为 0 行且不报错**。改用 `utf-8-sig` 后才能读到 936/107 行。
 
-测试数从 78 增至 **86 passed**。
+测试数从 78 增至 **87 passed**。
 
 下一步：宠物合成与养成的真机点击验证（建议手动），以及更多玩法模块扩展。
 
