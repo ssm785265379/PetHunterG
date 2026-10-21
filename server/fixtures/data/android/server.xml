@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <server id="1" name="LAN Local Test" icon="clip_back_login" n="0" url="http://127.0.0.1:8080/" />
+</config>

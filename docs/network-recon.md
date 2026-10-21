@@ -40,3 +40,19 @@ Related parameter names include `type=flash`, `uid`, `sn`, `sign`, `version`, `i
 5. Specify a local URL redirect strategy. The client currently embeds remote IP addresses, so a loopback server alone will not receive traffic without changing the client routing or adding a device-side mapping layer.
 
 Do not implement guessed responses as if they were verified. Start with a captured/decompiled vertical slice and persist any local user state in a local database only after the state model is understood.
+
+## 2026-10-21 response-dispatch confirmation
+
+The AIR SDK `swfdump -abc` output for the current `APetHunter.swf` confirms the HTTP response envelope in `GameUtil.receiveHttpRequestDataHandle()`:
+
+1. Read the response body as a string.
+2. Split it on a tab (`\t`).
+3. Convert the first segment to an integer command ID.
+4. Parse the second segment as JSON into an object.
+5. Invoke `Navigator.con(commandId, parsedObject)`.
+
+This is static bytecode evidence. It does not establish valid command IDs, successful response fields, or the order of startup/login requests. In particular, `Navigator.flow(int)` changes client screens; it is not the server response dispatcher. `Navigator.con` is a dynamic handler table and its registration sites still need to be traced.
+
+The command dispatcher contains `login` and `autoLogin` actions and sends ordinary API requests through `flash.do`, but the exact first command ID, request serialization/signature, and payload schema are not yet verified. Keep the Flask `flash.do` placeholder non-successful until those are recovered. The immediate runtime blocker is earlier: the last verified device trace threw AS3 `ReferenceError #1065` in `ServerItem.set data()` while consuming the server list, before any login API request. A later log query returned no matching fresh entries, so this exception is historical evidence, not a new reproduction.
+
+Target architecture after the client can reach the protocol flow: LAN-only Flask command handlers backed by a local persistent store, with deterministic local account/character/game records returned in the exact client envelope. Implement one observed vertical slice at a time; do not return arbitrary success JSON or assume server state fields.

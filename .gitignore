@@ -17,3 +17,11 @@ __pycache__/
 
 # Device captures may contain personal/device information.
 captures/
+
+# Local server database contains account hashes and private save data.
+server/instance/
+*.sqlite3
+*.sqlite3.bak-*
+
+# Scratch files used during device/protocol inspection.
+.tmp_*
