@@ -1232,6 +1232,19 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_friend_list_and_detail(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "FriendT")
+    other = _create_local_player(client, "OtherT")
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"51","uid":uid,"p":1,"n":9}))
+    assert command == 51 and payload["friend"][0]["id"] == other
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"52","uid":uid,"gid":other,"psk":2}))
+    assert command == 52 and payload["player"]["id"] == other
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"3","uid":uid,"gid":other}))
+    assert command == 3 and payload["player"]["id"] == other
+
+
 def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
