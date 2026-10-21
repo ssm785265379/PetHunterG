@@ -113,8 +113,102 @@ LOCAL_MAX_PET_LEVEL = 99
 # monster level. 100,000 means a lv-1 hunt is ~10% of a level.
 LOCAL_HUNT_EXP_PER_LEVEL = 100000
 LOCAL_EXPLORE_EXP = 300000
+# LOCAL DEFAULT: exploreMap.txt's passRewardPoint is 0 on most maps — their pass
+# reward is an item or a picture-book entry — so a flat silver bonus is added on
+# top to keep expeditions worth running.
+LOCAL_EXPLORE_BONUS_POINT = 30
 # LOCAL DEFAULT: silver awarded per monster level on a hunt win.
 LOCAL_HUNT_POINT_REWARD = 50
+
+
+def _parse_map_goods(raw: object) -> list[tuple[int, int, int, int]]:
+    """Parse exploreMap's reward columns into (kind, id, num, icon) tuples.
+
+    The shipped values are always four colon-separated numbers — `3:150011:150011:1`,
+    `1:50001:50004:1`, `2:6002:6002:1` — which is `kind:id:icon:num`, NOT the
+    `id:num,id:num` form task rewards use. Reading them with the pair parser
+    silently produced item 3 x 150011. The icon field is genuinely independent:
+    map 13 grants item 50001 drawn with icon 50004.
+    """
+    triples: list[tuple[int, int, int, int]] = []
+    for chunk in str(raw or "").split(","):
+        parts = [part.strip() for part in chunk.split(":")]
+        if len(parts) == 4 and all(part.lstrip("-").isdigit() for part in parts):
+            kind, gid, icon, num = (int(part) for part in parts)
+            if gid > 0 and num > 0:
+                triples.append((kind, gid, num, icon if icon > 0 else gid))
+        elif len(parts) == 2 and all(part.isdigit() for part in parts):
+            gid, num = int(parts[0]), int(parts[1])
+            if gid > 0 and num > 0:
+                triples.append((1, gid, num, gid))
+    return triples
+
+
+def _grant_goods(connection, player_id: int, goods) -> list[dict]:
+    """Put reward items into the bag, stacking on the existing row.
+
+    Each entry is (id, num) or (id, num, icon). exploreMap's reward columns carry
+    an explicit icon in their third field (map 13 ships `1:50001:50004:1`, where
+    the icon differs from the item id), so that is honoured when present.
+    Unknown ids are skipped rather than inserted with a bogus icon, because the
+    bag renders `p<icon>` without a guard.
+    """
+    props = config_tables._table("prop.txt")
+    equips = config_tables._table("equip.txt")
+    granted: list[dict] = []
+    for entry in goods:
+        gid, num = int(entry[0]), int(entry[1])
+        icon_override = int(entry[2]) if len(entry) > 2 and entry[2] else None
+        if gid <= 0 or num <= 0:
+            continue
+        if gid in equips:
+            # kind-1 rewards may be equipment (map 13 ships item 50001, which is
+            # in equip.txt, not prop.txt), so they need the equipment column set.
+            record = equips[gid]
+            def stat(key: str) -> int:
+                raw = str(record.get(key, "") or "").strip()
+                return int(raw) if raw.lstrip("-").isdigit() else 0
+            icon = icon_override or stat("iconId") or gid
+            for _ in range(num):
+                # inventory is UNIQUE(player_id, item_id), so a repeat drop has to
+                # stack onto the existing row instead of inserting a second copy
+                # (a plain INSERT raised an IntegrityError and 500'd the page).
+                connection.execute(
+                    """INSERT INTO inventory (player_id, item_id, team, quantity, icon,
+                                              item_type, use_type, level, star, pro,
+                                              hp, speed, phy_att, mag_att, phy_def, mag_def)
+                       VALUES (?,?,3,1,?,?,?,1,?,0,?,?,?,?,?,?)
+                       ON CONFLICT (player_id, item_id)
+                       DO UPDATE SET quantity = quantity + 1""",
+                    (player_id, gid, icon, stat("type"), stat("useType"),
+                     max(1, stat("star")), stat("hp"), stat("speed"),
+                     stat("phyAtt"), stat("magAtt"), stat("phyDef"), stat("magDef")),
+                )
+            granted.append({"id": gid, "num": num})
+            continue
+        if gid not in props:
+            continue
+        record = props[gid]
+        icon = icon_override or int(
+            str(record.get("iconId", "") or gid).strip() or gid
+        )
+        connection.execute(
+            """
+            INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)
+            VALUES (?, ?, 1, ?, ?, ?, ?)
+            ON CONFLICT (player_id, item_id) DO UPDATE SET quantity = quantity + excluded.quantity
+            """,
+            (
+                player_id,
+                gid,
+                num,
+                icon,
+                int(str(record.get("type", "0")).strip() or 0) if str(record.get("type", "0")).strip().isdigit() else 0,
+                int(str(record.get("useType", "0")).strip() or 0) if str(record.get("useType", "0")).strip().isdigit() else 0,
+            ),
+        )
+        granted.append({"id": gid, "num": num})
+    return granted
 
 
 def _grant_pet_exp(connection, pet_ids, amount: int) -> list[dict]:
@@ -1895,6 +1989,7 @@ def _explore_map_row(gid: int) -> dict | None:
         "need_discover_rate": _int("needDiscoverRate"),
         "pass_reward_point": _int("passRewardPoint"),
         "pass_reward_crystal": _int("passRewardCrystal"),
+        "pass_reward_goods": str(record.get("passRewardGoods", "") or ""),
         "max_reward_point": _int("maxRewardPoint"),
         "is_catch": 1 if str(record.get("catchPet", "0")).strip() not in ("", "0") else 0,
         # LOCAL DEFAULT: no original expedition fee is recoverable, so the
@@ -1987,7 +2082,40 @@ def _explore_start(database_path: Path) -> Response:
         c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=? WHERE id=?",(m["cost_point"],m["cost_money"],gid,p["id"]))
         # LOCAL DEFAULT: an expedition always resolves against the first monsters
         # in monster.txt, since the per-map spawn table is not recoverable.
-        _credit_battle_rewards(c,p["id"],point=LOCAL_EXPLORE_REWARD,crystal=0)
+        # REAL rewards from exploreMap.txt's passReward* columns (the earlier
+        # implementation paid a flat LOCAL_EXPLORE_REWARD and no items at all).
+        reward_point = m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT
+        reward_crystal = m["pass_reward_crystal"]
+        parsed_goods = _parse_map_goods(m["pass_reward_goods"])
+        reward_goods = _grant_goods(
+            c, p["id"],
+            [(gid, num, icon) for kind, gid, num, icon in parsed_goods if kind == 1],
+        )
+        # kind 2 is a pet reward; kind 3 is a picture-book entry with no item row.
+        gifted_pets = [(gid, num) for kind, gid, num, _icon in parsed_goods if kind == 2]
+        if gifted_pets:
+            capacity = c.execute(
+                "SELECT pet_capacity FROM players WHERE id=?", (p["id"],)
+            ).fetchone()[0]
+            held = c.execute(
+                "SELECT COUNT(*) FROM pets WHERE player_id=?", (p["id"],)
+            ).fetchone()[0]
+            pets_table = config_tables._table("pet.txt")
+            for gid, num in gifted_pets:
+                if gid not in pets_table:
+                    continue
+                for _ in range(num):
+                    if held >= capacity:
+                        break
+                    c.execute(
+                        """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation)
+                           VALUES (?,?,1,?,1,?,?,1)""",
+                        (p["id"], gid, int(str(pets_table[gid].get("star", "1") or 1).strip() or 1),
+                         gid, str(pets_table[gid].get("skills", "") or "").strip() or "101:5101"),
+                    )
+                    held += 1
+            reward_goods = reward_goods + [{"id": gid, "num": num} for gid, num in gifted_pets]
+        _credit_battle_rewards(c, p["id"], point=reward_point, crystal=reward_crystal)
         # Expedition battles train the squad too, so exploring is a viable way to
         # level pets for evolution (LOCAL DEFAULT exp amount).
         explore_pets=[r[0] for r in c.execute(
@@ -2023,8 +2151,8 @@ def _explore_start(database_path: Path) -> Response:
             "is_win":1,"hunt_type":1,"map_id":gid,
             "monster_group":len(def_list)+3,
             "att_list":att_list,"def_list":def_list,"record":record,
-            "reward_point":LOCAL_EXPLORE_REWARD,"reward_crystal":0,
-            "reward_goods":[],"pic":[],
+            "reward_point":reward_point,"reward_crystal":reward_crystal,
+            "reward_goods":reward_goods,"pic":[],
         },
     })
 

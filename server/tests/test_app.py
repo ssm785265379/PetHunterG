@@ -1624,6 +1624,103 @@ def test_catch_and_pet_picker_return_renderable_rows(tmp_path: Path):
         assert {"index", "id", "icon", "name", "lv"} <= set(row)
 
 
+def test_explore_reward_grammar_is_kind_id_icon_num():
+    # exploreMap's reward columns are `kind:id:icon:num`, not `id:num`. Reading
+    # them with the pair parser produced "item 3 x 150011", and the third field is
+    # a genuinely separate icon (map 13 ships 1:50001:50004:1).
+    from pet_hunter_server.app import _parse_map_goods
+
+    assert _parse_map_goods("1:50001:50004:1") == [(1, 50001, 1, 50004)]
+    assert _parse_map_goods("2:6002:6002:1") == [(2, 6002, 1, 6002)]
+    assert _parse_map_goods("3:150011:150011:1") == [(3, 150011, 1, 150011)]
+    assert _parse_map_goods("") == []
+    assert _parse_map_goods("0") == []
+    # The older id:num,id:num form still parses (task rewards share the parser).
+    assert _parse_map_goods("10016:1") == [(1, 10016, 1, 10016)]
+
+
+def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
+    # Map 13's pass reward is equipment 50001, which lives in equip.txt rather than
+    # prop.txt. inventory is UNIQUE(player_id, item_id), so a repeat drop has to
+    # stack instead of raising an IntegrityError (which 500'd the whole page).
+    table = config_tables._table("exploreMap.txt")
+    equips = config_tables._table("equip.txt")
+    gid = next(
+        (g for g in sorted(table)
+         if str(table[g].get("passRewardGoods", "")).startswith("1:")
+         and int(str(table[g]["passRewardGoods"]).split(":")[1]) in equips),
+        None,
+    )
+    assert gid is not None, "the shipped table should contain an equipment reward"
+    item_id = int(str(table[gid]["passRewardGoods"]).split(":")[1])
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqRwd")
+
+    def bag_quantity() -> int:
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE player_id=1 AND item_id=?",
+                (item_id,),
+            ).fetchone()
+        return row[0]
+
+    before = bag_quantity()
+    for _ in range(2):  # the second run exercises the unique-constraint path
+        _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+        command, payload = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+        )
+        assert command == 103
+        assert {"id": item_id, "num": 1} in payload["battle_result"]["reward_goods"]
+    assert bag_quantity() == before + 2
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT team, icon, star FROM inventory WHERE player_id=1 AND item_id=?", (item_id,)
+        ).fetchone()
+    assert row[0] == 3, "equipment lives in the team-3 bag"
+    assert row[1] > 0
+
+
+def test_explore_pays_the_maps_real_pass_reward(tmp_path: Path):
+    # exploreMap.txt carries passRewardPoint / passRewardCrystal / passRewardGoods
+    # per map. The expedition used to pay a flat LOCAL_EXPLORE_REWARD and never
+    # granted the item, so the reward panel and the bag disagreed with the table.
+    table = config_tables._table("exploreMap.txt")
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RwdOne")
+    gid = sorted(table)[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    result = payload["battle_result"]
+    expected_point = int(str(table[gid].get("passRewardPoint", "0")).strip() or 0)
+    from pet_hunter_server.app import LOCAL_EXPLORE_BONUS_POINT
+
+    # The table's pass reward plus the documented LOCAL DEFAULT silver bonus.
+    assert result["reward_point"] == expected_point + LOCAL_EXPLORE_BONUS_POINT
+    assert result["reward_crystal"] == int(str(table[gid].get("passRewardCrystal", "0")).strip() or 0)
+
+    # Whatever the table advertises must actually land in the player row / bag.
+    with sqlite3.connect(database) as connection:
+        point, crystal = connection.execute(
+            "SELECT point, crystal FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        bag = connection.execute(
+            "SELECT item_id, quantity FROM inventory WHERE player_id = 1 AND team = 1"
+        ).fetchall()
+    assert point >= expected_point
+    assert crystal >= result["reward_crystal"]
+    granted = {gid_: num for gid_, num in bag}
+    for entry in result["reward_goods"]:
+        assert granted.get(entry["id"], 0) >= entry["num"]
+
+
 def test_hunting_awards_pet_exp_and_levels_the_squad(tmp_path: Path):
     # Levelling used to be reachable only by feeding exp items; battles returned a
     # reward_exp figure but never wrote it anywhere, so a freshly caught lv-1 pet
