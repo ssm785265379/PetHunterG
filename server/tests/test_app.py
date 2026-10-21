@@ -85,8 +85,8 @@ def test_response_metadata_logs_status_and_length_without_request_values(caplog)
         data={"uname": "player@example.test", "pwd": "private-password"},
     )
 
-    assert response.status_code == 501
-    assert "response source=127.0.0.1 method=POST path=/flash.do status=501" in caplog.text
+    assert response.status_code == 200
+    assert "response source=127.0.0.1 method=POST path=/flash.do status=200" in caplog.text
     assert f"bytes={len(response.data)}" in caplog.text
     assert "private-password" not in caplog.text
     assert "player@example.test" not in caplog.text
@@ -118,7 +118,11 @@ def test_server_list_reports_missing_capture_instead_of_guessing(tmp_path: Path)
     assert response.get_json() == {"error": "server_list_not_configured"}
 
 
-def test_unknown_flash_command_is_observed_but_not_given_a_guessed_success(caplog):
+def test_unknown_flash_command_is_observed_without_leaking_request_values(caplog):
+    # The 501 used to be surfaced as the in-game "网络错误" dialog, because
+    # APetHunter.as:166-168 raises it from ioHttpRequestError on any transport
+    # failure. An unimplemented command now answers 200 with an empty envelope so
+    # the page takes its normal (empty) branch instead of blocking the player.
     caplog.set_level(logging.INFO)
     client = create_app({"TESTING": True}).test_client()
 
@@ -127,13 +131,31 @@ def test_unknown_flash_command_is_observed_but_not_given_a_guessed_success(caplo
         data={"uname": "player@example.test", "pwd": "private-password", "sn": "secret-signature"},
     )
 
-    assert response.status_code == 501
-    assert response.get_json() == {"error": "protocol_not_implemented"}
+    assert response.status_code == 200
+    assert response.get_data(as_text=True) == '0\t{"value":"ok"}'
     assert "command=unknown" in caplog.text
+    assert "unimplemented" in caplog.text
     assert "pwd" in caplog.text
     assert "private-password" not in caplog.text
     assert "player@example.test" not in caplog.text
     assert "secret-signature" not in caplog.text
+
+
+def test_unimplemented_show_id_never_returns_a_transport_error(tmp_path: Path):
+    # Every one of the 48 commands the client sends but this server has not
+    # implemented used to answer 501, which AIR turns into "网络错误". A normal
+    # 200 envelope keeps the page usable; the command id is echoed back so
+    # MainUI.readDatas can route it to its own branch.
+    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    uid = _create_local_player(client, "NoErr")
+    for show_id in (73, 74, 87, 93, 105, 300, 1004):
+        response = client.post(
+            "/flash.do", data={"m": "show", "showId": str(show_id), "uid": uid, "p": 1, "n": 9}
+        )
+        assert response.status_code == 200, f"showId={show_id} must not be a transport error"
+        command, payload = response.get_data(as_text=True).split("\t", 1)
+        assert command == str(show_id)
+        assert json.loads(payload) == {"value": "ok"}
 
 
 def test_account_registration_hashes_password_and_returns_registration_envelope(tmp_path: Path):

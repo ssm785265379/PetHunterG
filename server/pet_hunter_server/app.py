@@ -3103,6 +3103,24 @@ def create_app(config: dict | None = None) -> Flask:
             return _pet_toggle_lock(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "511":
             return _player_tasks(current_app.config["DATABASE"])
-        return jsonify(error="protocol_not_implemented"), 501
+        # Fallback for commands the client sends but this server has not
+        # implemented yet (48 of them at the time of writing).
+        #
+        # Returning 501 used to produce the in-game "网络错误" alert, because
+        # APetHunter.as:166-168 raises that dialog from ioHttpRequestError — i.e.
+        # on any transport-level failure, not on a protocol error. APetHunter.as
+        # :143-162 only parses the body when the status is a normal success, so a
+        # 200 with a valid envelope lets every page take its normal branch and
+        # simply render empty instead of blocking the player with an error.
+        unimplemented = _request_value("showId")
+        try:
+            fallback_id = int(unimplemented or 0)
+        except ValueError:
+            fallback_id = 0
+        app.logger.warning(
+            "unimplemented command showId=%s answered with an empty envelope",
+            unimplemented,
+        )
+        return _protocol_response(fallback_id, {"value": "ok"})
 
     return app
