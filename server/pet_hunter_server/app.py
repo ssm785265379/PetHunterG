@@ -1224,6 +1224,20 @@ LOCAL_EXPLORE_MAPS = {20001: {"world": 1, "cost_point": 0, "cost_money": 0, "dis
 LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
 
 
+LOCAL_JOBS = {1: {"state":1}, 2: {"state":0}}
+
+
+def _job_list(database_path: Path) -> Response:
+    return _protocol_response(70,{"list":[{"job":k,"state":v["state"]} for k,v in LOCAL_JOBS.items()]})
+
+
+def _job_detail(database_path: Path) -> Response:
+    try: job=int(_request_value("gid",""))
+    except ValueError:return _pet_error(100)
+    if job not in LOCAL_JOBS:return _pet_error(400)
+    return _protocol_response(71,{"job":job,"need_lv":1,"diff_lv":0,"nextRole":{"now_hp":0,"next_hp":0,"now_speed":0,"next_speed":0,"now_phy_att":0,"next_phy_att":0,"now_phy_def":0,"next_phy_def":0,"now_mag_att":0,"next_mag_att":0,"now_mag_def":0,"next_mag_def":0},"reward_goods":[]})
+
+
 def _pic_list(database_path: Path) -> Response:
     try: ttype=int(_request_value("ttype","1")); page=int(_request_value("p","1")); size=int(_request_value("n","9"))
     except ValueError:return _pet_error(100)
@@ -2326,6 +2340,10 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "103":
             return _explore_start(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "70":
+            return _job_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "71":
+            return _job_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "25":
             return _pic_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "26":
