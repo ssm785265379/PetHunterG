@@ -1221,6 +1221,26 @@ LOCAL_HUNT_MAPS = {10001: {"name": "烈焰山谷", "world": 1, "cost": 1, "monst
 LOCAL_EXPLORE_MAPS = {20001: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 1}}
 
 
+def _guild_own(database_path: Path) -> Response:
+    uid=_request_value("uid")
+    with _connect_database(database_path) as c:
+        p=c.execute("SELECT nick,img FROM players WHERE uid=?",(uid,)).fetchone()
+    if p is None:return _pet_error(103)
+    return _protocol_response(86,{"guild_id":0,"leader_img":p["img"],"guild_name":"","position":0,"leader_name":"","mem_num":0})
+
+
+def _guild_list(database_path: Path) -> Response:
+    return _protocol_response(88,{"guilds":[]})
+
+
+def _guild_members(database_path: Path) -> Response:
+    return _protocol_response(91,{"list":[]})
+
+
+def _guild_battle(database_path: Path) -> Response:
+    return _protocol_response(94,{"is_battle_on":0,"battle_turn":0,"isReward":0,"start_time":0,"end_time":0,"total_honor":0,"battle_team":{"turn":{"1":[],"2":[],"3":[]}}})
+
+
 def _friend_list(database_path: Path) -> Response:
     uid=_request_value("uid")
     try: page,size=int(_request_value("p","1")),int(_request_value("n","9"))
@@ -2279,6 +2299,14 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_goods(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "103":
             return _explore_start(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "86":
+            return _guild_own(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "88":
+            return _guild_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "91":
+            return _guild_members(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "94":
+            return _guild_battle(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "3":
             return _player_detail_social(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "51":

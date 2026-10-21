@@ -1232,6 +1232,15 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_guild_readonly_commands(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GuildT")
+    for show_id, expected in ((86, "guild_id"), (88, "guilds"), (91, "list"), (94, "is_battle_on")):
+        command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":show_id,"uid":uid}))
+        assert command == show_id and expected in payload
+
+
 def test_friend_list_and_detail(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
