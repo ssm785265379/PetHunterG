@@ -447,6 +447,121 @@ def test_empty_inventory_rejects_unknown_player(tmp_path: Path):
     assert response.get_data(as_text=True).startswith("-1:")
 
 
+def test_new_character_gets_the_local_starter_equipment_in_the_bag(tmp_path: Path):
+    client = create_app(
+        {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
+    ).test_client()
+    uid = _create_local_player(client, "EquipBag")
+
+    payload = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "22", "uid": uid, "ttype": "3", "p": "1", "n": "9"},
+        )
+    )[1]
+
+    assert payload["bag_size"] == 1
+    assert payload["max_bag_size"] == 100
+    assert len(payload["goods_list"]) == 1
+    item = payload["goods_list"][0]
+    assert item["id"] == 20001
+    assert item["team"] == 3
+    assert item["num"] == 1
+    # Equipment must not hit the pet-action switch cases, so type is 0 (local rule).
+    assert item["type"] == 0
+    assert item["use_type"] == 1
+    assert item["level"] == 1
+    # The bag list resolves the class name verbatim, so it must be p<iconId>.
+    assert item["icon"] == "p20001"
+    # Goods tab stays empty even though the equipment tab has a row.
+    goods_tab = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "22", "uid": uid, "ttype": "1", "p": "1", "n": "9"},
+        )
+    )[1]
+    assert goods_tab["bag_size"] == 0
+    assert goods_tab["goods_list"] == []
+
+
+def test_equipment_detail_returns_the_persisted_equipment(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EqDetail")
+    index = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "22", "uid": uid, "ttype": "3", "n": "9"},
+        )
+    )[1]["goods_list"][0]["index"]
+
+    response = client.post(
+        "/flash.do", data={"m": "show", "showId": "39", "uid": uid, "index": str(index)}
+    )
+
+    command, payload = _envelope(response)
+    assert response.status_code == 200
+    assert command == 39
+    assert payload["index"] == index
+    assert payload["id"] == 20001
+    # Detail passes the numeric icon id; the client prefixes "p" itself.
+    assert payload["icon"] == 20001
+    assert payload["level"] == 1
+    assert payload["star"] == 1
+    assert payload["pro"] == 0
+    assert payload["hp"] == 0
+    assert payload["speed"] == 0
+    assert payload["phy_att"] == 20
+    assert payload["mag_att"] == 20
+    assert payload["phy_def"] == 0
+    assert payload["mag_def"] == 0
+    # Positive money hides the not-yet-implemented sell button (local gate).
+    assert payload["money"] > 0
+
+
+def test_equipment_detail_rejects_non_equipment_and_other_players(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    owner = _create_local_player(client, "EqOwner")
+    other = _create_local_player(client, "EqOther")
+    index = _envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "22", "uid": owner, "ttype": "3", "n": "9"},
+        )
+    )[1]["goods_list"][0]["index"]
+
+    unknown = client.post(
+        "/flash.do", data={"m": "show", "showId": "39", "uid": owner, "index": "999999"}
+    )
+    cross_player = client.post(
+        "/flash.do", data={"m": "show", "showId": "39", "uid": other, "index": str(index)}
+    )
+
+    assert unknown.get_data(as_text=True) == "-1:400"
+    assert cross_player.get_data(as_text=True) == "-1:400"
+
+
+def test_grant_starter_equipment_is_idempotent_and_keeps_existing_items(tmp_path: Path):
+    from pet_hunter_server import grant_starter_equipment
+
+    database = tmp_path / "game.sqlite3"
+    config = {"TESTING": True, "DATABASE": database}
+    client = create_app(config).test_client()
+    uid = _create_local_player(client, "EqGrant")
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+
+    assert grant_starter_equipment(database) == 0
+    assert grant_starter_equipment(database) == 0
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE player_id = ?", (player_id,)
+        ).fetchone()[0] == 1
+
+
 def _create_local_player(client, nick: str) -> str:
     created = client.post(
         "/flash.do", data={"m": "autoReg", "nick": nick, "sex": "1"}

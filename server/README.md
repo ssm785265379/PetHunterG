@@ -42,7 +42,8 @@ If it does not connect, verify `adb devices -l`, `adb reverse --list`, and that 
 - `GET /health`: connectivity check.
 - `GET /data/android/<locale>/server.xml`, `/data/android/server.xml`, `/server.xml`, `/serverTest.xml`: serve the configured XML fixture verbatim; if the requested fixture is absent, return HTTP 503 `server_list_not_configured`.
 - `POST /flash.do` supports the observed account/character path: `regc` registers an account, `login` authenticates it, `reg` creates and binds a character, and `autoLogin` restores that character. `autoReg` remains available for the legacy quick-create path. `showId=510` returns the character profile and `showId=511` returns an empty initial task list.
-- `showId=22` returns the character's persisted inventory (empty array when no items); `showId=11`/`showId=12` return the pet list and pet detail from a per-character `pets` table.
+- `showId=22` returns the character's persisted inventory for the requested `ttype` tab; `showId=11`/`showId=12` return the pet list and pet detail from a per-character `pets` table.
+- `showId=39` returns equipment detail (`index`, `ttype=3`) from a persisted `inventory` row: `money,index,id,icon,level,star,pro,hp,phy_att,mag_att,phy_def,mag_def,speed`. The client looks up `pic[id].name`, instantiates `p<icon>` with no try/catch, and hides the sell button when `money > 0`. Selling (68/69) is not implemented, so a positive local `money` deliberately hides that button.
 - Pet mutations: `showId=18` renames (`index`, `pName`), `showId=55` toggles lock (`index`), `showId=15` releases (`index`), `showId=14` evolves (`index`), and `showId=40` expands capacity. Failures return HTTP 200 with the client's own `-1:<error.txt key>` code (204, 504, 505, 506, 514, 517, 524, plus 100/103 for malformed or unknown players) so the game shows its bundled message instead of a network error.
 - Account passwords are stored as salted scrypt hashes in `server/instance/game.sqlite3`; request logs contain field names only. Unimplemented commands still return HTTP 501 rather than a guessed success.
 
@@ -60,13 +61,25 @@ Saves created before a starter pet existed can be backfilled idempotently. A cha
 
 `free_goods_*` reward payloads for release are intentionally omitted; the client goes straight back to the list, which re-requests `showId=11`.
 
+### Equipment defaults and maintenance
+
+Each character also receives one local starter equipment, 烈焰之剑 (`equip.txt` id/iconId `20001`, team 3, slot type 1, one star, `phy_att`/`mag_att` 20, everything else 0). The `p20001` class exists in the bundled `skin.swf` and `pic.txt[20001]` supplies the name, so the client renders it without `#1065`. This is an explicit **local default**, not a recovered original-server rule. The `inventory` table now persists icon, item subtype, `use_type`, enhancement level, star, quality and the six combat stats.
+
+Bag-list rows need `icon` as the full class name (`p20001`), because `BagListUI` passes it to `IconItem`, which resolves it verbatim; detail 39 instead needs the numeric icon id and prefixes `p` itself. Equipment rows also return `type: 0` so the client's `onMouseUpItem` switch falls through to its `default` branch and sends `EQUIP_INFO` (39) instead of mistaking the equipment slot type for a pet-item action (cases 1/2/9/24/25/27).
+
+Saves created before the starter equipment existed can be backfilled idempotently:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\grant_starter_equipment.py
+```
+
 `server/fixtures/data/android/server.xml` currently contains a **synthetic diagnostic node**, not an authentic server list. Its `id`, `name`, `icon`, `n`, and `url` fields follow the SWF's XML access pattern; it points to `http://127.0.0.1:8080/`, forwarded over the connected USB debugging session. `icon=clip_back_login` is a temporary known-loaded `MovieClip`; `n=0` separately selects the bundled `clip_server_0` status symbol. Do not treat this fixture as recovered production data.
 
 ## Client connection status
 
 The checked-in source SWF remains unchanged. The local side-by-side AIR 51 test APK is built from a copy with the default and three fallback hosts redirected to `http://127.0.0.1:8080/`. Use the `localusb` package for USB reverse forwarding; rebuild only if the port changes, not when Wi-Fi IPs change.
 
-The OPPO phone reached this service and requested `GET /data/android/zh-CN/server.xml`; the locale route serves the synthetic node above. Account-backed registration/login, character creation, home profile (`showId=2`), inventory list (`showId=22`), the pet list/detail (`showId=11`/`12`), and the pet write commands (`14`/`15`/`18`/`40`/`55`) have all been exercised against the live database. The pet list rendered `Lv5 阿火` and the detail screen rendered 名称/星级/等级/属性/进化 plus the renamed and evolved state without a crash. The write commands' in-game button/confirm taps were not automated because the confirm controls are image assets. Remaining gameplay branches (equipment, shop, tasks, hunting, exploration, social) are still unimplemented.
+The OPPO phone reached this service and requested `GET /data/android/zh-CN/server.xml`; the locale route serves the synthetic node above. Account-backed registration/login, character creation, home profile (`showId=2`), inventory list (`showId=22`), the pet list/detail (`showId=11`/`12`), the pet write commands (`14`/`15`/`18`/`40`/`55`), and equipment detail (`showId=39`) have all been exercised against the live database. The pet list rendered `Lv5 阿火` and the detail screen rendered 名称/星级/等级/属性/进化 plus the renamed and evolved state without a crash. The equipment tab rendered `Lv1 烈焰之剑` and its detail rendered 星级/生命 0/物攻 20/魔攻 20/物防 0/魔防 0/速度 0 with no `#1065`. The write commands' in-game button/confirm taps were not automated because the confirm controls are image assets. Remaining gameplay branches (shop, tasks, hunting, exploration, social) are still unimplemented.
 
 ## Tests
 
@@ -74,4 +87,4 @@ The OPPO phone reached this service and requested `GET /data/android/zh-CN/serve
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The suite currently covers the account/character path, profile, inventory, and the full pet read/write surface (11/12/14/15/18/40/55), including cross-player isolation and locked/battle-state guards: 39 tests pass.
+The suite currently covers the account/character path, profile, inventory, equipment detail (39), and the full pet read/write surface (11/12/14/15/18/40/55), including cross-player isolation and locked/battle-state guards: 43 tests pass.

@@ -45,6 +45,31 @@ LOCAL_PET_EVOLUTION = {
     2019: {"id": 2020, "icon": 2020, "star": 5, "pro": 1, "need_lv": 5},
     2020: {"id": 2021, "icon": 2021, "star": 5, "pro": 1, "need_lv": 10},
 }
+# Local-only starter equipment so the equipment detail screen (39) is reachable.
+# 烈焰之剑 = equip.txt id 20001 (iconId 20001, team 3, slot type 1, one star).
+# Its class name p20001 exists in the bundled skin.swf, and pic.txt[id=20001] gives
+# the name the client looks up. Stats below copy the bundled equip.txt row.
+LOCAL_STARTER_EQUIPMENT = (
+    {
+        "item_id": 20001,
+        "icon": 20001,
+        "item_type": 1,
+        "use_type": 1,
+        "level": 1,
+        "star": 1,
+        "pro": 0,
+        "hp": 0,
+        "speed": 0,
+        "phy_att": 20,
+        "mag_att": 20,
+        "phy_def": 0,
+        "mag_def": 0,
+    },
+)
+# EquipInfoUI hides the sell button when the detail's `money` field is positive
+# (EquipInfoUI.as:191). Selling (68/69) is not implemented yet, so this local value
+# keeps the unsupported button hidden. The original meaning of `money` is unknown.
+LOCAL_EQUIP_SELL_HIDDEN_MONEY = 1
 
 
 def _remote_address_allowed(remote_addr: str | None, networks: list[str]) -> bool:
@@ -141,10 +166,43 @@ def _initialize_database(database_path: Path) -> None:
                 item_id INTEGER NOT NULL,
                 team INTEGER NOT NULL CHECK (team IN (1, 2, 3)),
                 quantity INTEGER NOT NULL CHECK (quantity > 0),
+                icon INTEGER,
+                item_type INTEGER NOT NULL DEFAULT 0,
+                use_type INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 1,
+                star INTEGER NOT NULL DEFAULT 1,
+                pro INTEGER NOT NULL DEFAULT 0,
+                hp INTEGER NOT NULL DEFAULT 0,
+                speed INTEGER NOT NULL DEFAULT 0,
+                phy_att INTEGER NOT NULL DEFAULT 0,
+                mag_att INTEGER NOT NULL DEFAULT 0,
+                phy_def INTEGER NOT NULL DEFAULT 0,
+                mag_def INTEGER NOT NULL DEFAULT 0,
+                equipped INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (player_id, item_id)
             )
             """
         )
+        inventory_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(inventory)")
+        }
+        for column, ddl in (
+            ("icon", "ALTER TABLE inventory ADD COLUMN icon INTEGER"),
+            ("item_type", "ALTER TABLE inventory ADD COLUMN item_type INTEGER NOT NULL DEFAULT 0"),
+            ("use_type", "ALTER TABLE inventory ADD COLUMN use_type INTEGER NOT NULL DEFAULT 0"),
+            ("level", "ALTER TABLE inventory ADD COLUMN level INTEGER NOT NULL DEFAULT 1"),
+            ("star", "ALTER TABLE inventory ADD COLUMN star INTEGER NOT NULL DEFAULT 1"),
+            ("pro", "ALTER TABLE inventory ADD COLUMN pro INTEGER NOT NULL DEFAULT 0"),
+            ("hp", "ALTER TABLE inventory ADD COLUMN hp INTEGER NOT NULL DEFAULT 0"),
+            ("speed", "ALTER TABLE inventory ADD COLUMN speed INTEGER NOT NULL DEFAULT 0"),
+            ("phy_att", "ALTER TABLE inventory ADD COLUMN phy_att INTEGER NOT NULL DEFAULT 0"),
+            ("mag_att", "ALTER TABLE inventory ADD COLUMN mag_att INTEGER NOT NULL DEFAULT 0"),
+            ("phy_def", "ALTER TABLE inventory ADD COLUMN phy_def INTEGER NOT NULL DEFAULT 0"),
+            ("mag_def", "ALTER TABLE inventory ADD COLUMN mag_def INTEGER NOT NULL DEFAULT 0"),
+            ("equipped", "ALTER TABLE inventory ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in inventory_columns:
+                connection.execute(ddl)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS pets (
@@ -272,6 +330,50 @@ def _insert_starter_pets(connection: sqlite3.Connection, player_id: int) -> int:
     return added
 
 
+def _insert_starter_equipment(connection: sqlite3.Connection, player_id: int) -> int:
+    """Insert the local starter equipment; returns how many rows were added."""
+    added = 0
+    for item in LOCAL_STARTER_EQUIPMENT:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO inventory (
+                player_id, item_id, team, quantity, icon, item_type, use_type,
+                level, star, pro, hp, speed, phy_att, mag_att, phy_def, mag_def
+            ) VALUES (?, ?, 3, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                player_id,
+                item["item_id"],
+                item["icon"],
+                item["item_type"],
+                item["use_type"],
+                item["level"],
+                item["star"],
+                item["pro"],
+                item["hp"],
+                item["speed"],
+                item["phy_att"],
+                item["mag_att"],
+                item["phy_def"],
+                item["mag_def"],
+            ),
+        )
+        added += cursor.rowcount
+    return added
+
+
+def grant_starter_equipment(database_path: Path) -> int:
+    """Backfill the local starter equipment for every character that lacks it."""
+    _initialize_database(database_path)
+    seeded = 0
+    with _connect_database(database_path) as connection:
+        players = connection.execute("SELECT id FROM players ORDER BY id").fetchall()
+        for player in players:
+            if _insert_starter_equipment(connection, player["id"]):
+                seeded += 1
+    return seeded
+
+
 def grant_starter_pets(database_path: Path) -> int:
     """Backfill the local starter pack for characters that only own starter pets.
 
@@ -336,6 +438,7 @@ def _register_account_player(database_path: Path) -> Response:
                 (uid, nick, sex, skin, account["id"]),
             )
             _insert_starter_pets(connection, cursor.lastrowid)
+            _insert_starter_equipment(connection, cursor.lastrowid)
             player = {"uid": uid}
     return _protocol_response(4098, {"value": player["uid"]})
 
@@ -363,6 +466,7 @@ def _auto_register_player(database_path: Path) -> Response:
                 (uid, nick, sex, skin),
             )
             _insert_starter_pets(connection, cursor.lastrowid)
+            _insert_starter_equipment(connection, cursor.lastrowid)
             player = {"uid": uid}
     return _protocol_response(4099, {"value": player["uid"]})
 
@@ -407,22 +511,85 @@ def _player_inventory(database_path: Path) -> Response:
             return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
         rows = connection.execute(
             """
-            SELECT id AS "index", item_id AS id, team, quantity AS num
+            SELECT id AS "index", item_id AS id, team, quantity AS num, icon,
+                   item_type AS type, use_type, level
             FROM inventory WHERE player_id = ? AND team = ?
             ORDER BY id LIMIT ? OFFSET ?
             """,
             (player["id"], item_type, page_size, (page - 1) * page_size),
         ).fetchall()
         count = connection.execute(
-            "SELECT COUNT(*) FROM inventory WHERE player_id = ?",
-            (player["id"],),
+            "SELECT COUNT(*) FROM inventory WHERE player_id = ? AND team = ?",
+            (player["id"], item_type),
         ).fetchone()[0]
+
+    goods = []
+    for row in rows:
+        item = dict(row)
+        # BagListUI hands this value straight to IconItem, which resolves the
+        # class name verbatim, so the list needs "p<iconId>" (unlike detail 39).
+        item["icon"] = f"p{item['icon']}" if item["icon"] else ""
+        if item["team"] == 3:
+            # BagListUI.onMouseUpItem switches on this `type` (row `t`) and its
+            # cases 1/2/9/24/25/27 are pet-item actions; equipment must fall to
+            # `default`, where ttype==3 sends EQUIP_INFO (39). The original
+            # server's value for equipment rows is not recoverable.
+            item["type"] = 0
+        goods.append(item)
     return _protocol_response(
         22,
         {
+            # Local interpretation: report the slots used in the viewed tab.
             "bag_size": count,
             "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY,
-            "goods_list": [dict(row) for row in rows],
+            "goods_list": goods,
+        },
+    )
+
+
+def _player_equipment_detail(database_path: Path) -> Response:
+    uid = _request_value("uid")
+    try:
+        item_index = int(_request_value("index", ""))
+    except ValueError:
+        return _pet_error(100, status=400)
+
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103, status=404)
+        row = connection.execute(
+            """
+            SELECT id AS "index", item_id AS id, icon, level, star, pro,
+                   hp, speed, phy_att, mag_att, phy_def, mag_def
+            FROM inventory WHERE id = ? AND player_id = ? AND team = 3
+            """,
+            (item_index, player["id"]),
+        ).fetchone()
+    if row is None:
+        return _pet_error(400)
+
+    # EquipInfoUI looks up pic[id].name locally and instantiates "p"+icon, and has
+    # no try/catch around that lookup, so only real equip ids/icons may be returned.
+    return _protocol_response(
+        39,
+        {
+            # Positive value hides the unsupported sell button (see constant note).
+            "money": LOCAL_EQUIP_SELL_HIDDEN_MONEY,
+            "index": row["index"],
+            "id": row["id"],
+            "icon": row["icon"],
+            "level": row["level"],
+            "star": row["star"],
+            "pro": row["pro"],
+            "hp": row["hp"],
+            "phy_att": row["phy_att"],
+            "mag_att": row["mag_att"],
+            "phy_def": row["phy_def"],
+            "mag_def": row["mag_def"],
+            "speed": row["speed"],
         },
     )
 
@@ -775,6 +942,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_info(current_app.config["DATABASE"], command_id=2)
         if command == "show" and _request_value("showId") == "22":
             return _player_inventory(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "39":
+            return _player_equipment_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "11":
             return _player_pets(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "12":
