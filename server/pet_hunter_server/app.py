@@ -1571,6 +1571,16 @@ def _explore_detail(database_path: Path) -> Response:
 
 
 def _training_overview(database_path: Path) -> Response:
+    """504 (REQUEST_TRAIN_KEY): the nine training slots.
+
+    DevelopUI.as:111-144 reads `list[]` rows with index/id/icon/name/num/
+    train_state/train_time. `train_time` is a millisecond countdown in
+    DevelopItem.as:216 and it re-sends 504 when it reaches zero
+    (DevelopItem.as:226), so a finished slot must not report a positive time.
+    An empty list leaves all nine slots blank but clickable, which is the
+    correct "nothing is training" state; LOCAL DEFAULT active slots are not
+    invented here.
+    """
     return _protocol_response(504, {"list": [], "value": "ok"})
 
 
