@@ -1232,6 +1232,28 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_forge_list_detail_and_make_transaction(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ForgeT")
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()[0]
+        connection.execute("UPDATE players SET money=100 WHERE id=?", (player_id,))
+        connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (?,?,?,?,?,?,?)", (player_id,11010,2,1,11010,0,0))
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"32","uid":uid,"ttype":"1","p":"1","n":"9"}))
+    assert command == 32 and payload["list"][0]["id"] == 32001
+    command, detail = _envelope(client.post("/flash.do", data={"m":"show","showId":"33","uid":uid,"gid":"32001","ttype":"1"}))
+    assert command == 33 and detail["need_goods"][0]["own_num"] == 1
+    response = client.post("/flash.do", data={"m":"show","showId":"34","uid":uid,"gid":"32001"})
+    assert response.get_data(as_text=True).startswith("34\t"), response.get_data(as_text=True)
+    command, made = _envelope(response)
+    assert command == 34 and made["id"] == 20002
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT quantity FROM inventory WHERE item_id=11010").fetchone() is None
+        assert connection.execute("SELECT item_id,team FROM inventory WHERE item_id=20002").fetchone() == (20002, 3)
+        assert connection.execute("SELECT money FROM players WHERE uid=?", (uid,)).fetchone()[0] == 0
+
+
 def test_function_flags_returns_a_parseable_envelope(tmp_path: Path):
     client = create_app(
         {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}

@@ -159,6 +159,14 @@ LOCAL_TASKS = (
 LOCAL_TASK_TRACKER_LIMIT = 1
 # Prop ids used as quest rewards; 10011/10014 are absent from LOCAL_PROP_CATALOG,
 # so their use_type/item_type are declared here to keep rewards clickable.
+LOCAL_FORGE_RECIPES = {
+    32001: {"output": 20002, "money": 100, "point": 0, "crystal": 0, "goods": ((11010, 1),)},
+}
+
+LOCAL_FORGE_EQUIPMENT = {
+    20002: {"icon": 20002, "level": 1, "star": 1, "pro": 0, "hp": 0, "speed": 0, "phy_att": 0, "mag_att": 0, "phy_def": 20, "mag_def": 20},
+}
+
 LOCAL_TASK_REWARD_PROPS = {
     10011: {"icon": 10011, "type": 5, "use_type": 2},
     10014: {"icon": 10014, "type": 14, "use_type": 1},
@@ -1209,6 +1217,58 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
+def _forge_list(database_path: Path) -> Response:
+    try: ttype = int(_request_value("ttype", "1")); page = int(_request_value("p", "1")); size = int(_request_value("n", "9"))
+    except ValueError: return _pet_error(100)
+    if ttype != 1: return _protocol_response(32, {"list": []})
+    rows = [{"index": rid, "id": rid, "icon": LOCAL_FORGE_EQUIPMENT.get(recipe["output"], {}).get("icon", recipe["output"]), "level": 1} for rid, recipe in LOCAL_FORGE_RECIPES.items()]
+    start = max(0, page - 1) * size
+    return _protocol_response(32, {"list": rows[start:start + max(0, size)]})
+
+
+def _forge_detail(database_path: Path) -> Response:
+    try: rid = int(_request_value("gid", ""))
+    except ValueError: return _pet_error(100)
+    recipe = LOCAL_FORGE_RECIPES.get(rid)
+    if recipe is None: return _pet_error(400)
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None: return _pet_error(103)
+        output = LOCAL_FORGE_EQUIPMENT[recipe["output"]]
+        needs = []
+        for gid, num in recipe["goods"]:
+            own = c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"], gid)).fetchone()[0]
+            needs.append({"id": gid, "need_num": num, "own_num": own})
+    return _protocol_response(33, {"id": recipe["output"], "icon": output["icon"], "star": output["star"], "pro": output["pro"], "hp": output["hp"], "phy_att": output["phy_att"], "mag_att": output["mag_att"], "phy_def": output["phy_def"], "mag_def": output["mag_def"], "speed": output["speed"], "need_money": recipe["money"], "own_money": player["money"], "need_point": recipe["point"], "own_point": player["point"], "need_crystal": recipe["crystal"], "own_crystal": player["crystal"], "need_goods": needs})
+
+
+def _forge_make(database_path: Path) -> Response:
+    try: rid = int(_request_value("gid", ""))
+    except ValueError: return _pet_error(100)
+    recipe = LOCAL_FORGE_RECIPES.get(rid)
+    if recipe is None: return _pet_error(400)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,money,point,crystal,bag_capacity FROM players WHERE uid=?", (_request_value("uid"),)).fetchone()
+        if player is None: return _pet_error(103)
+        if any(player[col] < recipe[col] for col in ("money","point","crystal")): return _pet_error(403)
+        for gid, num in recipe["goods"]:
+            row = c.execute("SELECT id,quantity FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"],gid)).fetchone()
+            if row is None or row["quantity"] < num: return _pet_error(400)
+        existing = c.execute("SELECT 1 FROM inventory WHERE player_id=? AND item_id=?", (player["id"],recipe["output"])).fetchone()
+        if not existing and c.execute("SELECT COUNT(*) FROM inventory WHERE player_id=? AND team=3", (player["id"],)).fetchone()[0] >= player["bag_capacity"]: return _pet_error(300)
+        for gid, num in recipe["goods"]:
+            row = c.execute("SELECT id,quantity FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"], gid)).fetchone()
+            if row["quantity"] == num:
+                c.execute("DELETE FROM inventory WHERE id=?", (row["id"],))
+            else:
+                c.execute("UPDATE inventory SET quantity=quantity-? WHERE id=?", (num, row["id"]))
+        c.execute("UPDATE players SET money=money-?,point=point-?,crystal=crystal-? WHERE id=?", (recipe["money"],recipe["point"],recipe["crystal"],player["id"]))
+        o=LOCAL_FORGE_EQUIPMENT[recipe["output"]]; c.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type,level,star,pro,hp,speed,phy_att,mag_att,phy_def,mag_def) VALUES (?,?,3,1,?,0,1,?,?,?,?,?,?,?,?,?)", (player["id"],recipe["output"],o["icon"],o["level"],o["star"],o["pro"],o["hp"],o["speed"],o["phy_att"],o["mag_att"],o["phy_def"],o["mag_def"]))
+        index=c.execute("SELECT id FROM inventory WHERE player_id=? AND item_id=?",(player["id"],recipe["output"])).fetchone()[0]
+    return _protocol_response(34, {"index": index, "id": recipe["output"], "icon": o["icon"]})
+
+
 def _reward_goods_ids(stored: str) -> list[tuple[int, int]]:
     goods = []
     for chunk in stored.split(","):
@@ -2024,6 +2084,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _player_sale_info(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "69":
             return _player_sale_goods(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "32":
+            return _forge_list(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "33":
+            return _forge_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "34":
+            return _forge_make(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "502":
             return _function_flags(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "46":
