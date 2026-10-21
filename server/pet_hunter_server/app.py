@@ -1217,8 +1217,20 @@ def _player_sale_goods(database_path: Path) -> Response:
     )
 
 
-LOCAL_HUNT_MAPS = {10001: {"name": "烈焰山谷", "world": 1, "cost": 1, "monster": 1001}}
-LOCAL_EXPLORE_MAPS = {20001: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 1}}
+# Map ids, names, worlds and icon ids come from the shipped client tables
+# `client/air51-repack/src/data/zh-CN/config/exploreMap.txt` and `worldMap.txt`.
+# Hunt/explore cost, AP and reward numbers below are LOCAL DEFAULTS.
+LOCAL_HUNT_MAPS = {
+    1: {"name": "樱花之岛1", "world": 1, "cost": 1, "monster": 1},
+    2: {"name": "樱花之岛2", "world": 1, "cost": 1, "monster": 1},
+    3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 2},
+    101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 2},
+}
+LOCAL_EXPLORE_MAPS = {
+    1: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+    2: {"world": 1, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+    101: {"world": 2, "cost_point": 0, "cost_money": 0, "disaster": 0, "is_catch": 0},
+}
 
 
 LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
@@ -1321,7 +1333,7 @@ def _hunter_list(database_path: Path) -> Response:
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
-    return _protocol_response(4,{"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],"list":[{"id":k,"name":v["name"],"world":v["world"]} for k,v in LOCAL_HUNT_MAPS.items()]})
+    return _protocol_response(4,{"player":{"hunt_ap":p["ht_ap"],"max_hunt_ap":p["max_ht_ap"]},"maps":[{"index":k,"code":k,"id":k,"name":v["name"],"world":v["world"],"rate":0,"pass":0,"star":0,"days":0,"is_allown_hunt":1} for k,v in LOCAL_HUNT_MAPS.items()]})
 
 
 def _hunter_task(database_path: Path) -> Response:

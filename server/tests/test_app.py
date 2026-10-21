@@ -1232,6 +1232,16 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def test_hunt_map_rows_expose_client_click_fields(tmp_path: Path):
+    database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"HuntT")
+    command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":4,"uid":uid,"p":1,"n":9}))
+    assert command==4
+    # HunterMapUI.as:186-208 reads player{hunt_ap,max_hunt_ap} and maps[]{code,id,rate,is_allown_hunt}
+    assert "hunt_ap" in payload["player"] and "max_hunt_ap" in payload["player"]
+    row=payload["maps"][0]
+    assert row["is_allown_hunt"]==1 and row["code"]==row["id"]==row["index"] and "rate" in row
+
+
 def test_job_readonly_commands(tmp_path: Path):
     database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"JobT")
     command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":70,"uid":uid,"p":1,"n":9})); assert command==70 and payload["list"]
@@ -1271,16 +1281,16 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "HuntT")
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"4","uid":uid}))
-    assert command == 4 and payload["list"]
-    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"5","uid":uid,"hid":10001}))
+    assert command == 4 and payload["maps"]
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"5","uid":uid,"hid":1}))
     assert command == 5 and payload["pets"]
-    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"6","uid":uid,"hid":10001}))
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"6","uid":uid,"hid":1}))
     assert command == 6 and payload["is_win"] == 1 and payload["record"]
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"98","uid":uid}))
     assert command == 98 and payload["list"]
-    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"99","uid":uid,"gid":20001}))
-    assert command == 99 and payload["id"] == 20001
-    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"103","uid":uid,"gid":20001}))
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"99","uid":uid,"gid":1}))
+    assert command == 99 and payload["id"] == 1
+    command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"103","uid":uid,"gid":1}))
     assert command == 103 and payload["is_finish"] == 1
 
 
