@@ -813,10 +813,12 @@ def _insert_starter_pets(connection: sqlite3.Connection, player_id: int) -> int:
             continue
         connection.execute(
             """
-            INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills)
-            VALUES (?, ?, 1, ?, ?, ?, ?)
+            INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, buffs)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?)
             """,
-            (player_id, pet["pet_id"], pet["star"], pet["pro"], pet["icon"], "101:5101" if pet["pet_id"] == 1001 else "103:5101"),
+            (player_id, pet["pet_id"], pet["star"], pet["pro"], pet["icon"],
+             "101:5101" if pet["pet_id"] == 1001 else "103:5101",
+             _buffs_for_pet(pet["pet_id"], 1)),
         )
         added += 1
     return added
@@ -4229,7 +4231,7 @@ def _find_player_pet(
         return None, None
     row = connection.execute(
         """
-        SELECT id AS "index", id, pet_id, icon, name, lv, star, pro, battle_state, is_locked,
+        SELECT id AS "index", id, pet_id, icon, name, lv, exp, star, pro, battle_state, is_locked,
                nature, skills, gw_hp, gw_speed, gw_phy_att, gw_mag_att, gw_phy_def, gw_mag_def, gw_flush_count,
                generation, buffs, pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def,
                train_state, train_type, train_end
@@ -4456,7 +4458,8 @@ def _pet_flush_nature(database_path: Path) -> Response:
         nature = (int(pet["nature"]) + 1) % 21
         connection.execute("UPDATE pets SET nature = ? WHERE id = ?", (nature, pet_index))
         _consume_mutation_item(connection, item)
-        payload = {"id": pet["pet_id"], "name": pet["name"], "nature": nature, "value": "ok"}
+        payload = {"id": pet["pet_id"], "name": _pet_name(pet["pet_id"], pet["name"]),
+                   "nature": nature, "value": "ok"}
     return _protocol_response(20, payload)
 
 
@@ -4520,11 +4523,15 @@ def _pet_forget_buff(database_path: Path) -> Response:
         if pet is None: return _pet_error(506)
         buffs = [x for x in (pet["buffs"] or "").split(":") if x.isdigit()]
         if len(buffs) < 2: return _pet_error(522)
-        item = _mutation_inventory(c, player["id"], 10034)
-        if item is None: return _pet_error(100)
         chosen = _request_value("index2", "")
         if chosen:
+            # The item is only needed (and only consumed) once a trait is picked:
+            # the first 85 call is the picker, and the client draws it from the
+            # response alone. Requiring 遗忘卡牌 up front made the picker itself
+            # answer -1:100 for every player who had not bought one yet.
             if chosen not in buffs: return _pet_error(100)
+            item = _mutation_inventory(c, player["id"], 10034)
+            if item is None or item["quantity"] <= 0: return _pet_error(400)
             buffs.remove(chosen); c.execute("UPDATE pets SET buffs=? WHERE id=?", (":".join(buffs), pet_idx)); _consume_mutation_item(c, item)
             return _protocol_response(85, {"is_list": 0, "pet": {"id": pet["pet_id"], "skill_id": int(chosen)}, "value": "ok"})
         return _protocol_response(85, {"is_list": 1, "pet": {"id": pet["pet_id"], "buffs": [{"id": int(x)} for x in buffs]}})
@@ -4548,7 +4555,7 @@ def _pet_divide_pro(database_path: Path) -> Response:
             if vals[source] <= 0: return _pet_error(523)
             amount = min(vals[source], 1000); vals[source] -= amount; vals[dest] += amount
             c.execute("UPDATE pets SET " + ",".join(x+"=?" for x in cols) + " WHERE id=?", (*vals, idx)); _consume_mutation_item(c, item)
-            return _protocol_response(114, {"id": pet["pet_id"], "icon": pet["icon"], "name": pet["name"], "add_type": names[dest], "diff_type": names[source], "value": amount})
+            return _protocol_response(114, {"id": pet["pet_id"], "icon": pet["icon"], "name": _pet_name(pet["pet_id"], pet["name"]), "add_type": names[dest], "diff_type": names[source], "value": amount})
         payload = {"id": pet["pet_id"], "hp_tp": vals[0], "speed_tp": vals[1], "phy_att_tp": vals[2], "mag_att_tp": vals[3], "phy_def_tp": vals[4], "mag_def_tp": vals[5], "value": 0}
     return _protocol_response(114, payload)
 

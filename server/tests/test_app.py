@@ -1107,6 +1107,52 @@ def test_use_goods_pet_exp_levels_target_pet(tmp_path: Path):
         ).fetchone()[0] == 0
 
 
+def test_home_use_goods_rejects_an_unimplemented_effect_without_eating_it(
+    tmp_path: Path,
+):
+    """D-04 家园使用道具：能用的生效，不能用的原样留在包里。
+
+    HomeUI.as:243-250 opens the bag with `target=0`, so `index1` is 0 there. An
+    effect this server cannot apply (10004 宠物名片, prop.txt type=4) must answer
+    -1:100 and leave the stack untouched instead of silently consuming it.
+    """
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "HomeUse")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10004,1,3,10004,4,2)"
+        )
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10007,1,2,10007,7,1)"
+        )
+        unsupported = connection.execute(
+            "SELECT id FROM inventory WHERE item_id = 10004"
+        ).fetchone()[0]
+        supported = connection.execute(
+            "SELECT id FROM inventory WHERE item_id = 10007"
+        ).fetchone()[0]
+        connection.execute("UPDATE players SET ht_ap=0, max_ht_ap=20 WHERE uid=?", (uid,))
+
+    rejected = client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "50", "uid": uid, "index": str(unsupported), "index1": "0"},
+    )
+    assert rejected.get_data(as_text=True) == "-1:100"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT quantity FROM inventory WHERE id = ?", (unsupported,)
+        ).fetchone()[0] == 3
+
+    accepted = _envelope(client.post(
+        "/flash.do",
+        data={"m": "show", "showId": "50", "uid": uid, "index": str(supported), "index1": "0"},
+    ))
+    assert accepted[0] == 50 and accepted[1]["ht_ap"] == 20
+
+
 def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
@@ -3284,6 +3330,7 @@ def test_pet_detail_returns_the_persisted_record(tmp_path: Path):
         "icon": 1001,
         "id": 1001,
         "lv": 1,
+        "exp": 0,
         "pro": 1,
         "next_pet": {
             "id": 1002,
@@ -3487,6 +3534,40 @@ def test_pet_release_deletes_but_refuses_locked_pets(tmp_path: Path):
     assert "free_goods_id" in released_payload and "free_goods_num" in released_payload
     assert listed["pet_num"] == 1
     assert [pet["id"] for pet in listed["pets"]] == [2019]
+
+
+def test_starter_pets_are_born_with_traits(tmp_path: Path):
+    # The starter INSERT only wrote `skills`, and the boot backfill only touches
+    # rows that already exist, while registration happens after initialisation —
+    # so every new character's pets had empty `buffs` and item 10034 (遗忘卡牌)
+    # always answered -1:522.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "StartTr")
+
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT id, buffs FROM pets WHERE player_id = 1 ORDER BY id"
+        ).fetchall()
+    assert rows, "a new character must own starter pets"
+    for pet_id, buffs in rows:
+        assert buffs, f"pet {pet_id} was born without traits"
+
+    # 85 (遗忘卡牌) needs the item and at least two traits; the starter now has
+    # both, so it can list instead of answering -1:522 forever.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)"
+            " VALUES (1, 10034, 1, 1, 10004, 0, 0)"
+        )
+        connection.commit()
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "85", "uid": uid,
+                                       "index1": str(rows[0][0])})
+    )
+    assert command == 85
+    assert payload.get("is_list") == 1
+    assert payload["pet"]["buffs"], "the trait list must not be empty"
 
 
 def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
