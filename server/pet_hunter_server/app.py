@@ -477,6 +477,30 @@ def _initialize_database(database_path: Path) -> None:
         ):
             if column not in inventory_columns:
                 connection.execute(ddl)
+        # Bag rows seeded before prop.txt drove the effect rules carry
+        # item_type/use_type = 0, which made every consumable unclickable and
+        # rejected by the use-goods guard. Re-align them with the shipped table on
+        # every boot (idempotent; only touches rows that disagree).
+        prop_table = config_tables.prop_table()
+        for row in connection.execute(
+            "SELECT id, item_id, item_type, use_type FROM inventory WHERE team IN (1, 2)"
+        ).fetchall():
+            record = prop_table.get(row["item_id"])
+            if record is None:
+                continue
+            kind_raw = str(record.get("type", "") or "").strip()
+            use_raw = str(record.get("useType", "") or "").strip()
+            if not kind_raw.lstrip("-").isdigit():
+                continue
+            kind = int(kind_raw)
+            use_type = int(use_raw) if use_raw.lstrip("-").isdigit() else 0
+            if kind == 0:
+                continue
+            if row["item_type"] != kind or row["use_type"] != use_type:
+                connection.execute(
+                    "UPDATE inventory SET item_type = ?, use_type = ? WHERE id = ?",
+                    (kind, use_type, row["id"]),
+                )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS shop_goods (
@@ -975,11 +999,19 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     """Build the ShowItem layer string.
 
     ShowItem.as:41-59 splits on "_", keeps only ids present in skin.txt and
-    silently drops the rest, then :71 sorts by z DESCENDING and adds in that
-    order — so the lowest z paints last, i.e. on top.
+    silently drops the rest, then :71 sorts the survivors and :72-79 addChild's
+    every one of them: there is no replace/merge logic anywhere in the class, so
+    whatever we list gets stacked. (Note `sortOn("z",16)`: 16 is Array.NUMERIC,
+    i.e. ascending — the ordering only decides who paints last, not what exists.)
 
-    The bare character needs its head and hair layers (CreateUI.as:366-378);
-    omitting them is what produced a headless hunter in battle.
+    Two things must therefore be true of the string:
+      * the bare character needs its head and hair layers (CreateUI.as:366-378);
+        omitting them produced a headless hunter in battle.
+      * every equipment layer must be the *player's own sex*. equip.txt keeps one
+        row per sex with a different imageId (20002 male -> 100020, 20005 female
+        -> 100040), and `_worn_equipment` never filtered on that, so a male hunter
+        wearing a female armour row rendered the male base triple *plus* the
+        female armour sprite — the "男女图层重合" seen on screen.
     """
     skin = config_tables.skin_table()
     layers: list[int] = [lid for lid in _base_skin_layers(sex) if lid in skin]
@@ -987,6 +1019,14 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
         record = config_tables.equip_record(row["item_id"])
         if not record:
             continue
+        item_sex = config_tables.equip_sex(record)
+        if item_sex is not None and item_sex != int(sex):
+            # Cross-sex gear: draw the matching piece instead of dropping the
+            # layer, so saves seeded with both sexes still look armoured.
+            counterpart = config_tables.equip_same_slot_other_sex(row["item_id"])
+            record = config_tables.equip_record(counterpart) if counterpart else None
+            if not record:
+                continue
         image_id = config_tables.equip_image_id(record)
         if image_id and image_id in skin and image_id not in layers:
             layers.append(image_id)
@@ -1019,38 +1059,52 @@ def _equipped_slot_fields(worn: dict[int, sqlite3.Row]) -> dict[str, object]:
     return payload
 
 
+def _player_payload(connection: sqlite3.Connection, player: sqlite3.Row) -> dict[str, object]:
+    """Everything HomeUI/RoleInfoUI read, built from an already-fetched player row.
+
+    Shared by 2/510/511 and by ON_EQUIP(37). MainUI.as:317-318 has no case for 37
+    and falls through to `default: Navigator.getInstance().item.readDatas(...)`,
+    which hands the body to whichever screen is current. Equipping flows straight
+    back to HomeUI (EquipInfoUI.as:337-341), and HomeUI.readDatas never looks at
+    the command id — it just reads param2.img/lv/job/... So returning
+    {"value":"ok"} from 37 set GameUtil.skin = undefined, ShowItem.as:36-40 called
+    removeAll() (the doll vanished) and every label printed `undefined`.
+    """
+    worn = _worn_equipment(connection, player["id"])
+    pic_num = connection.execute(
+        "SELECT COUNT(*) FROM pets WHERE player_id = ?", (player["id"],)
+    ).fetchone()[0]
+    payload = dict(player)
+    # RoleInfoUI.as:137-186 and HomeUI.as:184-196 read every field below; the six
+    # stats, the three equipment slots and `img` (the paper-doll layer string) were
+    # all missing, which is why the panel printed `undefined` and why worn gear
+    # never showed up on the character.
+    payload.update(_role_stats(worn))
+    payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
+    payload["pic_num"] = pic_num
+    payload["skills"] = []
+    payload["buffs"] = []
+    payload.update(_equipped_slot_fields(worn))
+    # Local starting state; guild and arena systems are not restored yet.
+    # HomeUI resolves job through the bundled upRole configuration.
+    payload.update(job=1, guild_name="", guild_position=0, arena_rank=_local_arena_rank())
+    return payload
+
+
+_PLAYER_ROW_SQL = """
+    SELECT id, nick AS name, lv, sex, img, money, point, crystal,
+           ht_ap, max_ht_ap, arena_ap, max_arena_ap
+    FROM players WHERE uid = ?
+"""
+
+
 def _player_info(database_path: Path, command_id: int = 510) -> Response:
     uid = _request_value("uid")
     with _connect_database(database_path) as connection:
-        player = connection.execute(
-            """
-            SELECT id, nick AS name, lv, sex, img, money, point, crystal,
-                   ht_ap, max_ht_ap, arena_ap, max_arena_ap
-            FROM players WHERE uid = ?
-            """,
-            (uid,),
-        ).fetchone()
+        player = connection.execute(_PLAYER_ROW_SQL, (uid,)).fetchone()
         if player is None:
             return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
-        worn = _worn_equipment(connection, player["id"])
-        pic_num = connection.execute(
-            "SELECT COUNT(*) FROM pets WHERE player_id = ?", (player["id"],)
-        ).fetchone()[0]
-        payload = dict(player)
-        # RoleInfoUI.as:137-186 and HomeUI.as:184-196 read every field below; the
-        # six stats, the three equipment slots and `img` (the paper-doll layer
-        # string) were all missing, which is why the panel printed `undefined`
-        # and why worn gear never showed up on the character.
-        payload.update(_role_stats(worn))
-        payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
-        payload["pic_num"] = pic_num
-        payload["skills"] = []
-        payload["buffs"] = []
-        payload.update(_equipped_slot_fields(worn))
-        if command_id == 2:
-            # Local starting state; guild and arena systems are not restored yet.
-            # HomeUI resolves job through the bundled upRole configuration.
-            payload.update(job=1, guild_name="", guild_position=0, arena_rank=_local_arena_rank())
+        payload = _player_payload(connection, player)
     return _protocol_response(command_id, payload)
 
 
@@ -1327,6 +1381,34 @@ def _shop_buy(database_path: Path) -> Response:
     return _protocol_response(29, {"value": "ok"})
 
 
+def _prop_effect_rules(item_id: int) -> dict[str, int] | None:
+    """Read a prop's effect straight from prop.txt (the shipped authority).
+
+    prop.txt columns: id, name, iconId, **type** (effect kind), **value** (effect
+    amount), value1, **useType** (bag interaction), ...
+
+    The old code compared prop.txt's type against the *inventory row's*
+    `item_type`, but `seed_items.py` wrote a literal 0 into every seeded row, so
+    every seeded consumable failed the guard and answered -1:100 while staying in
+    the bag. The local catalog it consulted also only covered 13 ids and had
+    10011 at 1,000,000 while prop.txt says 10,000 (a 100x error). Reading the
+    table fixes both, and lets every effect-bearing prop work instead of 13.
+    """
+    record = config_tables.prop_record(item_id)
+    if record is None:
+        return None
+
+    def number(key: str) -> int:
+        raw = str(record.get(key, "") or "").strip()
+        return int(raw) if raw.lstrip("-").isdigit() else 0
+
+    kind = number("type")
+    amount = number("value")
+    if kind == 0 or amount == 0:
+        return None
+    return {"type": kind, "value": amount, "use_type": number("useType")}
+
+
 def _player_use_goods(database_path: Path) -> Response:
     """USE_GOODS (50) from the bag: `index` is the inventory row id, `index1` the
     selected pet id (0 when no target). Effects are driven by LOCAL_PROP_CATALOG,
@@ -1355,15 +1437,22 @@ def _player_use_goods(database_path: Path) -> Response:
             """,
             (item_index, player["id"]),
         ).fetchone()
-        if row is None:
+        if row is None or row["quantity"] <= 0:
             return _pet_error(400)
-        prop = LOCAL_PROP_CATALOG.get(row["item_id"])
-        if prop is None or prop["type"] != row["item_type"] or row["team"] not in (1, 2):
+        prop = _prop_effect_rules(row["item_id"])
+        if prop is None or row["team"] not in (1, 2):
             # Items this local server has no rule for stay in the bag untouched.
             return _pet_error(100)
-
         effect = prop["type"]
         amount = prop["value"]
+        if row["item_type"] != effect or row["item_type"] == 0:
+            # Self-heal rows seeded with item_type=0 so the bag's clickability
+            # and our guard agree from now on.
+            connection.execute(
+                "UPDATE inventory SET item_type = ?, use_type = ? WHERE id = ?",
+                (effect, prop["use_type"], row["id"]),
+            )
+
         payload: dict[str, int] = {}
         if effect == 7:  # restore hunt action points
             if player["ht_ap"] >= player["max_ht_ap"]:
@@ -1418,14 +1507,20 @@ def _player_use_goods(database_path: Path) -> Response:
 
         if row["quantity"] > 1:
             connection.execute(
-                "UPDATE inventory SET quantity = quantity - 1 WHERE id = ?",
+                "UPDATE inventory SET quantity = quantity - 1 WHERE id = ? AND quantity > 0",
                 (row["id"],),
             )
         else:
-            connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+            connection.execute(
+                "DELETE FROM inventory WHERE id = ? AND quantity <= 1", (row["id"],)
+            )
         ht_ap = connection.execute(
             "SELECT ht_ap FROM players WHERE id = ?", (player["id"],)
         ).fetchone()["ht_ap"]
+    # BagListUI.as:389-580 switches on param2.type to pick the result popup
+    # (5/7/14/16/17 -> exp/AP/bag/point/crystal). Omitting it meant the item was
+    # consumed and the effect applied, but the player got no feedback at all.
+    payload["type"] = effect
     payload["ht_ap"] = ht_ap
     return _protocol_response(50, payload)
 
@@ -1447,8 +1542,15 @@ def _sale_price(item_id: int) -> int | None:
 
 
 def _player_on_equip(database_path: Path) -> Response:
-    """ON_EQUIP (37): wear the equipment row. The client leaves for the main map
-    immediately and never reads the body, but the worn state must persist."""
+    """ON_EQUIP (37): wear the equipment row and refresh the home screen.
+
+    The client never re-requests showId=2 after equipping: EquipInfoUI.as:337-341
+    sends 37 and synchronously flows back to GAME_HOME, and Navigator only calls
+    request() on a CMD_BACK pop (Navigator.as:336-347, :988-1005). Because
+    MainUI.as:317-318 forwards an unhandled 37 to the current screen's readDatas,
+    the response body *is* the refresh mechanism — so it has to carry the same
+    shape as command 2, not {"value":"ok"}.
+    """
     uid = _request_value("uid")
     try:
         item_index = int(_request_value("index", ""))
@@ -1457,13 +1559,27 @@ def _player_on_equip(database_path: Path) -> Response:
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
-            "SELECT id FROM players WHERE uid = ?", (uid,)
+            "SELECT id, sex FROM players WHERE uid = ?", (uid,)
         ).fetchone()
         if player is None:
             return _pet_error(103)
         row = _inventory_row(connection, player["id"], item_index)
         if row is None or row["team"] != 3:
             return _pet_error(400)
+        record = config_tables.equip_record(row["item_id"])
+        item_sex = config_tables.equip_sex(record) if record else None
+        if item_sex is not None and player["sex"] != item_sex:
+            # Wearing the other sex's row would stack its sprite onto a mismatched
+            # base triple (equip.txt keeps one row per sex with its own imageId).
+            counterpart = config_tables.equip_same_slot_other_sex(row["item_id"])
+            if counterpart is None:
+                return _pet_error(100)
+            counterpart_record = config_tables.equip_record(counterpart)
+            connection.execute(
+                "UPDATE inventory SET item_id = ?, icon = ? WHERE id = ?",
+                (counterpart, config_tables.equip_icon(counterpart_record), row["id"]),
+            )
+            row = _inventory_row(connection, player["id"], item_index)
         # One worn item per slot; equipment slot is the local `item_type` value.
         connection.execute(
             """
@@ -1475,7 +1591,10 @@ def _player_on_equip(database_path: Path) -> Response:
         connection.execute(
             "UPDATE inventory SET equipped = 1 WHERE id = ?", (row["id"],)
         )
-    return _protocol_response(37, {"value": "ok"})
+        player_row = connection.execute(_PLAYER_ROW_SQL, (uid,)).fetchone()
+        payload = _player_payload(connection, player_row)
+    payload["value"] = "ok"
+    return _protocol_response(37, payload)
 
 
 def _player_sale_info(database_path: Path) -> Response:

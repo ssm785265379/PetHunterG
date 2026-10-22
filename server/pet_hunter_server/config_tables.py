@@ -125,6 +125,48 @@ def equip_image_id(record: dict[str, str]) -> int:
     return _number(record, "imageId")
 
 
+def equip_sex(record: dict[str, str]) -> int | None:
+    """equip.txt `sex`: 1 male, 0 female, None when the column is unreadable.
+
+    Every equipment id exists twice, once per sex, with a different `imageId`
+    (e.g. 20002 male -> 100020, 20005 female -> 100040). Mixing them is what made
+    a male hunter render with a female armour layer stacked on his male body.
+    """
+    raw = str(record.get("sex", "") or "").strip()
+    return int(raw) if raw in ("0", "1") else None
+
+
+_EQUIP_NAME_TYPE_INDEX: dict[tuple[str, int, int], int] | None = None
+
+
+def equip_same_slot_other_sex(item_id: int) -> int | None:
+    """The same equipment for the other sex, matched on (name, type).
+
+    Used when a cross-sex piece is already equipped: rather than dropping the
+    layer (leaving the hunter unarmoured) we draw the matching piece, so an old
+    save's mis-seeded gear still looks right.
+    """
+    global _EQUIP_NAME_TYPE_INDEX
+    table = equip_table()
+    record = table.get(item_id)
+    if record is None:
+        return None
+    if _EQUIP_NAME_TYPE_INDEX is None:
+        index: dict[tuple[str, int, int], int] = {}
+        for other_id, other in table.items():
+            sex = equip_sex(other)
+            if sex is None:
+                continue
+            key = (str(other.get("name", "")).strip(), equip_slot(other), sex)
+            index.setdefault(key, other_id)
+        _EQUIP_NAME_TYPE_INDEX = index
+    sex = equip_sex(record)
+    if sex is None:
+        return None
+    key = (str(record.get("name", "")).strip(), equip_slot(record), 0 if sex == 1 else 1)
+    return _EQUIP_NAME_TYPE_INDEX.get(key)
+
+
 def equip_stats(record: dict[str, str]) -> dict[str, int]:
     return {
         "hp": _number(record, "hp"),

@@ -1096,7 +1096,14 @@ def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
     )
     assert _envelope(bag_response) == (
         50,
-        {"value": 3, "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY + 3, "ht_ap": 20},
+        {
+            "value": 3,
+            "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY + 3,
+            "ht_ap": 20,
+            # BagListUI switches on this to choose the result popup; without it the
+            # item was consumed silently.
+            "type": 14,
+        },
     )
 
     silver_bag = _buy(client, uid, 10022, 1, 2)
@@ -1164,7 +1171,18 @@ def test_equipment_detail_enables_sell_and_equip_persists(tmp_path: Path):
         "/flash.do",
         data={"m": "show", "showId": "37", "uid": uid, "index": str(index)},
     )
-    assert _envelope(worn) == (37, {"value": "ok"})
+    # 37 must answer with a home-shaped payload, not {"value":"ok"}. MainUI.as:317
+    # has no case for 37 and forwards the body to the current screen's readDatas,
+    # and HomeUI.readDatas never checks the command id: a bare ok body set
+    # GameUtil.skin = undefined, which cleared the paper doll and printed
+    # `undefined` in every stat row.
+    command, worn_payload = _envelope(worn)
+    assert command == 37
+    assert worn_payload["value"] == "ok"
+    assert worn_payload["img"], "the doll layer string must survive the round trip"
+    for field in ("lv", "job", "guild_name", "guild_position", "arena_rank",
+                  "money", "point", "crystal"):
+        assert field in worn_payload, f"HomeUI reads {field} after equipping"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT equipped FROM inventory WHERE id = ?", (index,)
