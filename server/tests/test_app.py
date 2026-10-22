@@ -2650,22 +2650,98 @@ def test_arena_fighter_ships_pets_because_ringui_shifts_them(tmp_path: Path):
         assert str(row["icon"]).isdigit() and row["name"]
 
 
-def test_explore_hire_list_reads_explore_equip_table(tmp_path: Path):
-    # HireListUI.as:242-266 walks list[] unguarded and resolves the name/icon
-    # from exploreEquip itself, so only id and type are needed per entry.
-    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
-    uid = _create_local_player(client, "HireOne")
+def test_explore_map_list_pages_within_the_world_in_gid(tmp_path: Path):
+    # ExploreMapListUI.as:177-185 sends {ttype:2, gid:<worldId>, p, n}: ttype is
+    # only the page kind and the world id travels in gid. Reading ttype as the
+    # world made page 2 of world 1 switch to world 2 and replay its first screen.
+    from pet_hunter_server.app import _explore_map_table, _explore_map_world
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MapPage")
+    maps = _explore_map_table()
+    world = _explore_map_world(sorted(maps)[0])
+    in_world = [gid for gid in sorted(maps) if _explore_map_world(gid) == world]
+    assert len(in_world) > 3, "need a world with more than one page of maps"
+
+    def page(number: int, size: int = 3):
+        return _envelope(client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "98", "uid": uid, "ttype": "2",
+                  "gid": str(world), "p": str(number), "n": str(size)},
+        ))[1]
+
+    first, second = page(1), page(2)
+    assert first["world"] == world, "the world must not change between pages"
+    assert [row["id"] for row in first["list"]] == in_world[0:3]
+    assert [row["id"] for row in second["list"]] == in_world[3:6]
+    for row in first["list"]:
+        assert {"code", "id", "terrain", "star", "max_days"} <= set(row)
+
+    # An exhausted page answers an empty list; an error would pop up a dialog
+    # because the client only stops paging when a page comes back short.
+    far = page(99)
+    assert far["world"] == world
+    assert far["list"] == []
+
+
+def test_hunt_result_fills_the_rage_bar(tmp_path: Path):
+    # FightResultItem.as:211-215 feeds param2.rage_point into PercentUItem and
+    # :169 gates the bonus button on ==100, so a win has to report 100 (it was
+    # hardcoded 0, which also left the map progress at 0%).
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RageBar")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET ht_ap = 5, max_ht_ap = 20 WHERE uid = ?", (uid,))
+        connection.commit()
     command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+    )
+    assert command == 6
+    assert payload["is_win"] == 1
+    assert payload["rage_point"] == 100
+    assert payload["finish_rate"] == 100
+
+
+def test_explore_hire_list_only_lists_what_is_rented(tmp_path: Path):
+    # HireListUI.as:242-266 walks list[] unguarded and resolves name/icon from
+    # exploreEquip itself, so each entry only needs id + type. The list must come
+    # from explore_rented: answering with the whole exploreEquip catalogue made
+    # list[0] permanently 100001, which kept HireMountsUI on its "already hired"
+    # branch and made the shop (100) unreachable — the mount was unpickable.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "HireOne")
+    table = config_tables._table("exploreEquip.txt")
+    ids = {int(k) for k in table}
+    rentable = sorted(i for i in ids if str(table[i].get("type", "")).strip() == "1")
+    assert rentable, "exploreEquip needs at least one type=1 mount"
+
+    command, empty = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid, "ttype": 1, "p": 1, "n": 9})
     )
     assert command == 104
-    assert payload["type"] == 1
-    assert payload["max_equip_count"] >= 1
-    table = config_tables._table("exploreEquip.txt")
-    ids = {int(k) for k in table}
-    assert payload["list"], "an empty hire list leaves every slot locked"
-    for row in payload["list"]:
-        assert row["id"] in ids and row["type"] == 1
+    assert empty["type"] == 1
+    assert empty["max_equip_count"] >= 1
+    assert empty["list"] == [], "nothing is hired yet, so nothing may be listed"
+    assert empty["equip_count"] == 0
+
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO explore_rented (player_id, equip_id, slot_type) VALUES (?,?,1)",
+            (player_id, rentable[0]),
+        )
+        connection.commit()
+
+    _, hired = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid, "ttype": 1, "p": 1, "n": 9})
+    )
+    assert hired["list"] == [{"id": rentable[0], "type": 1}]
+    assert hired["equip_count"] == 1
 
 
 def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Path):

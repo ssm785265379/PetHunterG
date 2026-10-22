@@ -495,8 +495,8 @@ def _initialize_database(database_path: Path) -> None:
                 continue
             kind = int(kind_raw)
             use_type = int(use_raw) if use_raw.lstrip("-").isdigit() else 0
-            if kind == 0:
-                continue
+            # Keep going when kind == 0: such props still carry a `useType` that
+            # decides whether the bag cell is clickable at all.
             if row["item_type"] != kind or row["use_type"] != use_type:
                 connection.execute(
                     "UPDATE inventory SET item_type = ?, use_type = ? WHERE id = ?",
@@ -1359,7 +1359,17 @@ def _shop_buy(database_path: Path) -> Response:
         )
         if updated.rowcount == 0:
             return _pet_error({1: 403, 2: 404, 3: 405}[row["price_type"]])
-        prop = LOCAL_PROP_CATALOG.get(row["item_id"], {"type": 0, "use_type": 0})
+        # Read the effect kind from prop.txt instead of the 13-entry local
+        # catalog: a purchased row written with item_type=0 is unclickable in the
+        # bag, and the lazy self-heal only runs when the item is used — which can
+        # never happen if the grid refuses the tap.
+        _prop_record = config_tables.prop_record(row["item_id"]) or {}
+
+        def _prop_int(key: str) -> int:
+            raw = str(_prop_record.get(key, "") or "").strip()
+            return int(raw) if raw.lstrip("-").isdigit() else 0
+
+        prop = {"type": _prop_int("type"), "use_type": _prop_int("useType")}
         connection.execute(
             """
             INSERT INTO inventory (
@@ -2008,7 +2018,11 @@ def _hunter_fight(database_path: Path) -> Response:
         "is_win":1,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
-        "rage_point":0,"finish_rate":100,"pic":pic,
+        # FightResultItem.as:211-215 feeds this straight into PercentUItem and
+        # :169 gates the "无与伦比/再战" button on ==100, so a win must report 100.
+        # LOCAL DEFAULT: hunts always resolve as a win for now, so this is a
+        # constant until the damage model can produce losses.
+        "rage_point":100 if LOCAL_HUNT_WIN_RATE >= 100 else 0,"finish_rate":100,"pic":pic,
         "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
         "pet_exp":pet_exp,
         "reward_rate":1,"reward_goods":[],
@@ -2400,8 +2414,16 @@ def _explore_start(database_path: Path) -> Response:
 
 def _explore_list(database_path: Path) -> Response:
     uid=_request_value("uid")
-    try: world=int(_request_value("ttype","1"))
+    try:
+        # ExploreMapListUI.as:177-185 sends {ttype:2, gid:<worldId>, p, n}: the
+        # world id travels in `gid`, while ttype is just the page kind. Reading
+        # ttype as the world made page 2 of world 1 silently switch to world 2 and
+        # replay its first screen forever.
+        world = int(_request_value("gid", "") or _request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
     except ValueError: return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9: return _pet_error(100)
     with _connect_database(database_path) as c:
         player = c.execute(
             "SELECT id,explore_ap,max_explore_ap FROM players WHERE uid=?", (uid,)
@@ -2427,12 +2449,16 @@ def _explore_list(database_path: Path) -> Response:
         rows.append({"index":gid,"code":gid,"id":gid,"terrain":row["terrain"],
                      "name":row["name"],
                      "star":row["star"],"max_days":row["max_days"]})
-    if not rows: return _pet_error(400)
+    # An exhausted page must answer an empty list, not an error: the client only
+    # gates the next-page button on "this page came back full"
+    # (ExploreMapListUI.as:168-175), so an error would pop up instead of ending
+    # the list.
+    page_rows = rows[(page - 1) * size: page * size]
     return _protocol_response(98,{
         "world":world,
         "explore_ap":player["explore_ap"],
         "max_explore_ap":player["max_explore_ap"],
-        "list":rows,
+        "list":page_rows,
     })
 
 
@@ -2631,21 +2657,23 @@ def _explore_hire_list(database_path: Path) -> Response:
         return _pet_error(100)
     if page < 1 or not 1 <= size <= 9:
         return _pet_error(100)
-    table = config_tables._table("exploreEquip.txt")
-    # LOCAL DEFAULT: one entry per type from the shipped table, in id order.
-    by_type: dict[int, list[int]] = {}
-    for equip_id, record in table.items():
-        raw = str(record.get("type", "")).strip()
-        if raw.isdigit():
-            by_type.setdefault(int(raw), []).append(equip_id)
-    entries = [{"id": i, "type": ttype} for i in sorted(by_type.get(ttype, []))[:size]]
     with _connect_database(database_path) as c:
         player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
-        rented = c.execute(
-            "SELECT COUNT(*) FROM explore_rented WHERE player_id=?", (player["id"],)
-        ).fetchone()[0]
+        # This is the "already hired" list, so it must come from explore_rented.
+        # Returning the whole exploreEquip catalogue made list[0] always 100001
+        # and HireMountsUI's "everything rented" branch permanent, so the shop
+        # (command 100) could never be reached and the mount was unpickable.
+        rented_rows = c.execute(
+            "SELECT equip_id, slot_type FROM explore_rented WHERE player_id=? ORDER BY equip_id",
+            (player["id"],),
+        ).fetchall()
+    rented_entries = [
+        {"id": row["equip_id"], "type": row["slot_type"]} for row in rented_rows
+    ]
+    entries = rented_entries[(page - 1) * size: page * size]
+    rented = len(rented_rows)
     return _protocol_response(
         104,
         {
@@ -2930,7 +2958,8 @@ def _explore_equip_list(database_path: Path) -> Response:
     # them, and 4 is the goods-currency variant shown by HireShopInfoUI.
     source = ttype if ttype in by_type else 1
     entries = []
-    for equip_id in sorted(by_type.get(source, []))[:size]:
+    all_ids = sorted(by_type.get(source, []))
+    for equip_id in all_ids[(page - 1) * size: page * size]:
         price_type, price = _explore_equip_price(table[equip_id])
         entries.append({
             "id": equip_id, "price_type": price_type, "price": price,
