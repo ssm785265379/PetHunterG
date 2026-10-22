@@ -4266,6 +4266,9 @@ def _pet_detail_payload(row) -> dict:
         "id": row["pet_id"],
         "lv": row["lv"],
         "pro": row["pro"],
+        # The pet page itself prints Lv only, but every other exp surface (10/50)
+        # already ships `exp`; sending it keeps the two in sync for tooling.
+        "exp": row["exp"] if "exp" in row.keys() else 0,
     }
     if row["name"] is not None:
         payload["name"] = row["name"]

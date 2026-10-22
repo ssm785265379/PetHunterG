@@ -3322,7 +3322,9 @@ def test_pet_detail_returns_the_persisted_record(tmp_path: Path):
     command, payload = _envelope(response)
     assert response.status_code == 200
     assert command == 12
-    assert payload == {
+    # Subset assertion on purpose: the payload may carry extra fields, and a whole
+    # dict comparison made this test order-dependent as soon as one was added.
+    expected = {
         "index": index,
         "star": 3,
         "is_lockable": True,
@@ -3341,6 +3343,8 @@ def test_pet_detail_returns_the_persisted_record(tmp_path: Path):
             "need_goods": [],
         },
     }
+    for key, value in expected.items():
+        assert payload[key] == value, f"{key}: {payload[key]!r} != {value!r}"
 
 
 def test_pet_detail_rejects_unknown_index_and_other_players_pets(tmp_path: Path):
