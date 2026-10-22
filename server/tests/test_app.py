@@ -590,7 +590,13 @@ def test_home_profile_reads_saved_player_and_survives_restart(tmp_path: Path):
     assert home["job"] == 1
     assert home["guild_name"] == ""
     assert home["guild_position"] == 0
-    assert home["arena_rank"] == 0
+    # The home page prints this next to 擂台排名, so it has to agree with the rank
+    # ladder that command 507 serves; hardcoding 0 here made home say rank 0 while
+    # the ranking page said 1.
+    _, ladder = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "507", "uid": uid})
+    )
+    assert home["arena_rank"] == ladder["arena_rank"]
     # `img` is the paper-doll layer string ShowItem splits on "_" (ShowItem.as:41).
     # With nothing equipped it is still three layers: CreateUI.as:366-378 defines
     # the bare character as body + head + hair, and dropping the last two is what
@@ -670,7 +676,7 @@ def test_new_character_gets_the_local_starter_equipment_in_the_bag(tmp_path: Pat
     assert item["use_type"] == 1
     assert item["level"] == 1
     # The bag list resolves the class name verbatim, so it must be p<iconId>.
-    assert item["icon"] == "p20001"
+    assert item["icon"] == 20001  # numeric: PropItem.as:233 prepends "p" itself
     # Goods tab stays empty even though the equipment tab has a row.
     goods_tab = _envelope(
         client.post(
@@ -886,7 +892,7 @@ def test_shop_buy_deducts_currency_and_stacks_inventory(tmp_path: Path):
     assert bag["bag_size"] == 1
     assert bag["goods_list"][0]["id"] == 10007
     assert bag["goods_list"][0]["num"] == 3
-    assert bag["goods_list"][0]["icon"] == "p10007"
+    assert bag["goods_list"][0]["icon"] == 10007  # numeric; PropItem prepends "p"
 
 
 def test_shop_buy_rejects_bad_count_and_insufficient_currency(tmp_path: Path):
@@ -1537,7 +1543,7 @@ def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
         assert command == 22
         for row in payload["goods_list"]:
             # BagListUI.as:285 feeds `icon` to IconItem which resolves "p"+icon
-            assert row["icon"].startswith("p")
+            assert isinstance(row["icon"], int) and row["icon"] > 0
             assert row["num"] > 0
 
 
@@ -2254,7 +2260,10 @@ def test_skin_string_carries_the_head_and_hair_layers(tmp_path: Path):
     from pet_hunter_server.app import _base_skin_layers
 
     skin = config_tables.skin_table()
-    for sex, expected in ((1, (100001, 100002, 100003)), (2, (100001, 100004, 100005))):
+    # sex is the *registration* value: /regplayer accepts 0 or 1 and stores the
+    # female triple when sex != 1, so 0 is female and 1 is male. The dict used to
+    # be keyed 1/2, which made female hunters render with the male head/hair.
+    for sex, expected in ((1, (100001, 100002, 100003)), (0, (100001, 100004, 100005))):
         layers = _base_skin_layers(sex)
         assert layers == expected
         assert all(layer in skin for layer in layers), "every base layer must exist in skin.txt"
@@ -2263,7 +2272,7 @@ def test_skin_string_carries_the_head_and_hair_layers(tmp_path: Path):
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "HeadOne")
     with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE players SET sex=2 WHERE uid=?", (uid,))
+        connection.execute("UPDATE players SET sex=0 WHERE uid=?", (uid,))
         connection.commit()
 
     command, payload = _envelope(client.post("/flash.do", data={"m": "show", "showId": "2", "uid": uid}))
@@ -2271,9 +2280,11 @@ def test_skin_string_carries_the_head_and_hair_layers(tmp_path: Path):
     img = payload["img"]
     ids = [int(part) for part in img.split("_")]
     assert ids, "img must not be empty"
-    # The female triple must be present, and ordered high-z first so the low-z
-    # head/hair layers end up painted last (on top).
-    assert set(_base_skin_layers(2)) <= set(ids)
+    # A sex=0 player is the female hunter, so the female triple must be present —
+    # and no male head/hair layer may sneak in, which is what "男女图片重合" looked
+    # like on screen.
+    assert set(_base_skin_layers(0)) <= set(ids)
+    assert not ({100002, 100003} & set(ids)), f"male layers leaked into a female doll: {img}"
     zs = [int(skin[i]["z"]) for i in ids]
     assert zs == sorted(zs, reverse=True), f"layers must be high-z first, got {img}"
 

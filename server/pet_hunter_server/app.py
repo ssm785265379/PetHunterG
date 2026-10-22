@@ -932,14 +932,23 @@ ROLE_BASE_STATS = {
 # default skin as "100001_100002_100003" (male) / "100001_100004_100005" (female):
 # body + head + hair. Sending only 100001 drew a headless hunter, because no other
 # layer supplies the head — skin.txt has no separate head id outside these triples.
+#
+# The keys are the *registration* values, not an arbitrary enum: /regplayer only
+# accepts sex 0 or 1 and stores the female triple when sex != 1 (app.py:863).
+# Keying this dict 1/2 made `_base_skin_layers(0)` fall through to the male
+# default, so every female hunter was drawn with the male head and hair.
 LOCAL_BASE_SKIN_LAYERS = {
     1: (100001, 100002, 100003),
-    2: (100001, 100004, 100005),
+    0: (100001, 100004, 100005),
 }
 
 
 def _base_skin_layers(sex: int) -> tuple[int, ...]:
-    return LOCAL_BASE_SKIN_LAYERS.get(int(sex or 1) or 1, LOCAL_BASE_SKIN_LAYERS[1])
+    try:
+        key = int(sex)
+    except (TypeError, ValueError):
+        key = 1
+    return LOCAL_BASE_SKIN_LAYERS.get(key, LOCAL_BASE_SKIN_LAYERS[1])
 
 
 def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int, sqlite3.Row]:
@@ -1041,7 +1050,7 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
         if command_id == 2:
             # Local starting state; guild and arena systems are not restored yet.
             # HomeUI resolves job through the bundled upRole configuration.
-            payload.update(job=1, guild_name="", guild_position=0, arena_rank=0)
+            payload.update(job=1, guild_name="", guild_position=0, arena_rank=_local_arena_rank())
     return _protocol_response(command_id, payload)
 
 
@@ -1079,9 +1088,14 @@ def _player_inventory(database_path: Path) -> Response:
     goods = []
     for row in rows:
         item = dict(row)
-        # BagListUI hands this value straight to IconItem, which resolves the
-        # class name verbatim, so the list needs "p<iconId>" (unlike detail 39).
-        item["icon"] = f"p{item['icon']}" if item["icon"] else ""
+        # BagListUI hands `icon` straight to PropItem, and PropItem.as:233 does
+        # getDefinition("p" + data.icon) itself. Pre-prefixing here made it look
+        # up "pp10007", getDefinition returned null, `new null()` threw, and the
+        # empty catch at PropItem.as:243 swallowed it — every bag slot rendered
+        # without art until you opened the detail page (39 sends a bare number).
+        # So this field must stay a NUMBER. Only IconItem consumers
+        # (IconItem.as:79 getDefinition("" + icon)) want the full class name.
+        item["icon"] = item["icon"] or 0
         if item["team"] == 3:
             # BagListUI.onMouseUpItem switches on this `type` (row `t`) and its
             # cases 1/2/9/24/25/27 are pet-item actions; equipment must fall to
@@ -1652,7 +1666,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     player_fields={"id":p["uid"],"name":p["nick"],"lv":p["lv"],
                    "img":_role_skin_string(worn,p["sex"]),
                    "job":1,"guild_name":"0","guild_position":0,
-                   "arena_rank":0,"pic_num":pic_num,
+                   "arena_rank":_local_arena_rank(),"pic_num":pic_num,
                    **_role_stats(worn), **slots,
                    "skills":[],"buffs":[]}
     payload={**player_fields,
@@ -2657,7 +2671,7 @@ def _arena_battle(database_path: Path) -> Response:
         _grant_pet_exp(c, arena_pets, LOCAL_ARENA_EXP)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
-        "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": 0,
+        "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": _local_arena_rank(),
         "rage_point": 0, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
         "reward_point": LOCAL_ARENA_REWARD, "reward_crystal": 0, "reward_goods": [],
@@ -2958,6 +2972,17 @@ def _arena_fighter(database_path: Path) -> Response:
 LOCAL_ARENA_LADDER_SIZE = 9
 
 
+def _local_arena_rank() -> int:
+    """The player's rank on the local arena ladder.
+
+    LOCAL DEFAULT: `_arena_rank` builds the board as "player first, then filler",
+    so the player always sits at rank 1. The home page, the arena page and the
+    battle result all print this number and used to disagree (home said 0 while
+    the rank page said 1), which reads as a bug on the home screen.
+    """
+    return 1
+
+
 def _arena_rank(database_path: Path) -> Response:
     """507 (REQUEST_ARENA_RANK_KEY) — the leaderboard behind 积分排名.
 
@@ -2995,7 +3020,7 @@ def _arena_rank(database_path: Path) -> Response:
     start = (page - 1) * size
     return _protocol_response(507, {
         "refresh_time": int(time.time()) + 86400,
-        "arena_rank": 1,
+        "arena_rank": _local_arena_rank(),
         "ranks": ladder[start:start + size],
         "value": "ok",
     })
