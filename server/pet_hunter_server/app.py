@@ -583,6 +583,29 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # Picture-book (图鉴) collection: which creatures the player has
+        # registered, and which picStep milestone rewards were already taken.
+        # picStep.txt holds the milestones (value = entries required).
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pic_unlocked (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                pic_id INTEGER NOT NULL,
+                unlocked_at TEXT,
+                PRIMARY KEY (player_id, pic_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pic_step_claimed (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                step_id INTEGER NOT NULL,
+                claimed_at TEXT,
+                PRIMARY KEY (player_id, step_id)
+            )
+            """
+        )
         connection.execute("DELETE FROM tasks")
         for task in LOCAL_TASKS:
             connection.execute(
@@ -1493,9 +1516,9 @@ def _player_sale_goods(database_path: Path) -> Response:
 # Hunt/explore cost, AP and reward numbers below are LOCAL DEFAULTS.
 LOCAL_HUNT_MAPS = {
     1: {"name": "樱花之岛1", "world": 1, "cost": 1, "monster": 1},
-    2: {"name": "樱花之岛2", "world": 1, "cost": 1, "monster": 1},
-    3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 2},
-    101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 2},
+    2: {"name": "樱花之岛2", "world": 1, "cost": 1, "monster": 3},
+    3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 5},
+    101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 7},
 }
 # Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
@@ -1532,10 +1555,6 @@ def _pic_info(database_path: Path) -> Response:
     except ValueError:return _pet_error(100)
     if gid not in LOCAL_PICS:return _pet_error(506)
     return _protocol_response(26,{"id":gid,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"is_reward":LOCAL_PICS[gid]["reward"]}]})
-
-
-def _picstep_info(database_path: Path) -> Response:
-    return _protocol_response(48,{"id":1,"own_num":0,"need_num":1,"reward_point":0,"reward_money":0,"reward_crystal":0,"reward_goods":[],"is_finish":0})
 
 
 def _achievement_list(database_path: Path) -> Response:
@@ -1646,7 +1665,9 @@ def _hunter_task(database_path: Path) -> Response:
 
 
 LOCAL_HUNT_WIN_RATE = 100
-LOCAL_HUNT_MONSTER_COUNT = 1
+# LOCAL DEFAULT: how many monsters a hunt map spawns per battle. The client's
+# BoxItem2 row holds three, so two is safe and gives each map its own group.
+LOCAL_HUNT_MONSTER_COUNT = 2
 
 
 def _monster_table() -> dict:
@@ -1682,12 +1703,19 @@ def _pick_monster(monster_id: int) -> dict[str, object] | None:
 def _monsters_for_map(hid: int) -> list[dict[str, object]]:
     """Monster group for a hunt map.
 
-    The original per-map spawn table is not recoverable, so this walks
-    monster.txt in id order — REAL data, but the grouping is a LOCAL DEFAULT.
+    LOCAL_HUNT_MAPS names a base monster per map (REAL monster.txt rows); the
+    group is that monster plus the next few ids, so different maps actually field
+    different creatures — and therefore unlock different picture-book entries.
+    Reading the table from the top for every map (the earlier behaviour) made all
+    four maps fight the same 原味波利 and the 图鉴 could never grow past one row.
     """
     table = _monster_table()
     ids = sorted(int(m) for m in table)
-    picked = [_pick_monster(m) for m in ids[:LOCAL_HUNT_MONSTER_COUNT]]
+    entry = LOCAL_HUNT_MAPS.get(hid)
+    base = int(entry["monster"]) if entry else (ids[0] if ids else 0)
+    start = ids.index(base) if base in ids else 0
+    group = ids[start:start + LOCAL_HUNT_MONSTER_COUNT]
+    picked = [_pick_monster(m) for m in group]
     return [m for m in picked if m is not None]
 
 
@@ -1798,6 +1826,7 @@ def _hunter_fight(database_path: Path) -> Response:
         # The pets that actually fought gain the battle exp, so levelling (and the
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
+        _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
 
     # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
     att_list, def_list = _battle_side(
@@ -1943,6 +1972,9 @@ def _hunter_catch(database_path: Path) -> Response:
              random.choice(nature_ids)),
         )
         index=cursor.lastrowid
+        # Catching registers the creature in the picture book, which is what the
+        # picStep milestones count.
+        _unlock_pic(c, p["id"], [pet_id])
     return _protocol_response(7,{
         "value":"ok","is_success":1,"hid":hid,
         "index":index,"id":pet_id,"icon":int(icon) if icon.isdigit() else pet_id,
@@ -2115,7 +2147,11 @@ def _explore_start(database_path: Path) -> Response:
             c, p["id"],
             [(gid, num, icon) for kind, gid, num, icon in parsed_goods if kind == 1],
         )
-        # kind 2 is a pet reward; kind 3 is a picture-book entry with no item row.
+        # kind 2 is a pet reward; kind 3 registers a picture-book entry (no item row).
+        pic_gifts = [gid for kind, gid, _num, _icon in parsed_goods if kind == 3]
+        if pic_gifts:
+            _unlock_pic(c, p["id"], pic_gifts)
+            reward_goods = reward_goods + [{"id": gid, "num": 1} for gid in pic_gifts]
         gifted_pets = [(gid, num) for kind, gid, num, _icon in parsed_goods if kind == 2]
         if gifted_pets:
             capacity = c.execute(
@@ -2914,6 +2950,138 @@ def _arena_rank(database_path: Path) -> Response:
         "ranks": ladder[start:start + size],
         "value": "ok",
     })
+
+
+def _unlock_pic(connection, player_id: int, pic_ids) -> list[int]:
+    """Register creatures in the player's picture book.
+
+    picStep.txt's milestones count these entries (`value` = how many are needed),
+    and IllustrationTaskUI shows own_num/need_num from command 48, so every place
+    that awards a `pic` entry has to record it here as well.
+    """
+    unlocked: list[int] = []
+    for pic in pic_ids:
+        try:
+            pid = int(pic)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO pic_unlocked (player_id, pic_id, unlocked_at) VALUES (?,?,?)",
+            (player_id, pid, time.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        if cursor.rowcount:
+            unlocked.append(pid)
+    return unlocked
+
+
+def _picstep_entries() -> list[dict]:
+    """REAL milestones from the shipped picStep.txt, in step order."""
+    table = config_tables._table("picStep.txt")
+    entries = []
+    for step_id in sorted(int(k) for k in table):
+        record = table[step_id]
+        def num(key: str) -> int:
+            raw = str(record.get(key, "") or "").strip()
+            return int(raw) if raw.lstrip("-").isdigit() else 0
+        entries.append({
+            "id": step_id,
+            "need_num": num("value"),
+            "reward_money": num("rewardMoney"),
+            "reward_point": num("rewardPoint"),
+            "reward_crystal": num("rewardCrystal"),
+            "reward_goods": [(gid, count) for gid, count in _reward_goods_ids(str(record.get("rewardGoods", "") or ""))],
+            "remark": record.get("remark", ""),
+        })
+    return entries
+
+
+def _picstep_state(connection, player_id: int) -> tuple[dict, int, set[int]]:
+    """The milestone the page should show, the collected count and claimed ids."""
+    entries = _picstep_entries()
+    owned = connection.execute(
+        "SELECT COUNT(*) FROM pic_unlocked WHERE player_id=?", (player_id,)
+    ).fetchone()[0]
+    claimed = {
+        row[0] for row in connection.execute(
+            "SELECT step_id FROM pic_step_claimed WHERE player_id=?", (player_id,)
+        )
+    }
+    # Show the first milestone that is still claimable, else the next unfinished
+    # one, else the last step so the page is never empty.
+    current = None
+    for entry in entries:
+        if entry["id"] not in claimed and owned >= entry["need_num"]:
+            current = entry
+            break
+    if current is None:
+        for entry in entries:
+            if entry["id"] not in claimed:
+                current = entry
+                break
+    if current is None and entries:
+        current = entries[-1]
+    return (current or {"id": 1, "need_num": 1, "reward_money": 0, "reward_point": 0,
+                        "reward_crystal": 0, "reward_goods": [], "remark": ""}), owned, claimed
+
+
+def _picstep_payload(entry: dict, owned: int) -> dict:
+    """Fields IllustrationTaskUI.as:190-264 reads for one milestone."""
+    return {
+        "id": entry["id"],
+        "own_num": owned,
+        "need_num": entry["need_num"],
+        "reward_money": entry["reward_money"],
+        "reward_point": entry["reward_point"],
+        "reward_crystal": entry["reward_crystal"],
+        "reward_goods": [{"id": gid, "num": num} for gid, num in entry["reward_goods"]],
+        "is_finish": 1 if owned >= entry["need_num"] else 0,
+        "value": "ok",
+    }
+
+
+def _picstep_info(database_path: Path) -> Response:
+    """48 (PICSTEP_INFO_KEY) — the picture-book milestone page."""
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        entry, owned, _claimed = _picstep_state(c, player["id"])
+    return _protocol_response(48, _picstep_payload(entry, owned))
+
+
+def _picstep_reward(database_path: Path) -> Response:
+    """49 (PICSTEP_REWARD_KEY) — claim the current milestone.
+
+    IllustrationTaskUI.as:264-343 re-renders from this response (it shows the
+    reward TipItem when reward_* is set), so the claimed step's own numbers are
+    echoed back after being credited.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        entry, owned, claimed = _picstep_state(c, player["id"])
+        if entry["id"] in claimed or owned < entry["need_num"]:
+            return _pet_error(504)
+        _credit_battle_rewards(
+            c, player["id"],
+            point=entry["reward_point"] + entry["reward_money"],
+            crystal=entry["reward_crystal"],
+        )
+        _grant_goods(c, player["id"], entry["reward_goods"])
+        c.execute(
+            "INSERT OR REPLACE INTO pic_step_claimed (player_id, step_id, claimed_at) VALUES (?,?,?)",
+            (player["id"], entry["id"], time.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        nxt, owned_after, _ = _picstep_state(c, player["id"])
+    payload = _picstep_payload(entry, owned)
+    payload["pic"] = []
+    payload["next"] = _picstep_payload(nxt, owned_after)
+    return _protocol_response(49, payload)
 
 
 def _forge_refine(database_path: Path) -> Response:
@@ -3970,6 +4138,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _explore_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "99":
             return _explore_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "49":
+            return _picstep_reward(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "506":
             return _arena_fighter(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "507":

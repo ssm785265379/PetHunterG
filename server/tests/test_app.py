@@ -1714,6 +1714,66 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     assert row[1] > 0
 
 
+def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
+    # picStep.txt lists milestones (value = how many picture-book entries are
+    # needed). IllustrationTaskUI reads own_num/need_num from 48 and claims with
+    # 49, so catching has to feed pic_unlocked and the reward must not be claimable
+    # twice.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicBook")
+    steps = config_tables._table("picStep.txt")
+    first_need = int(str(steps[sorted(int(k) for k in steps)[0]]["value"]).strip())
+
+    command, info = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "48", "uid": uid})
+    )
+    assert command == 48
+    assert info["own_num"] == 0
+    assert info["need_num"] == first_need
+    assert info["is_finish"] == 0, "nothing collected yet"
+
+    # Claiming before the milestone is met must be refused, not silently paid.
+    early = client.post("/flash.do", data={"m": "show", "showId": "49", "uid": uid})
+    assert early.get_data(as_text=True) == "-1:504"
+
+    # The picture book counts *distinct* creatures, so reach the milestone by
+    # hunting the different monster groups rather than re-catching the same pet.
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET ht_ap = 50, max_ht_ap = 50")
+        connection.commit()
+    for hid in (1, 2, 3, 101):
+        command, _ = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": hid})
+        )
+        assert command == 6
+    _, info = _envelope(client.post("/flash.do", data={"m": "show", "showId": "48", "uid": uid}))
+    assert info["own_num"] >= first_need, f"only {info['own_num']} entries unlocked"
+    assert info["is_finish"] == 1
+
+    with sqlite3.connect(database) as connection:
+        point_before = connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+    command, claimed = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "49", "uid": uid})
+    )
+    assert command == 49
+    with sqlite3.connect(database) as connection:
+        point_after = connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        claimed_steps = connection.execute(
+            "SELECT COUNT(*) FROM pic_step_claimed WHERE player_id = 1"
+        ).fetchone()[0]
+    assert claimed_steps == 1
+    assert point_after >= point_before
+
+    # A second claim of the same milestone is refused.
+    again = client.post("/flash.do", data={"m": "show", "showId": "49", "uid": uid})
+    assert again.get_data(as_text=True) == "-1:504"
+
+
 def test_arena_rank_ladder_feeds_the_rank_page(tmp_path: Path):
     # RingTopUI.as:206-247 reads refresh_time, arena_rank and a `ranks` array and
     # calls int(ranks.length) with no null guard; each row needs rank/id/name/img
@@ -1820,19 +1880,29 @@ def test_explore_pays_the_maps_real_pass_reward(tmp_path: Path):
     assert result["reward_point"] == expected_point + LOCAL_EXPLORE_BONUS_POINT
     assert result["reward_crystal"] == int(str(table[gid].get("passRewardCrystal", "0")).strip() or 0)
 
-    # Whatever the table advertises must actually land in the player row / bag.
+    # Whatever the table advertises must actually land somewhere real: a prop or
+    # equip lands in the bag, while a kind-3 entry registers in the picture book.
     with sqlite3.connect(database) as connection:
         point, crystal = connection.execute(
             "SELECT point, crystal FROM players WHERE uid = ?", (uid,)
         ).fetchone()
         bag = connection.execute(
-            "SELECT item_id, quantity FROM inventory WHERE player_id = 1 AND team = 1"
+            "SELECT item_id, quantity FROM inventory WHERE player_id = 1"
         ).fetchall()
+        unlocked = {r[0] for r in connection.execute(
+            "SELECT pic_id FROM pic_unlocked WHERE player_id = 1"
+        )}
     assert point >= expected_point
     assert crystal >= result["reward_crystal"]
+    props = config_tables._table("prop.txt")
+    equips = config_tables._table("equip.txt")
     granted = {gid_: num for gid_, num in bag}
     for entry in result["reward_goods"]:
-        assert granted.get(entry["id"], 0) >= entry["num"]
+        item_id = entry["id"]
+        if item_id in props or item_id in equips:
+            assert granted.get(item_id, 0) >= entry["num"], f"item {item_id} not granted"
+        else:
+            assert item_id in unlocked, f"picture-book entry {item_id} not registered"
 
 
 def test_hunting_awards_pet_exp_and_levels_the_squad(tmp_path: Path):
