@@ -2778,6 +2778,30 @@ def test_caught_pets_roll_element_growth_skills_and_traits(tmp_path: Path):
     assert len(growths) > 1, "growth values are not rolling"
 
 
+def test_hunt_maps_field_distinct_level_appropriate_groups():
+    # Picking adjacent ids made map 2 field "lv10 + lv40" (monster.txt is not
+    # sorted by level): one hunt paid 24,000 exp while a lv10 pet needs 14,000.
+    from pet_hunter_server.app import (
+        LOCAL_HUNT_LEVEL_BAND, LOCAL_HUNT_MAPS, _monster_table, _monsters_for_map,
+    )
+
+    table = _monster_table()
+    groups = {hid: _monsters_for_map(hid) for hid in (1, 2, 3, 101)}
+    for hid, monsters in groups.items():
+        assert monsters, f"map {hid} has no monsters"
+        base_id = int(LOCAL_HUNT_MAPS[hid]["monster"])
+        base_level = int(str(table[base_id]["level"]).strip())
+        assert monsters[0]["id"] == base_id, f"map {hid} must lead with its base monster"
+        for monster in monsters:
+            level = int(monster["lv"])
+            assert base_level <= level <= base_level + LOCAL_HUNT_LEVEL_BAND, (
+                hid, level, base_level,
+            )
+
+    signatures = {tuple(m["id"] for m in monsters) for monsters in groups.values()}
+    assert len(signatures) == len(groups), f"maps collapsed onto the same group: {signatures}"
+
+
 def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
     # The replay used to hold one step per monster with cur_hp already 0 and no
     # `skill`, so the client (which only plays the script back) drew a one-shot

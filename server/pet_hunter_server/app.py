@@ -1868,6 +1868,8 @@ LOCAL_HUNT_WIN_RATE = 100
 # LOCAL DEFAULT: how many monsters a hunt map spawns per battle. The client's
 # BoxItem2 row holds three, so two is safe and gives each map its own group.
 LOCAL_HUNT_MONSTER_COUNT = 2
+# LOCAL DEFAULT: how far a map's monsters may stray from its base monster's level.
+LOCAL_HUNT_LEVEL_BAND = 15
 
 
 def _monster_table() -> dict:
@@ -1907,19 +1909,45 @@ def _monsters_for_map(hid: int) -> list[dict[str, object]]:
     """Monster group for a hunt map.
 
     LOCAL_HUNT_MAPS names a base monster per map (REAL monster.txt rows); the
-    group is that monster plus the next few ids, so different maps actually field
+    group is built from monsters near that base's LEVEL, so different maps field
     different creatures — and therefore unlock different picture-book entries.
     Reading the table from the top for every map (the earlier behaviour) made all
     four maps fight the same 原味波利 and the 图鉴 could never grow past one row.
+
+    Picking adjacent *ids* was still wrong: monster.txt is not sorted by level, so
+    map 2 ended up as "lv10 + lv40" — one hunt paid 24,000 exp while a lv10 pet
+    only needs 14,000, i.e. more than a level per fight, and the fight itself was
+    lopsided. The band keeps a map's group level-consistent.
     """
     table = _monster_table()
     ids = sorted(int(m) for m in table)
     entry = LOCAL_HUNT_MAPS.get(hid)
     base = int(entry["monster"]) if entry else (ids[0] if ids else 0)
-    start = ids.index(base) if base in ids else 0
-    group = ids[start:start + LOCAL_HUNT_MONSTER_COUNT]
-    picked = [_pick_monster(m) for m in group]
-    return [m for m in picked if m is not None]
+    base_raw = str((table.get(base) or {}).get("level", "")).strip()
+    base_level = int(base_raw) if base_raw.isdigit() else 1
+    # Closest levels first: walking `ids` in order would keep re-picking the
+    # lowest-id cluster (map 2 was still fielding lv1/lv5 creatures for a lv10
+    # base), because monster.txt's ids are unrelated to level.
+    # Sort key: the base monster first, then the closest level at or above it.
+    # Never below: a lv40 map should not field lv1 filler just because the band is
+    # symmetric, and the map's base creature must always be in its own group.
+    candidates: list[tuple[int, int, int]] = []
+    for monster_id in ids:
+        level_raw = str(table[monster_id].get("level", "")).strip()
+        level = int(level_raw) if level_raw.isdigit() else 0
+        delta = level - base_level
+        if delta < 0 or delta > LOCAL_HUNT_LEVEL_BAND:
+            continue
+        candidates.append((0 if monster_id == base else 1, delta, monster_id))
+    candidates.sort()
+    picked: list[dict[str, object]] = []
+    for _is_base, _distance, monster_id in candidates:
+        monster = _pick_monster(monster_id)
+        if monster is not None:
+            picked.append(monster)
+        if len(picked) >= LOCAL_HUNT_MONSTER_COUNT:
+            break
+    return picked
 
 
 def _battle_side(
