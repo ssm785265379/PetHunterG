@@ -3144,6 +3144,38 @@ def test_hunt_rage_meter_fills_then_triggers_once(tmp_path: Path):
     )
 
 
+def test_renting_another_mount_switches_the_one_you_ride(tmp_path: Path):
+    # 102 used to INSERT OR IGNORE and _explore_horse picked the lowest id, so
+    # renting a different mount never changed the one on the expedition page —
+    # the "坐骑没法选" report.
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MountSw")
+    table = config_tables._table("exploreEquip.txt")
+    mounts = sorted(
+        int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "1"
+    )
+    assert len(mounts) >= 2, "exploreEquip needs at least two mount rows"
+
+    for mount in mounts[:2]:
+        _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "102", "uid": uid,
+                               "gid": mount, "ttype": "1"},
+        ))
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        rented = [r[0] for r in connection.execute(
+            "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1",
+            (player_id,),
+        )]
+    assert rented == [mounts[1]], f"only the newest mount may stay rented: {rented}"
+    assert A._explore_horse(database, player_id) == mounts[1]
+
+
 def test_explore_hire_list_only_lists_what_is_rented(tmp_path: Path):
     # HireListUI.as:242-266 walks list[] unguarded and resolves name/icon from
     # exploreEquip itself, so each entry only needs id + type. The list must come

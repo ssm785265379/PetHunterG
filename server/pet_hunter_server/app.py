@@ -3017,7 +3017,14 @@ def _explore_horse(database_path: Path, player_id: int) -> int:
     which is the first mount in the shipped table and always has artwork.
     """
     try:
-        rented = sorted(_rented_ids(database_path, player_id, 1))
+        with _connect_database(database_path) as c:
+            # Newest rental first: renting another mount is how the player switches,
+            # and row id order is the only "recent" signal the schema carries.
+            rented = [row["equip_id"] for row in c.execute(
+                "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1"
+                " ORDER BY id DESC",
+                (player_id,),
+            )]
     except Exception:  # noqa: BLE001 - a missing rental table must not break 103
         rented = []
     table = config_tables._table("exploreEquip.txt")
@@ -3894,6 +3901,14 @@ def _explore_rent(database_path: Path) -> Response:
             " VALUES (?,?,?)",
             (player["id"], gid, ttype),
         )
+        if ttype == 1:
+            # A hunter rides one mount at a time. Keeping the previous rows made
+            # "rent a different mount" a no-op, because _explore_horse picked the
+            # lowest id and that was always the first one ever rented.
+            c.execute(
+                "DELETE FROM explore_rented WHERE player_id=? AND slot_type=1 AND equip_id<>?",
+                (player["id"], gid),
+            )
     return _protocol_response(102, {"value": "ok"})
 
 
