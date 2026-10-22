@@ -3772,6 +3772,48 @@ def test_starter_pets_are_born_with_traits(tmp_path: Path):
     assert payload["pet"]["buffs"], "the trait list must not be empty"
 
 
+def test_skill_synthesis_merges_families_and_keeps_the_highest_level():
+    # Command 65 with ttype=1 used to leave `skills` untouched, which is why
+    # 技能合成 felt like it did nothing. Rule (LOCAL DESIGN, the client ships none):
+    # union of both pools, one per family at the higher level, at most four, with a
+    # 30% chance of one extra level.
+    from pet_hunter_server import app as A
+    from pet_hunter_server import config_tables as tables
+
+    catalog = tables._table("skill.txt")
+
+    def family_of(skill_id: int) -> str:
+        name = str(catalog[skill_id].get("name", "") or "")
+        return name.split("级", 1)[-1].strip() if "级" in name else name
+
+    def level_of(skill_id: int) -> int:
+        raw = str(catalog[skill_id].get("level", "0") or 0).strip()
+        return int(raw) if raw.isdigit() else 0
+
+    main, vice = "101:5101", "102:5201"
+    for _ in range(5):  # the 30% upgrade makes any single run non-deterministic
+        ids = [int(token) for token in A._merge_skills(main, vice).split(":") if token.isdigit()]
+        assert ids, "synthesis must yield skills"
+        assert len(ids) <= 4, ids
+        assert len(ids) == len(set(ids)), f"duplicate skills: {ids}"
+        assert all(skill_id in catalog for skill_id in ids), ids
+        families = [family_of(skill_id) for skill_id in ids]
+        assert len(families) == len(set(families)), f"two skills from one family: {ids}"
+
+        expected = {family_of(int(s)): level_of(int(s)) for s in main.split(":")}
+        expected.update({family_of(int(s)): level_of(int(s)) for s in vice.split(":")})
+        for skill_id in ids:
+            family = family_of(skill_id)
+            assert family in expected, f"unexpected family {family}"
+            assert level_of(skill_id) >= expected[family], (
+                "a merge must never downgrade a family", family, skill_id, expected[family]
+            )
+
+    # A same-family merge keeps the stronger one (or upgrades it), never the weaker.
+    merged = [int(t) for t in A._merge_skills("103", "101").split(":") if t.isdigit()]
+    assert merged == [103] or level_of(merged[0]) >= 3
+
+
 def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
     # Command 19 used to rotate the six growth numbers, so `total_gw` (label 成长,
     # ui.txt 36) never moved and the sixth use restored the original layout.

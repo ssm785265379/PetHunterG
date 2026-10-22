@@ -5225,6 +5225,76 @@ def _pet_synthesis_pick(database_path: Path, command_id: int) -> Response:
     )
 
 
+_SKILL_FAMILY_INDEX: dict[str, dict[int, int]] | None = None
+
+
+def _skill_family_index() -> dict[str, dict[int, int]]:
+    """family name -> {level: skill id}, from the shipped skill.txt.
+
+    A skill's family is `name` with the leading "N级" stripped ("1级十字斩（物理）"
+    -> "十字斩（物理）"), so levels 1..15 of the same move share one key.
+    """
+    global _SKILL_FAMILY_INDEX
+    if _SKILL_FAMILY_INDEX is None:
+        index: dict[str, dict[int, int]] = {}
+        for skill_id, record in config_tables._table("skill.txt").items():
+            name = str(record.get("name", "") or "").strip()
+            level_raw = str(record.get("level", "") or "").strip()
+            if not name or not level_raw.isdigit():
+                continue
+            family = name.split("级", 1)[-1].strip() if "级" in name else name
+            if not family:
+                continue
+            index.setdefault(family, {})[int(level_raw)] = int(skill_id)
+        _SKILL_FAMILY_INDEX = index
+    return _SKILL_FAMILY_INDEX
+
+
+def _merge_skills(main_skills: str, vice_skills: str) -> str:
+    """Skill synthesis (command 65 with ttype=1).
+
+    LOCAL DESIGN — the client ships no rule text for this, only help.txt's one line
+    about "skills being recombined". The rule implemented here:
+      * the pool is the union of both pets' skills,
+      * one skill per family (highest level wins, so breeding never downgrades),
+      * each surviving family has a chance to gain one level,
+      * at most four skills are carried over.
+    """
+    index = _skill_family_index()
+    by_id = config_tables._table("skill.txt")
+    levels: dict[str, int] = {}
+    for text in (main_skills, vice_skills):
+        for token in str(text or "").split(":"):
+            if not token.isdigit():
+                continue
+            record = by_id.get(int(token))
+            if record is None:
+                continue
+            name = str(record.get("name", "") or "")
+            family = name.split("级", 1)[-1].strip() if "级" in name else name
+            if not family:
+                continue
+            level = int(str(record.get("level", "1") or 1) or 1)
+            levels[family] = max(levels.get(family, 0), level)
+
+    merged: list[int] = []
+    for family, level in sorted(levels.items()):
+        available = index.get(family, {})
+        if not available:
+            continue
+        # LOCAL DESIGN: 30% chance to inherit one level higher, capped by the family.
+        if random.random() < 0.30:
+            level = min(max(available), level + 1)
+        level = max(min(available), min(max(available), level))
+        merged.append(available[level])
+    # Keep the strongest four.
+    merged.sort(key=lambda sid: (
+        int(str(by_id.get(sid, {}).get("level", "0") or 0)),
+        int(str(by_id.get(sid, {}).get("damage", "0") or 0)),
+    ), reverse=True)
+    return ":".join(str(sid) for sid in merged[:4])
+
+
 def _pet_synthesis(database_path: Path) -> Response:
     """65 (MAKE_PET_KEY): fuse the main pet with the vice pet.
 
@@ -5287,6 +5357,12 @@ def _pet_synthesis(database_path: Path) -> Response:
             connection.execute(
                 f"UPDATE pets SET {column} = min(?, {column} + ?) WHERE id = ?",
                 (LOCAL_PRO_CAP, int(vice_row[column] or 0) // 2, main_index),
+            )
+        if ttype == 1:
+            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级、最多 4 个。
+            connection.execute(
+                "UPDATE pets SET skills = ? WHERE id = ?",
+                (_merge_skills(main_row["skills"], vice_row["skills"]), main_index),
             )
         if ttype == 2:
             # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。
