@@ -2567,6 +2567,100 @@ def test_battle_rewards_are_actually_credited(tmp_path: Path):
     assert all(p["reward_point"] > 0 for p in (hunt, arena, dungeon))
 
 
+def test_hunt_win_pays_full_and_a_lost_dungeon_pays_nothing(tmp_path: Path):
+    """The replay now decides the outcome, so payouts must follow it.
+
+    A hunt the squad wins pays silver and full exp; a stage it loses still costs
+    the entry but pays no silver, no picture-book entry and a tenth of the exp.
+    """
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PayOut")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET ht_ap = 10, max_ht_ap = 20, point = 0 WHERE uid = ?", (uid,)
+        )
+
+    # Losing stage first: a fresh lv-1 squad faces L90-band monsters, so this is
+    # the unambiguous loss case (running a hunt first would hand out exp and could
+    # flip the outcome after any future tuning).
+    lost = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": "1004"}
+    ))[1]
+    assert lost["is_win"] == 0
+    assert lost["reward_point"] == 0 and lost["reward_crystal"] == 0
+    assert lost["record"], "a loss still needs a replay or the screen freezes"
+    last = lost["record"][-1]
+    assert last["def"]["is_dead"] is True, "a loss ends with a team-1 death"
+    assert last["def"]["team"] == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == 0
+
+    hunt = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"}
+    ))[1]
+    assert hunt["is_win"] == 1
+    assert hunt["reward_point"] > 0 and hunt["reward_exp"] > 0
+    assert hunt["rage_point"] == 100 and hunt["finish_rate"] == 100
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == hunt["reward_point"]
+
+
+def test_dungeon_stages_scale_with_their_reference_level(tmp_path: Path):
+    """Fixed defender ids (1 + 11 = L1 + L90) made early stages unwinnable."""
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "StageLv")
+
+    def defenders(stage: int) -> list[dict]:
+        return _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": str(stage)}
+        ))[1]["def_list"]
+
+    early = defenders(1001)
+    late = defenders(1004)
+    assert early and late
+    assert max(int(d["lv"]) for d in early) <= 30
+    assert max(int(d["lv"]) for d in late) >= 60
+
+
+def test_arena_exp_is_a_slice_of_the_squad_level(tmp_path: Path):
+    """Flat 200,000 used to be 40 levels at lv1 and nothing at lv900."""
+    from pet_hunter_server.app import LOCAL_ARENA_EXP_SHARE, _battle_exp, exp_to_next
+
+    for level in (1, 100, 500, 1000):
+        assert _battle_exp(level, LOCAL_ARENA_EXP_SHARE) == max(
+            1, exp_to_next(level) // LOCAL_ARENA_EXP_SHARE
+        )
+    # A slice must never be a whole level, or the dial does nothing.
+    assert _battle_exp(10, LOCAL_ARENA_EXP_SHARE) < exp_to_next(10)
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ArenaExp")
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute("UPDATE players SET arena_ap=5, max_arena_ap=20 WHERE uid=?", (uid,))
+        connection.execute("UPDATE pets SET exp=0 WHERE id=?", (pet_id,))
+        squad_lv = connection.execute("SELECT MAX(lv) FROM pets WHERE player_id=1").fetchone()[0]
+
+    payload = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "24", "uid": uid}
+    ))[1]
+    assert payload["is_win"] == 1
+    with sqlite3.connect(database) as connection:
+        gained = connection.execute(
+            "SELECT exp FROM pets WHERE id=?", (pet_id,)
+        ).fetchone()[0]
+    assert gained == _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
+
+
 def test_arena_and_copy_fights_share_the_hunt_replay_contract(tmp_path: Path):
     # HunterResultUI / RingResultUI / AbyssResultUI were compared field by field:
     # att_list, def_list and record are structurally identical, so 6, 24 and 74
@@ -2826,13 +2920,32 @@ def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
         assert skill["dm"] >= 1 and skill["pro"] in (1, 2)
         assert step["def"]["is_dead"] == (step["def"]["cur_hp"] <= 0)
 
+    # Both sides act now: monsters counter the striker, so a step's `def` may be a
+    # team-1 actor. Group the *defenders* only (team 2); the counter series for
+    # team 1 is checked separately below.
     by_code: dict[int, list[int]] = {}
     for step in record:
-        by_code.setdefault(step["def"]["code"], []).append(step["def"]["cur_hp"])
+        if step["def"]["team"] == 2:
+            by_code.setdefault(step["def"]["code"], []).append(step["def"]["cur_hp"])
+    assert by_code, "the replay must contain monster hits"
     for code, series in by_code.items():
         assert series[0] > 0, f"monster {code} starts at full health"
         assert series[-1] == 0, f"monster {code} must end dead"
         assert all(a > b for a, b in zip(series, series[1:])), f"monster {code} hp not decreasing"
+
+    # The hunter and the pets both swing, and the monsters hit back.
+    assert {step["att"]["team"] for step in record} == {1, 2}
+    assert {step["att"]["code"] for step in record if step["att"]["team"] == 1} >= {0}
+    assert any(step["att"]["code"] == 1 for step in record if step["att"]["team"] == 1)
+    # The hunter's health bar comes from ROLE_BASE_STATS × level + equipment, not
+    # the old constant 100: a level-1 hunter with no HP gear still equals the base,
+    # but the level factor must make a higher-level hunter strictly stronger.
+    from pet_hunter_server.app import ROLE_BASE_STATS, _hunter_combat_stats
+
+    assert payload["att_list"][0]["hp"] >= ROLE_BASE_STATS["hp"]
+    low_hp = _hunter_combat_stats({"lv": 1}, {})[0]
+    high_hp = _hunter_combat_stats({"lv": 50}, {})[0]
+    assert high_hp > low_hp == ROLE_BASE_STATS["hp"]
 
     # The settlement bar is still driven by rage_point (D-10).
     assert payload["rage_point"] == 100
@@ -2982,6 +3095,13 @@ def test_pet_synthesis_consumes_vice_and_reinforces_main(tmp_path: Path):
         main_id, vice_id = [r[0] for r in connection.execute(
             "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
         ).fetchall()]
+        # Give the material real reinforcement so the 50% inheritance rule is
+        # observable; a fresh pet has pro_* = 0 and would inherit nothing.
+        connection.execute(
+            "UPDATE pets SET pro_hp=100, pro_speed=100, pro_phy_att=100,"
+            " pro_mag_att=100, pro_phy_def=100, pro_mag_def=100 WHERE id=?",
+            (vice_id,),
+        )
     command, payload = _envelope(
         client.post(
             "/flash.do",
@@ -2994,9 +3114,11 @@ def test_pet_synthesis_consumes_vice_and_reinforces_main(tmp_path: Path):
     # PetSynthesisResultUI.as:139 prints `name` first and only falls back to
     # pet.txt when it is falsy, so ship the real name rather than "".
     assert payload["name"] == config_tables._table("pet.txt")[payload["id"]]["name"]
+    # help.txt id 10: 合成必增世代，且主宠继承副宠 50% 强化值。
     assert payload["exd_generation"] == 2
-    assert all(payload[f"exd_{k}_tp"] > 0 for k in
+    assert all(payload[f"exd_{k}_tp"] == 50 for k in
                ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"))
+    assert payload["type"] == 1
     assert isinstance(payload["skills"], list)
     with sqlite3.connect(database) as connection:
         remaining = connection.execute(
@@ -3491,3 +3613,5 @@ def test_non_allowed_network_is_rejected_before_routes_run():
 
     assert response.status_code == 403
     assert response.get_json() == {"error": "source_network_not_allowed"}
+
+

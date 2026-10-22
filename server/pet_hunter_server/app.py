@@ -131,7 +131,8 @@ def exp_to_next(lv: int) -> int:
 # source. This constant just covers rows whose cell is 0, so it is deliberately
 # small — at 100,000 a 0-exp monster would out-pay the ones with real data.
 LOCAL_HUNT_EXP_PER_LEVEL = 100
-LOCAL_EXPLORE_EXP = 300000
+# LOCAL DEFAULT: one expedition is a quarter of a level for the squad's own level.
+LOCAL_EXPLORE_EXP_SHARE = 4
 # LOCAL DEFAULT: exploreMap.txt's passRewardPoint is 0 on most maps — their pass
 # reward is an item or a picture-book entry — so a flat silver bonus is added on
 # top to keep expeditions worth running.
@@ -1950,14 +1951,67 @@ def _monsters_for_map(hid: int) -> list[dict[str, object]]:
     return picked
 
 
+def _combat_stats(pet_row) -> tuple[int, int, int]:
+    """(hp, att, def) for one pet: pet.txt 六维 × 等级系数 + 强化值。
+
+    强化只加一半到 hp/def、全量加到 att，避免高强化宠物同时变成又肉又痛。
+    系数 0.006 与"同级普通怪 4~6 击"的口径一起调过（见 _monster_stats）。
+    """
+    stats = _pet_base_stats(pet_row["id"])
+    keys = pet_row.keys()
+
+    def pro(name: str) -> int:
+        return int(pet_row[name] or 0) if name in keys else 0
+
+    lv = max(1, int(pet_row["lv"] or 1))
+    lf = 1 + 0.006 * (lv - 1)
+    return (
+        round(stats["hp"] * lf) + pro("pro_hp") // 2,
+        round(stats["phy_att"] * lf) + pro("pro_phy_att"),
+        round(stats["phy_def"] * lf) + pro("pro_phy_def") // 2,
+    )
+
+
+def _hunter_combat_stats(player_row, worn) -> tuple[int, int, int]:
+    """猎人的战斗数值：ROLE_BASE_STATS 随等级成长 + 装备加成。
+
+    基础值必须成长，否则 1000 级猎人仍然是 lv1 的 att10，"参战"没有意义。
+    """
+    stats = _role_stats(worn)
+    lv = max(1, int(player_row["lv"] or 1))
+    lf = 1 + 0.006 * (lv - 1)
+    hp = round(ROLE_BASE_STATS["hp"] * lf) + (stats["hp"] - ROLE_BASE_STATS["hp"])
+    att = round(ROLE_BASE_STATS["phy_att"] * lf) + (stats["phy_att"] - ROLE_BASE_STATS["phy_att"])
+    defence = round(ROLE_BASE_STATS["phy_def"] * lf) + (stats["phy_def"] - ROLE_BASE_STATS["phy_def"])
+    return hp, att, defence
+
+
+def _monster_stats(level: int) -> tuple[int, int, int]:
+    """LOCAL DEFAULT monster strength for one level.
+
+    monster.txt's own hp/att/def do not scale with level at all (L10's median att
+    is higher than L100's), so the curve lives here. The slopes were tuned against
+    real pets: L1 monsters fall in 3-4 hits, same-level content is a win, and a
+    5-level squad fighting the L40 map loses a pet.
+    """
+    lv = max(1, int(level or 1))
+    hp = round(60 + 1.8 * (lv - 1))
+    return hp, round(16 + 0.60 * (lv - 1)), round(15 + 0.15 * hp)
+
+
+def _damage(att: int, defence: int, element: float = 1.0) -> int:
+    return max(1, round(0.6 * att * att / (att + defence) * element))
+
+
 def _battle_side(
     *,
     hunter_skin: str,
     hunter_name: str,
     hunter_lv: int,
+    hunter_stats: tuple[int, int, int],
     pet_rows,
     defenders,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], dict]:
     """Shared attacker/defender builder for HUNT(6), ARENA(24) and COPY(74).
 
     The three result screens were compared field by field
@@ -1975,29 +2029,37 @@ def _battle_side(
         dropped, which is what left the player headless.
       * def_list[i].img goes through Pet.as:121 getDefinition("p" + skin), so a
         defender carries a bare icon id and never an underscore-joined string.
+
+    Returns the two payload lists plus `combat`, the per-code stats the replay
+    needs to compute each swing (the hunter participates too).
     """
+    combat: dict[str, dict] = {"att": {}, "def": {}}
+    hunter_hp, hunter_att, hunter_def = hunter_stats
+    combat["att"][0] = {"hp": hunter_hp, "att": hunter_att, "def": hunter_def,
+                        "speed": int(ROLE_BASE_STATS.get("speed", 10))}
     lead = {
         "team": 1, "code": 0, "is_pet": 0, "id": 0, "name": hunter_name,
-        "lv": hunter_lv, "pre_lv": hunter_lv, "hp": 100, "img": hunter_skin,
+        "lv": hunter_lv, "pre_lv": hunter_lv, "hp": hunter_hp, "img": hunter_skin,
     }
 
     def attacker(row, code: int) -> dict:
-        # LOCAL DEFAULT: hp doubles as the max hp the client draws with
-        # (HunterResultUI.as:367-368), so it is derived from the pet's upgrades.
-        power = (row["pro_hp"] or 0) + (row["pro_phy_att"] or 0) + (row["pro_mag_att"] or 0)
+        hp, att, defence = _combat_stats(row)
+        combat["att"][code] = {"hp": hp, "att": att, "def": defence,
+                               "speed": int(_pet_base_stats(row["id"])["speed"])}
         return {
             "team": 1, "code": code, "is_pet": 1, "index": row["index"],
             "id": row["id"], "name": _pet_name(row["id"], row["name"]),
-            "lv": row["lv"], "pre_lv": row["lv"], "hp": 100 + power, "img": row["icon"],
+            "lv": row["lv"], "pre_lv": row["lv"], "hp": hp, "img": row["icon"],
         }
 
     att_list = [lead] + [attacker(r, i + 1) for i, r in enumerate(pet_rows)][:2]
-    def_list = [
-        {"team": 2, "code": i, "is_pet": 0, "id": d["id"], "name": d["name"],
-         "lv": d["lv"], "hp": d["hp"], "img": d["icon"]}
-        for i, d in enumerate(defenders)
-    ]
-    return att_list, def_list
+    def_list = []
+    for i, d in enumerate(defenders):
+        mon_hp, mon_att, mon_def = _monster_stats(int(d["lv"] or 1))
+        combat["def"][i] = {"hp": mon_hp, "att": mon_att, "def": mon_def, "speed": 0}
+        def_list.append({"team": 2, "code": i, "is_pet": 0, "id": d["id"],
+                         "name": d["name"], "lv": d["lv"], "hp": mon_hp, "img": d["icon"]})
+    return att_list, def_list, combat
 
 
 # LOCAL DEFAULT: a same-level ordinary monster should take about four swings.
@@ -2005,24 +2067,29 @@ def _battle_side(
 # not scale with level at all), so the replay is budgeted rather than simulated.
 LOCAL_SWINGS_PER_MONSTER = 4
 LOCAL_BATTLE_STEP_LIMIT = 30
+# Guard for the simulated replay: three actors plus their counters per round.
+LOCAL_BATTLE_ROUND_LIMIT = 12
 # skill.txt 101 = 烈焰之刃 (a real, physical skill); only used for the animation.
 LOCAL_REPLAY_SKILL_ID = 101
 
 
-def _battle_record(att_list, def_list) -> list[dict]:
-    """Replay steps: several swings per defender, HP ticking down.
+def _battle_record(att_list, def_list, combat=None) -> list[dict]:
+    """Replay steps. `combat` given -> real round-by-round simulation.
 
-    The old version emitted exactly one step per defender with `cur_hp` already
-    zero. The client does no combat maths of its own — HunterResultUI.as:421-462
-    hands each step to FightProcess, which reads the swing value from
-    `att.skill.dm` (FightProcess.as:716-718, :754, :763-764) and copies `cur_hp`
-    straight into the health bar. With no `skill` and an instant 0 the monster
-    simply vanished at full health: the "everything dies in one hit" report.
+    The client does no combat maths of its own — HunterResultUI.as:421-462 hands
+    each step to FightProcess, which reads the swing value from `att.skill.dm`
+    (FightProcess.as:716-718, :754, :763-764) and copies `cur_hp` straight into
+    the health bar. With no `skill` and an instant 0 the monster simply vanished
+    at full health: the "everything dies in one hit" report.
 
     FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard and
     HunterResultUI.as:578 never starts the replay timer when record is empty, so
     every step must carry all three on both sides.
+
+    Without `combat` the old fixed-budget replay is kept as a fallback.
     """
+    if combat:
+        return _battle_record_simulated(att_list, def_list, combat)
     attacker_hp = int(att_list[0]["hp"])
     steps: list[dict] = []
     for index, defender in enumerate(def_list):
@@ -2046,6 +2113,69 @@ def _battle_record(att_list, def_list) -> list[dict]:
                   "def": {"team": 2, "code": 0, "cur_hp": 0,
                           "is_dead": True, "is_revive": False}}]
     return steps
+
+
+def _battle_record_simulated(att_list, def_list, combat) -> list[dict]:
+    """Both sides act: hunter and pets by speed, monsters counter the striker.
+
+    A monster that dies on a swing does not counter, so the final step of a win is
+    always a `team 2` death and `_record_is_win` can decide from the last step.
+    """
+    order = sorted(combat["att"], key=lambda code: -int(combat["att"][code].get("speed", 0)))
+    hp = {code: int(combat["att"][code]["hp"]) for code in combat["att"]}
+    mon = {index: int(combat["def"][index]["hp"]) for index in combat["def"]}
+    steps: list[dict] = []
+    rounds = 0
+    while any(v > 0 for v in mon.values()) and any(v > 0 for v in hp.values()):
+        rounds += 1
+        if rounds > LOCAL_BATTLE_ROUND_LIMIT or len(steps) >= LOCAL_BATTLE_STEP_LIMIT:
+            break
+        acted = False
+        for code in order:
+            if hp[code] <= 0:
+                continue
+            target = next((index for index in sorted(mon) if mon[index] > 0), None)
+            if target is None:
+                break
+            acted = True
+            swing = _damage(combat["att"][code]["att"], combat["def"][target]["def"])
+            mon[target] = max(0, mon[target] - swing)
+            steps.append({
+                "att": {"team": 1, "code": code, "cur_hp": hp[code],
+                        "is_dead": False, "is_revive": False,
+                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": swing}},
+                "def": {"team": 2, "code": target, "cur_hp": mon[target],
+                        "is_dead": mon[target] <= 0, "is_revive": False},
+            })
+            if len(steps) >= LOCAL_BATTLE_STEP_LIMIT or mon[target] <= 0:
+                continue
+            hit = _damage(combat["def"][target]["att"], combat["att"][code]["def"])
+            hp[code] = max(0, hp[code] - hit)
+            steps.append({
+                "att": {"team": 2, "code": target, "cur_hp": mon[target],
+                        "is_dead": False, "is_revive": False,
+                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": hit}},
+                "def": {"team": 1, "code": code, "cur_hp": hp[code],
+                        "is_dead": hp[code] <= 0, "is_revive": False},
+            })
+            if len(steps) >= LOCAL_BATTLE_STEP_LIMIT or hp[code] <= 0:
+                break
+        if not acted:
+            break
+    if not steps:
+        return [{"att": {"team": 1, "code": 0, "cur_hp": int(att_list[0]["hp"]),
+                         "is_dead": False, "is_revive": False},
+                 "def": {"team": 2, "code": 0, "cur_hp": 0,
+                         "is_dead": True, "is_revive": False}}]
+    return steps
+
+
+def _record_is_win(record: list[dict]) -> bool:
+    """胜 = 最后一步是"守方(team 2)被打死"；否则是攻方阵亡或未打完。"""
+    if not record:
+        return False
+    last = record[-1]
+    return last["def"]["team"] == 2 and bool(last["def"]["is_dead"])
 
 
 def _credit_battle_rewards(c: sqlite3.Connection, player_id: int, *, point: int, crystal: int) -> None:
@@ -2076,41 +2206,46 @@ def _hunter_fight(database_path: Path) -> Response:
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
         rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+        # Resolve the replay BEFORE paying anything: the outcome decides the payout.
+        att_list, def_list, combat = _battle_side(
+            hunter_skin=_role_skin_string(worn,p["sex"]),
+            hunter_name=p["nick"] or "猎人",
+            hunter_lv=p["lv"] or 1,
+            hunter_stats=_hunter_combat_stats(p, worn),
+            pet_rows=rows,
+            defenders=monsters,
+        )
+        record=_battle_record(att_list, def_list, combat)
+        is_win=_record_is_win(record)
         # LOCAL DEFAULT rewards; the original hunt payout table is not recoverable.
         # REAL values: use the monster table's own exp column when present.
-        exp_reward=sum(
+        # A lost hunt still costs the AP but pays a tenth of the exp, no silver and
+        # no picture-book entry (you did not defeat them).
+        base_exp=sum(
             int(m.get("exp") or 0) or LOCAL_HUNT_EXP_PER_LEVEL * int(m["lv"])
             for m in monsters
         )
-        point_reward=LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
+        exp_reward=base_exp if is_win else base_exp // 10
+        point_reward=(LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
+                      if is_win else 0)
         _credit_battle_rewards(c,p["id"],point=point_reward,crystal=0)
         # The pets that actually fought gain the battle exp, so levelling (and the
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
-        _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
+        if is_win:
+            _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
 
-    # LOCAL DEFAULT combat maths: the player's pets always win this one replay.
-    att_list, def_list = _battle_side(
-        hunter_skin=_role_skin_string(worn,p["sex"]),
-        hunter_name=p["nick"] or "猎人",
-        hunter_lv=p["lv"] or 1,
-        pet_rows=rows,
-        defenders=monsters,
-    )
-    record=_battle_record(att_list, def_list)
-    pic=_pic_entries(monsters)
+    pic=_pic_entries(monsters) if is_win else []
     return _protocol_response(6,{
-        "is_win":1,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
+        "is_win":1 if is_win else 0,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
         # FightResultItem.as:211-215 feeds this straight into PercentUItem and
         # :169 gates the "无与伦比/再战" button on ==100, so a win must report 100.
-        # LOCAL DEFAULT: hunts always resolve as a win for now, so this is a
-        # constant until the damage model can produce losses.
-        "rage_point":100 if LOCAL_HUNT_WIN_RATE >= 100 else 0,"finish_rate":100,"pic":pic,
+        "rage_point":100 if is_win else 0,"finish_rate":100 if is_win else 0,"pic":pic,
         "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
         "pet_exp":pet_exp,
-        "reward_rate":1,"reward_goods":[],
+        "reward_rate":1 if is_win else 0,"reward_goods":[],
         "value":"ok",
     })
 
@@ -2524,7 +2659,14 @@ def _explore_start(database_path: Path) -> Response:
         explore_pets=[r["id"] for r in explore_rows]
         # _pet_energy takes the pet.txt SPECIES id, not the pets.id row id.
         lead_species=int(explore_rows[0]["pet_id"]) if explore_rows else 0
-        _grant_pet_exp(c,explore_pets,LOCAL_EXPLORE_EXP)
+        # A quarter of a level for the squad's own level (the old flat 300,000 was
+        # 60 levels at lv1 on the new curve).
+        squad_lv = c.execute(
+            "SELECT COALESCE(MAX(lv), 1) FROM pets"
+            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            (p["id"],),
+        ).fetchone()[0]
+        _grant_pet_exp(c, explore_pets, _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE))
     horse=_explore_horse(database_path, p["id"])
     att_list, def_list, record=_fight_payload(
         database_path,_defenders_from_monsters((1,)))
@@ -2945,19 +3087,61 @@ def _choose_rest_pet(database_path: Path) -> Response:
 
 
 LOCAL_COPY_MAPS = (1001, 1002, 1003, 1004)
+# LOCAL DEFAULT: dungeon difficulty per stage (the reference level the defenders
+# are picked around). Four stages climb 10 -> 90.
+LOCAL_COPY_STAGE_LEVEL = {1001: 10, 1002: 40, 1003: 60, 1004: 90}
 # LOCAL DEFAULT payouts. The original arena/dungeon reward tables are not
 # recoverable, so these are flat and are credited to players.point on a win.
 LOCAL_ARENA_REWARD = 20
 LOCAL_COPY_REWARD = 50
 LOCAL_EXPLORE_REWARD = 30
-# LOCAL DEFAULT: exp each pet gains from one arena bout / one dungeon clear.
-LOCAL_ARENA_EXP = 200000
-LOCAL_COPY_EXP = 400000
+# LOCAL DEFAULT: exp each pet gains from one arena bout / one dungeon clear is a
+# *fraction of a level at the reference level*, not a flat number — with the
+# 4-segment curve a flat 200,000 was worth 40 levels at lv1 and nothing at lv900.
+LOCAL_ARENA_EXP_SHARE = 3
+LOCAL_COPY_EXP_SHARE = 2
+
+
+def _battle_exp(level: int, share: int) -> int:
+    """A `1/share` slice of one level at `level` (the local exp dial)."""
+    return max(1, exp_to_next(max(1, int(level or 1))) // max(1, share))
 
 
 def _defenders_from_monsters(ids) -> list[dict[str, object]]:
     """Real monster rows for the enemy side of a fight."""
     return [m for m in (_pick_monster(i) for i in ids) if m is not None]
+
+
+def _defenders_for_level(base_id: int, reference_lv: int, count: int = 2) -> list[dict[str, object]]:
+    """Base monster plus the one closest to `reference_lv` (same level or above).
+
+    Fixed id pairs made fights lopsided: the dungeon used monster 1 (L1) together
+    with monster 11 (L90), so a starter squad could never clear it while the arena
+    (a single L1 monster) could never lose.
+    """
+    table = _monster_table()
+    base = _pick_monster(base_id)
+    picked: list[dict[str, object]] = [base] if base else []
+    if len(picked) >= count:
+        return picked
+    candidates: list[tuple[int, int]] = []
+    for monster_id in sorted(int(m) for m in table):
+        if monster_id == base_id:
+            continue
+        raw = str(table[monster_id].get("level", "")).strip()
+        level = int(raw) if raw.isdigit() else 0
+        delta = level - reference_lv
+        if delta < 0 or delta > LOCAL_HUNT_LEVEL_BAND:
+            continue
+        candidates.append((delta, monster_id))
+    candidates.sort()
+    for _, monster_id in candidates:
+        monster = _pick_monster(monster_id)
+        if monster is not None:
+            picked.append(monster)
+        if len(picked) >= count:
+            break
+    return picked
 
 
 def _fight_payload(database_path: Path, defenders):
@@ -2970,19 +3154,20 @@ def _fight_payload(database_path: Path, defenders):
         worn = _worn_equipment(c, p["id"])
         rows = c.execute(
             """SELECT id AS "index", pet_id AS id, icon, name, lv,
-                      pro_hp, pro_phy_att, pro_mag_att
+                      pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
                FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0
                ORDER BY id LIMIT 2""",
             (p["id"],),
         ).fetchall()
-    att_list, def_list = _battle_side(
+    att_list, def_list, combat = _battle_side(
         hunter_skin=_role_skin_string(worn,p["sex"]),
         hunter_name=p["nick"] or "猎人",
         hunter_lv=p["lv"] or 1,
+        hunter_stats=_hunter_combat_stats(p, worn),
         pet_rows=rows,
         defenders=defenders,
     )
-    return att_list, def_list, _battle_record(att_list, def_list)
+    return att_list, def_list, _battle_record(att_list, def_list, combat)
 
 
 def _arena_battle(database_path: Path) -> Response:
@@ -2996,6 +3181,7 @@ def _arena_battle(database_path: Path) -> Response:
     if parts is None:
         return _pet_error(103)
     att_list, def_list, record = parts
+    is_win = _record_is_win(record)
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
         p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
@@ -3004,18 +3190,29 @@ def _arena_battle(database_path: Path) -> Response:
         ap = max(0, (p["arena_ap"] or 0) - 1)
         c.execute("UPDATE players SET arena_ap=? WHERE id=?", (ap, p["id"]))
         max_ap = p["max_arena_ap"] or LOCAL_ARENA_RIVAL_LEVEL
-        _credit_battle_rewards(c, p["id"], point=LOCAL_ARENA_REWARD, crystal=0)
+        _credit_battle_rewards(c, p["id"], point=LOCAL_ARENA_REWARD if is_win else 0, crystal=0)
         # Arena bouts train the squad too, matching the hunt/expedition payouts.
+        # The slice is a fraction of a level for the squad's own level, so an arena
+        # is never worth 40 levels at lv1 nor nothing at lv900.
         arena_pets=[r[0] for r in c.execute(
             "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
             (p["id"],))]
-        _grant_pet_exp(c, arena_pets, LOCAL_ARENA_EXP)
+        squad_lv = c.execute(
+            "SELECT COALESCE(MAX(lv), 1) FROM pets"
+            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            (p["id"],),
+        ).fetchone()[0]
+        arena_exp = _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
+        _grant_pet_exp(c, arena_pets, arena_exp if is_win else arena_exp // 10)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
-        "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": _local_arena_rank(),
-        "rage_point": 0, "att_list": att_list, "def_list": def_list,
+        "is_win": 1 if is_win else 0, "arena_ap": ap, "max_arena_ap": max_ap,
+        "arena_rank": _local_arena_rank(),
+        # RingResultUI feeds this into PercentUItem like the hunt screen does.
+        "rage_point": 100 if is_win else 0, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
-        "reward_point": LOCAL_ARENA_REWARD, "reward_crystal": 0, "reward_goods": [],
+        "reward_point": LOCAL_ARENA_REWARD if is_win else 0, "reward_crystal": 0,
+        "reward_goods": [],
         "value": "ok",
     })
 
@@ -3061,25 +3258,32 @@ def _copy_battle(database_path: Path) -> Response:
         return _pet_error(100)
     if hid not in LOCAL_COPY_MAPS:
         return _pet_error(400)
-    parts = _fight_payload(database_path, _defenders_from_monsters((1, 11)))
+    # 副本四层按等级递进；固定 (1, 11) 组合是 L1 + L90，新手必败。
+    stage_level = LOCAL_COPY_STAGE_LEVEL.get(hid, 10)
+    parts = _fight_payload(database_path, _defenders_for_level(1, stage_level))
     if parts is None:
         return _pet_error(103)
     att_list, def_list, record = parts
+    is_win = _record_is_win(record)
     with _connect_database(database_path) as c:
         player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
-        _credit_battle_rewards(c, player["id"], point=LOCAL_COPY_REWARD, crystal=0)
+        _credit_battle_rewards(c, player["id"], point=LOCAL_COPY_REWARD if is_win else 0, crystal=0)
         copy_pets=[r[0] for r in c.execute(
             "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
             (player["id"],))]
-        _grant_pet_exp(c, copy_pets, LOCAL_COPY_EXP)
+        # Half a level at the stage's reference level, so clearing stage 1001 does
+        # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
+        copy_exp = _battle_exp(stage_level, LOCAL_COPY_EXP_SHARE)
+        _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
     # LOCAL DEFAULT rewards; reward_goods[].id resolves through pic.txt
     # (FightResultItem.as:476), so it stays empty rather than guessing an id.
     return _protocol_response(74, {
-        "is_win": 1, "att_list": att_list, "def_list": def_list,
+        "is_win": 1 if is_win else 0, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
-        "reward_point": LOCAL_COPY_REWARD, "reward_crystal": 0, "reward_goods": [],
+        "reward_point": LOCAL_COPY_REWARD if is_win else 0, "reward_crystal": 0,
+        "reward_goods": [],
         "value": "ok",
     })
 
@@ -4560,26 +4764,45 @@ def _pet_synthesis(database_path: Path) -> Response:
         if vice_row["battle_state"] != 0 or main_row["battle_state"] != 0:
             return _pet_error(524)
 
-        # LOCAL DEFAULT: one generation, +1 to each of the six reinforcements.
-        # pets stores them as pro_* (pro_hp … pro_mag_def), matching the
-        # *_tp fields DevelopPetInfoUI reads on command 9.
-        step = {"pro_hp": 5, "pro_speed": 5, "pro_phy_att": 5,
-                "pro_mag_att": 5, "pro_phy_def": 5, "pro_mag_def": 5}
-        for column, delta in step.items():
+        # help.txt id 10 规则③⑥：合成必增世代；主宠继承副宠 100% 世代与 50% 强化值。
+        # 旧实现是"固定 +5、世代 +1"，与客户端自带的帮助文案完全不符，而且副宠的
+        # 培养投入（pro_*）对结果没有任何影响。
+        try:
+            ttype = int(_request_value("ttype", "1") or 1)
+        except ValueError:
+            ttype = 1
+        if ttype not in (1, 2):
+            ttype = 1
+        main_generation = int(main_row["generation"] or 1)
+        vice_generation = int(vice_row["generation"] or 1)
+        generation = max(main_generation, vice_generation)
+        if vice_generation <= main_generation:
+            generation += 1
+        for column in ("pro_hp", "pro_speed", "pro_phy_att",
+                       "pro_mag_att", "pro_phy_def", "pro_mag_def"):
             connection.execute(
-                f"UPDATE pets SET {column} = {column} + ? WHERE id = ?", (delta, main_index)
+                f"UPDATE pets SET {column} = min(?, {column} + ?) WHERE id = ?",
+                (LOCAL_PRO_CAP, int(vice_row[column] or 0) // 2, main_index),
             )
-        generation = (main_row["generation"] or 1) + 1
+        if ttype == 2:
+            # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。
+            cap = min(30, math.isqrt(generation) + 1)
+            merged = [token for token in str(main_row["buffs"] or "").split(":") if token.isdigit()]
+            for token in str(vice_row["buffs"] or "").split(":"):
+                if token.isdigit() and token not in merged and len(merged) < cap:
+                    merged.append(token)
+            connection.execute("UPDATE pets SET buffs=? WHERE id=?", (":".join(merged), main_index))
         connection.execute("UPDATE pets SET generation=? WHERE id=?", (generation, main_index))
         connection.execute("DELETE FROM pets WHERE id=?", (vice_index,))
         updated = connection.execute(
-            """SELECT id AS "index", pet_id AS id, icon, name, lv, star, pro, skills,
+            """SELECT id AS "index", pet_id AS id, icon, name, lv, star, pro, skills, buffs,
                       pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
                FROM pets WHERE id=?""",
             (main_index,),
         ).fetchone()
 
     skills = [s for s in str(updated["skills"] or "").replace(";", ":").split(":") if s.strip()]
+    buffs = [int(b) for b in str(updated["buffs"] or "").split(":") if b.isdigit()]
     payload = {
         "index": updated["index"],
         "id": updated["id"],
@@ -4587,9 +4810,9 @@ def _pet_synthesis(database_path: Path) -> Response:
         "name": _pet_name(updated["id"], updated["name"]),
         "lv": updated["lv"],
         "exd_generation": generation,
-        "type": 1,
+        "type": ttype,
         "skills": [{"id": int(s)} for s in skills if s.isdigit()],
-        "buffs": [],
+        "buffs": [{"id": b} for b in buffs],
         "exd_hp_tp": updated["pro_hp"],
         "exd_speed_tp": updated["pro_speed"],
         "exd_phy_att_tp": updated["pro_phy_att"],
