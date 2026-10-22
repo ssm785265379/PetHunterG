@@ -1865,7 +1865,6 @@ def _hunter_task(database_path: Path) -> Response:
     })
 
 
-LOCAL_HUNT_WIN_RATE = 100
 # LOCAL DEFAULT: how many monsters a hunt map spawns per battle. The client's
 # BoxItem2 row holds three, so two is safe and gives each map its own group.
 LOCAL_HUNT_MONSTER_COUNT = 2
