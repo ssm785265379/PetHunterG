@@ -811,6 +811,23 @@ def _initialize_database(database_path: Path) -> None:
                 connection.execute(
                     "UPDATE pets SET buffs=? WHERE id=?", (seeded, pet["id"])
                 )
+        # 坐骑: every character gets one free mount so the expedition page has
+        # something to show and rent. Without a rental row, command 104 answers an
+        # empty list and the mount screen is a dead end (its shop branch is only
+        # reachable with a non-empty list). Renting another mount later switches the
+        # active one — `_explore_horse` prefers the newest rental.
+        if LOCAL_STARTER_MOUNT_ID in config_tables._table("exploreEquip.txt"):
+            for player in connection.execute("SELECT id FROM players").fetchall():
+                has_mount = connection.execute(
+                    "SELECT 1 FROM explore_rented WHERE player_id=? AND slot_type=1",
+                    (player["id"],),
+                ).fetchone()
+                if has_mount is None:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO explore_rented"
+                        " (player_id, equip_id, slot_type) VALUES (?, ?, 1)",
+                        (player["id"], LOCAL_STARTER_MOUNT_ID),
+                    )
 
 
 def _password_hash(password: str, salt: bytes) -> bytes:
@@ -3454,6 +3471,9 @@ LOCAL_ARENA_RIVAL_LEVEL = 5
 
 
 LOCAL_EXPLORE_HIRE_SLOTS = 6
+# LOCAL DEFAULT: the free starter mount (first row of exploreEquip type=1, 驴).
+# Giving every character one keeps the mount page usable; renting others switches.
+LOCAL_STARTER_MOUNT_ID = 100001
 # LOCAL DEFAULT: price quoted when every rental slot type is already in use.
 LOCAL_EXPLORE_SLOT_PRICE = 12000
 
@@ -3482,9 +3502,12 @@ def _explore_hire_list(database_path: Path) -> Response:
         # Returning the whole exploreEquip catalogue made list[0] always 100001
         # and HireMountsUI's "everything rented" branch permanent, so the shop
         # (command 100) could never be reached and the mount was unpickable.
+        # Filter by the requested category: without it the mount page counted the
+        # expedition gear too (equip_count read 6/6) and listed gear as "mounts".
         rented_rows = c.execute(
-            "SELECT equip_id, slot_type FROM explore_rented WHERE player_id=? ORDER BY equip_id",
-            (player["id"],),
+            "SELECT equip_id, slot_type FROM explore_rented WHERE player_id=? AND slot_type=?"
+            " ORDER BY equip_id",
+            (player["id"], ttype),
         ).fetchall()
     rented_entries = [
         {"id": row["equip_id"], "type": row["slot_type"]} for row in rented_rows
@@ -3905,23 +3928,24 @@ def _explore_rent(database_path: Path) -> Response:
             "SELECT COUNT(*) FROM explore_rented WHERE player_id=? AND slot_type=?",
             (player["id"], ttype),
         ).fetchone()[0]
-        if count >= LOCAL_EXPLORE_HIRE_SLOTS:
+        # Mounts (slot_type 1) are a single-slot choice, not a growing roster: the
+        # old rows are deleted below, so a full category must not block switching.
+        if ttype != 1 and count >= LOCAL_EXPLORE_HIRE_SLOTS:
             return _protocol_response(
                 102, {"value": "full", "need_money": 0, "own_money": 0}
+            )
+        if ttype == 1:
+            # A hunter rides one mount at a time: replace first, then insert, so a
+            # previously rented mount cannot survive and "switch" actually sticks.
+            c.execute(
+                "DELETE FROM explore_rented WHERE player_id=? AND slot_type=1",
+                (player["id"],),
             )
         c.execute(
             "INSERT OR IGNORE INTO explore_rented (player_id, equip_id, slot_type)"
             " VALUES (?,?,?)",
             (player["id"], gid, ttype),
         )
-        if ttype == 1:
-            # A hunter rides one mount at a time. Keeping the previous rows made
-            # "rent a different mount" a no-op, because _explore_horse picked the
-            # lowest id and that was always the first one ever rented.
-            c.execute(
-                "DELETE FROM explore_rented WHERE player_id=? AND slot_type=1 AND equip_id<>?",
-                (player["id"], gid),
-            )
     return _protocol_response(102, {"value": "ok"})
 
 
@@ -5250,7 +5274,18 @@ def _skill_family_index() -> dict[str, dict[int, int]]:
     return _SKILL_FAMILY_INDEX
 
 
-def _merge_skills(main_skills: str, vice_skills: str) -> str:
+def _skill_cap(star: int, generation: int) -> int:
+    """LOCAL DESIGN: 稀有/高世代宠物能带更多技能。
+
+    固定上限 4 会让所有宠物长得一样，稀有感就没了。按星级与世代给槽位：
+    3★1代=4、5★1代=5、8★2代=8、12★3代=10，硬上限 12。
+    """
+    star = max(1, int(star or 1))
+    generation = max(1, int(generation or 1))
+    return max(1, min(12, 3 + star // 2 + generation // 2))
+
+
+def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
     """Skill synthesis (command 65 with ttype=1).
 
     LOCAL DESIGN — the client ships no rule text for this, only help.txt's one line
@@ -5258,7 +5293,7 @@ def _merge_skills(main_skills: str, vice_skills: str) -> str:
       * the pool is the union of both pets' skills,
       * one skill per family (highest level wins, so breeding never downgrades),
       * each surviving family has a chance to gain one level,
-      * at most four skills are carried over.
+      * the cap comes from the pet's rarity (`_skill_cap`), not a flat four.
     """
     index = _skill_family_index()
     by_id = config_tables._table("skill.txt")
@@ -5287,12 +5322,12 @@ def _merge_skills(main_skills: str, vice_skills: str) -> str:
             level = min(max(available), level + 1)
         level = max(min(available), min(max(available), level))
         merged.append(available[level])
-    # Keep the strongest four.
     merged.sort(key=lambda sid: (
         int(str(by_id.get(sid, {}).get("level", "0") or 0)),
         int(str(by_id.get(sid, {}).get("damage", "0") or 0)),
     ), reverse=True)
-    return ":".join(str(sid) for sid in merged[:4])
+    keep = max(1, min(12, int(cap or 4), len(merged)))
+    return ":".join(str(sid) for sid in merged[:keep])
 
 
 def _pet_synthesis(database_path: Path) -> Response:
@@ -5359,10 +5394,13 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (LOCAL_PRO_CAP, int(vice_row[column] or 0) // 2, main_index),
             )
         if ttype == 1:
-            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级、最多 4 个。
+            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级，
+            # 槽位上限按"星级 + 世代"给（稀有宠带得更多）。
+            main_skill_count = len([t for t in str(main_row["skills"] or "").split(":") if t.isdigit()])
+            skill_cap = max(main_skill_count, _skill_cap(main_row["star"], generation))
             connection.execute(
                 "UPDATE pets SET skills = ? WHERE id = ?",
-                (_merge_skills(main_row["skills"], vice_row["skills"]), main_index),
+                (_merge_skills(main_row["skills"], vice_row["skills"], skill_cap), main_index),
             )
         if ttype == 2:
             # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。

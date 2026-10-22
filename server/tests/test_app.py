@@ -3182,6 +3182,95 @@ def test_hunt_rage_meter_fills_then_triggers_once(tmp_path: Path):
     )
 
 
+def test_skill_slots_scale_with_rarity(tmp_path: Path):
+    """固定 4 个技能槽会让稀有宠和普通宠没区别；槽位应按星级+世代增长。"""
+    from pet_hunter_server.app import _merge_skills, _skill_cap
+
+    assert _skill_cap(3, 1) == 4
+    assert _skill_cap(5, 1) == 5
+    assert _skill_cap(8, 2) == 8
+    assert _skill_cap(12, 3) == 10
+    assert _skill_cap(99, 99) == 12
+    # Higher rarity never gets fewer slots than lower rarity at the same generation.
+    assert _skill_cap(12, 1) > _skill_cap(3, 1)
+
+    # The merge respects the cap and never downgrades a family.
+    pool = "101:102:103:104:201:202:203:5101:5102:5103:5002:5003"
+    merged = _merge_skills(pool, "", _skill_cap(12, 3)).split(":")
+    assert len(merged) <= _skill_cap(12, 3)
+    assert all(token.isdigit() for token in merged)
+    tight = _merge_skills(pool, "", 4).split(":")
+    assert len(tight) <= 4, "the cap argument must still be honoured"
+
+    # A high-star main keeps every skill it already had, even with a big pool.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SkillCap")
+    with sqlite3.connect(database) as connection:
+        main_id, vice_id = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
+        ).fetchall()]
+        connection.execute("UPDATE pets SET star=8, generation=2, skills=? WHERE id=?",
+                           ("101:102:201:202:5101", main_id))
+        connection.execute("UPDATE pets SET skills=? WHERE id=?",
+                           ("103:203:5102:5002", vice_id))
+    command, payload = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "65", "uid": uid,
+                           "main": main_id, "vice": vice_id, "ttype": 1},
+    ))
+    assert command == 65
+    assert payload["type"] == 1
+    assert len(payload["skills"]) <= _skill_cap(8, 3)
+
+
+def test_mount_page_lists_only_mounts_even_when_gear_slots_are_full(tmp_path: Path):
+    # 104 ignored `slot_type`, so the mount page counted the expedition gear too
+    # (equip_count 6/6) and the rent guard answered "full", which is why the mount
+    # could never be switched once the gear slots were taken.
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MountF")
+    table = config_tables._table("exploreEquip.txt")
+    mounts = sorted(int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "1")
+    gear = sorted(int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "2")
+    assert mounts and len(gear) >= A.LOCAL_EXPLORE_HIRE_SLOTS
+
+    # Fill the gear category completely.
+    for item in gear[: A.LOCAL_EXPLORE_HIRE_SLOTS]:
+        _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "102", "uid": uid,
+                               "gid": item, "ttype": "2"},
+        ))
+
+    command, mounts_page = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid,
+                                       "ttype": "1", "p": "1", "n": "9"})
+    )
+    assert command == 104
+    assert all(entry["type"] == 1 for entry in mounts_page["list"]), mounts_page["list"]
+    assert mounts_page["equip_count"] <= 1, "gear must not count against mount slots"
+
+    # Switching mounts still works even though the gear category is full.
+    for mount in mounts[:2]:
+        command, ack = _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "102", "uid": uid,
+                               "gid": mount, "ttype": "1"},
+        ))
+        assert command == 102 and ack["value"] == "ok", ack
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        rented_mounts = [r[0] for r in connection.execute(
+            "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1",
+            (player_id,),
+        )]
+    assert rented_mounts == [mounts[1]]
+    assert A._explore_horse(database, player_id) == mounts[1]
+
+
 def test_renting_another_mount_switches_the_one_you_ride(tmp_path: Path):
     # 102 used to INSERT OR IGNORE and _explore_horse picked the lowest id, so
     # renting a different mount never changed the one on the expedition page —
