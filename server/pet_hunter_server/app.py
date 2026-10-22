@@ -127,7 +127,10 @@ def exp_to_next(lv: int) -> int:
     return 4_000_000 + 60_000 * (lv - 500)
 # LOCAL DEFAULT: exp a single battle awards to each pet that took part, per
 # monster level. 100,000 means a lv-1 hunt is ~10% of a level.
-LOCAL_HUNT_EXP_PER_LEVEL = 100000
+# Fallback only: monster.txt ships a per-monster `exp` column, which is the real
+# source. This constant just covers rows whose cell is 0, so it is deliberately
+# small — at 100,000 a 0-exp monster would out-pay the ones with real data.
+LOCAL_HUNT_EXP_PER_LEVEL = 100
 LOCAL_EXPLORE_EXP = 300000
 # LOCAL DEFAULT: exploreMap.txt's passRewardPoint is 0 on most maps — their pass
 # reward is an item or a picture-book entry — so a flat silver bonus is added on
@@ -1894,6 +1897,9 @@ def _pick_monster(monster_id: int) -> dict[str, object] | None:
         "lv": stat("level", 1),
         "hp": stat("hp", 50),
         "phy_att": stat("phyAtt", 10),
+        # monster.txt carries a real `exp` column; hunt payouts read it instead of
+        # inventing a per-level constant.
+        "exp": stat("exp", 0),
     }
 
 
@@ -2043,7 +2049,11 @@ def _hunter_fight(database_path: Path) -> Response:
         worn=_worn_equipment(c,p["id"])
         rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
         # LOCAL DEFAULT rewards; the original hunt payout table is not recoverable.
-        exp_reward=LOCAL_HUNT_EXP_PER_LEVEL*(sum(m["lv"] for m in monsters) or 1)
+        # REAL values: use the monster table's own exp column when present.
+        exp_reward=sum(
+            int(m.get("exp") or 0) or LOCAL_HUNT_EXP_PER_LEVEL * int(m["lv"])
+            for m in monsters
+        )
         point_reward=LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
         _credit_battle_rewards(c,p["id"],point=point_reward,crystal=0)
         # The pets that actually fought gain the battle exp, so levelling (and the
