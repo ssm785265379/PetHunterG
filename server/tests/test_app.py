@@ -2022,14 +2022,23 @@ def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
 
     # The picture book counts *distinct* creatures, so reach the milestone by
     # hunting the different monster groups rather than re-catching the same pet.
+    # Elite encounters are forced off here: this test is about milestone counting,
+    # and a lv-1 squad can legitimately lose to a 1.6x elite trio.
+    from pet_hunter_server import app as A
+
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE players SET ht_ap = 50, max_ht_ap = 50")
         connection.commit()
-    for hid in (1, 2, 3, 101):
-        command, _ = _envelope(
-            client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": hid})
-        )
-        assert command == 6
+    original_elite = A.LOCAL_ELITE_CHANCE
+    A.LOCAL_ELITE_CHANCE = 0.0
+    try:
+        for hid in (1, 2, 3, 101):
+            command, _ = _envelope(
+                client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": hid})
+            )
+            assert command == 6
+    finally:
+        A.LOCAL_ELITE_CHANCE = original_elite
     _, info = _envelope(client.post("/flash.do", data={"m": "show", "showId": "48", "uid": uid}))
     assert info["own_num"] >= first_need, f"only {info['own_num']} entries unlocked"
     assert info["is_finish"] == 1
@@ -3041,6 +3050,49 @@ def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
     # The settlement bar is still driven by rage_point (D-10); elite clears are
     # covered separately, so a normal hunt may legitimately report 0.
     assert isinstance(payload["rage_point"], int) and 0 <= payload["rage_point"] <= 100
+
+
+def test_hunt_map_progress_accumulates_and_clears(tmp_path: Path):
+    # HunterMapUI.as:206 draws `maps[].rate` as a progress bar; it used to be a
+    # hardcoded 0, so farming a map forever still read 0%.
+    from pet_hunter_server.app import LOCAL_HUNT_CLEAR_KILLS
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MapProg")
+
+    def listed() -> dict:
+        board = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "4", "uid": uid})
+        )[1]
+        return next(m for m in board["maps"] if m["id"] == 1)
+
+    start = listed()
+    assert start["rate"] == 0 and start["pass"] == 0
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET ht_ap = 40, max_ht_ap = 40 WHERE uid = ?", (uid,))
+        connection.commit()
+
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"}))
+    after_one = listed()
+    assert after_one["rate"] == 100 // LOCAL_HUNT_CLEAR_KILLS
+    assert after_one["rate"] > 0, "the bar has to move after the first clear"
+
+    for _ in range(LOCAL_HUNT_CLEAR_KILLS - 1):
+        _envelope(client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"}))
+    cleared = listed()
+    assert cleared["rate"] == 100
+    assert cleared["pass"] == 1, "the map should read as cleared"
+
+    # Progress is per map, so a different map starts from zero.
+    other = next(
+        m for m in _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "4", "uid": uid})
+        )[1]["maps"]
+        if m["id"] != 1
+    )
+    assert other["rate"] == 0
 
 
 def test_hunt_rage_meter_fills_then_triggers_once(tmp_path: Path):

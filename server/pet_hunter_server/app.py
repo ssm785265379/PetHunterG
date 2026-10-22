@@ -599,7 +599,11 @@ def _initialize_database(database_path: Path) -> None:
         # The shop table is a local default, not player data, so it is rewritten
         # from LOCAL_SHOP_GOODS on every start. That keeps removed goods from
         # lingering in older saves (purchases go to `inventory`, not here).
+        # The mystery rows are wiped too, so the rotation marker has to be cleared
+        # as well — otherwise the day looks "already rolled" and 神秘商店 comes up
+        # empty until midnight.
         connection.execute("DELETE FROM shop_goods")
+        connection.execute("DELETE FROM shop_rotation")
         for goods in LOCAL_SHOP_GOODS:
             connection.execute(
                 """
@@ -705,6 +709,17 @@ def _initialize_database(database_path: Path) -> None:
         # Picture-book (图鉴) collection: which creatures the player has
         # registered, and which picStep milestone rewards were already taken.
         # picStep.txt holds the milestones (value = entries required).
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hunt_progress (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                map_id INTEGER NOT NULL,
+                kills INTEGER NOT NULL DEFAULT 0,
+                cleared INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, map_id)
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS guilds (
@@ -2221,7 +2236,29 @@ def _hunter_list(database_path: Path) -> Response:
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
-    return _protocol_response(4,{"player":{"hunt_ap":p["ht_ap"],"max_hunt_ap":p["max_ht_ap"]},"maps":[{"index":k,"code":k,"id":k,"name":v["name"],"world":v["world"],"rate":0,"pass":0,"star":0,"days":0,"is_allown_hunt":1} for k,v in LOCAL_HUNT_MAPS.items()]})
+        # HunterMapUI.as:206 draws `rate` as a percentage bar; it used to be a
+        # hardcoded 0, so a map could be farmed forever and still read 0%.
+        progress = {
+            row["map_id"]: (row["kills"], row["cleared"])
+            for row in c.execute(
+                "SELECT map_id, kills, cleared FROM hunt_progress WHERE player_id=?",
+                (p["id"],),
+            )
+        }
+    maps = []
+    for map_id, info in LOCAL_HUNT_MAPS.items():
+        kills, cleared = progress.get(map_id, (0, 0))
+        maps.append({
+            "index": map_id, "code": map_id, "id": map_id,
+            "name": info["name"], "world": info["world"],
+            "rate": min(100, kills * 100 // LOCAL_HUNT_CLEAR_KILLS),
+            "pass": 1 if cleared else 0,
+            "star": 0, "days": 0, "is_allown_hunt": 1,
+        })
+    return _protocol_response(4, {
+        "player": {"hunt_ap": p["ht_ap"], "max_hunt_ap": p["max_ht_ap"]},
+        "maps": maps,
+    })
 
 
 def _hunter_task(database_path: Path) -> Response:
@@ -2250,6 +2287,9 @@ def _hunter_task(database_path: Path) -> Response:
 LOCAL_HUNT_MONSTER_COUNT = 2
 # LOCAL DEFAULT: how far a map's monsters may stray from its base monster's level.
 LOCAL_HUNT_LEVEL_BAND = 15
+# LOCAL DEFAULT: a map reads as "cleared" after this many victories, and the map
+# list shows `kills / LOCAL_HUNT_CLEAR_KILLS` as its progress percentage.
+LOCAL_HUNT_CLEAR_KILLS = 10
 # LOCAL DEFAULT elite encounter: chance, stat multiplier and payout multiplier.
 # "无双一击" (the client's rage button) is gated on clearing one of these.
 # LOCAL DEFAULT: one win fills a quarter of the meter, so 无双 lands every ~4th
@@ -2637,6 +2677,18 @@ def _hunter_fight(database_path: Path) -> Response:
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
         if is_win:
             _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
+        # Per-map progress, so the map list's bar actually moves.
+        c.execute(
+            "INSERT INTO hunt_progress (player_id, map_id, kills, cleared) VALUES (?,?,?,0)"
+            " ON CONFLICT(player_id, map_id) DO UPDATE SET kills = kills + 1",
+            (p["id"], hid, 1 if is_win else 0),
+        )
+        if is_win:
+            c.execute(
+                "UPDATE hunt_progress SET cleared = 1"
+                " WHERE player_id = ? AND map_id = ? AND kills >= ?",
+                (p["id"], hid, LOCAL_HUNT_CLEAR_KILLS),
+            )
         # FightResultItem.as:211-215 feeds `rage_point` into PercentUItem and :169
         # gates the 无双一击 button on ==100, so one value drives both the bar and
         # the button. It therefore accumulates across hunts: each win adds a
