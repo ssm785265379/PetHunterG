@@ -26,12 +26,28 @@
 另外 venv 的 `python.exe` 只是个转发壳，真正的进程是它的子进程，
 两个都要停干净，否则壳还在、端口还被占着。
 
-`tools/start-server.ps1` 按正确顺序做四件事：清遗留实例 → 起服务并等到能响应
-→ 重建 reverse 隧道 → 可选拉起游戏。
+**坑三：设备变成 `offline`。** `adb devices` 里状态是 `offline` 时，
+reverse 隧道根本建不起来（`error: device offline`），现象和坑一一样。
+`adb reconnect` 通常能救回来，救不回来就 `adb kill-server` / `start-server`。
+注意 reconnect 之后隧道一定是空的，必须重建。
+
+**验证链路是否真的通，别只看隧道规则。** 隧道规则存在不等于手机连得上。
+设备上有 `/system/bin/curl`，可以直接从手机内部实测：
 
 ```powershell
-pwsh -File tools\start-server.ps1              # 起服务 + 隧道
+adb -s 24086b59 shell "curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/data/android/zh-CN/server.xml"
+```
+
+返回 `200` 才是真的通了。脚本已经内置这一步，失败会直接报错退出。
+
+`tools/start-server.ps1` 是幂等的：服务已经在跑就只修隧道，需要强杀重开时加
+`-Restart`。它按正确顺序做：按需启服务 → 自动救 offline 设备 → 重建隧道
+→ **设备端 curl 实测** → 可选拉起游戏。
+
+```powershell
+pwsh -File tools\start-server.ps1              # 起服务 + 隧道 + 实测
 pwsh -File tools\start-server.ps1 -LaunchApp   # 顺带把游戏拉到前台
+pwsh -File tools\start-server.ps1 -Restart     # 强杀旧实例重开
 ```
 
 ## 还原顺序
