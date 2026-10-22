@@ -108,8 +108,23 @@ LOCAL_SHOP_GOODS = (
 # LOCAL DEFAULT: a flat 1,000,000 exp per level. The bundled exp items carry real
 # per-item values in this range (prop.txt's 宠物经验道具 grants 1,330,000), so the
 # per-level cost stays in that scale and battle rewards below are scaled to match.
-LOCAL_PET_EXP_PER_LEVEL = 1000000
-LOCAL_MAX_PET_LEVEL = 99
+# LOCAL DEFAULT: the shipped config has no levelling table at all, so the curve is
+# ours. The cap is 1000 because monster.txt's own `level` column runs 1..1000 and
+# help.txt id 10 talks about 500/300-level pets (one evolution step takes 200),
+# neither of which fits a 99 cap.
+LOCAL_MAX_PET_LEVEL = 1000
+
+
+def exp_to_next(lv: int) -> int:
+    """LOCAL DEFAULT exp needed to leave `lv`. Four linear segments, tuned so a
+    same-level pet needs roughly 3-9 kills early and 8-17 at the cap."""
+    if lv <= 50:
+        return 5_000 + 1_000 * (lv - 1)
+    if lv <= 200:
+        return 60_000 + 2_000 * (lv - 50)
+    if lv <= 500:
+        return 700_000 + 10_000 * (lv - 200)
+    return 4_000_000 + 60_000 * (lv - 500)
 # LOCAL DEFAULT: exp a single battle awards to each pet that took part, per
 # monster level. 100,000 means a lv-1 hunt is ~10% of a level.
 LOCAL_HUNT_EXP_PER_LEVEL = 100000
@@ -232,8 +247,11 @@ def _grant_pet_exp(connection, pet_ids, amount: int) -> list[dict]:
             continue
         exp = (row["exp"] or 0) + amount
         lv = row["lv"] or 1
-        while exp >= LOCAL_PET_EXP_PER_LEVEL and lv < LOCAL_MAX_PET_LEVEL:
-            exp -= LOCAL_PET_EXP_PER_LEVEL
+        while lv < LOCAL_MAX_PET_LEVEL:
+            need = exp_to_next(lv)
+            if exp < need:
+                break
+            exp -= need
             lv += 1
         connection.execute("UPDATE pets SET lv = ?, exp = ? WHERE id = ?", (lv, exp, pet_id))
         granted.append({"index": pet_id, "lv": lv, "exp": exp, "add": amount})
@@ -1484,8 +1502,11 @@ def _player_use_goods(database_path: Path) -> Response:
                 return _pet_error(506)
             exp = pet["exp"] + amount
             lv = pet["lv"]
-            while exp >= LOCAL_PET_EXP_PER_LEVEL and lv < LOCAL_MAX_PET_LEVEL:
-                exp -= LOCAL_PET_EXP_PER_LEVEL
+            while lv < LOCAL_MAX_PET_LEVEL:
+                need = exp_to_next(lv)
+                if exp < need:
+                    break
+                exp -= need
                 lv += 1
             connection.execute(
                 "UPDATE pets SET lv = ?, exp = ? WHERE id = ?",

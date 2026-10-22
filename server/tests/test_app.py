@@ -1044,6 +1044,23 @@ def test_use_goods_deletes_row_at_zero_and_rejects_unknown_items(tmp_path: Path)
     assert missing.get_data(as_text=True) == "-1:400"
 
 
+def test_experience_curve_is_monotonic_and_capped():
+    # LOCAL DEFAULT curve (no levelling table ships with the game). The cap is
+    # 1000 because monster.txt's own level column runs 1..1000 and help.txt id 10
+    # describes 500/300-level pets with a 200-level evolution step.
+    from pet_hunter_server.app import LOCAL_MAX_PET_LEVEL, exp_to_next
+
+    assert LOCAL_MAX_PET_LEVEL == 1000
+    assert exp_to_next(1) == 5_000
+    assert exp_to_next(1000) == 34_000_000
+    previous = 0
+    for level in range(1, LOCAL_MAX_PET_LEVEL):
+        need = exp_to_next(level)
+        assert need > 0
+        assert need >= previous, f"curve must not shrink at level {level}"
+        previous = need
+
+
 def test_use_goods_pet_exp_levels_target_pet(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
@@ -1070,14 +1087,21 @@ def test_use_goods_pet_exp_levels_target_pet(tmp_path: Path):
     command, payload = _envelope(response)
 
     assert command == 50
-    # 1,330,000 exp at the local 1,000,000-per-level rule = +1 level, 330,000 kept.
-    assert payload["lv"] == pet["lv"] + 1
-    assert payload["exp"] == 330000
+    # The levelling curve is a LOCAL DEFAULT (four linear segments, cap 1000), so
+    # compute the expectation with the same function instead of hardcoding one.
+    from pet_hunter_server.app import LOCAL_MAX_PET_LEVEL, exp_to_next
+
+    expected_lv, expected_exp = pet["lv"], pet["exp"] + 1_330_000
+    while expected_lv < LOCAL_MAX_PET_LEVEL and expected_exp >= exp_to_next(expected_lv):
+        expected_exp -= exp_to_next(expected_lv)
+        expected_lv += 1
+    assert payload["lv"] == expected_lv
+    assert payload["exp"] == expected_exp
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT lv, exp FROM pets WHERE id = ?", (pet["id"],)
         ).fetchone()
-        assert row == (pet["lv"] + 1, 330000)
+        assert row == (expected_lv, expected_exp)
         assert connection.execute(
             "SELECT COUNT(*) FROM inventory WHERE id = ?", (index,)
         ).fetchone()[0] == 0
@@ -1990,10 +2014,16 @@ def test_arena_and_dungeon_also_train_the_squad(tmp_path: Path):
         connection.commit()
 
     def exp_of() -> list[int]:
+        """Total progress, not the leftover: a grant large enough to level up can
+        leave exp at 0, which used to make this assertion look like a failure."""
+        from pet_hunter_server.app import exp_to_next
+
         with sqlite3.connect(database) as connection:
-            return [r[0] for r in connection.execute(
-                "SELECT exp FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
-            )]
+            rows = connection.execute(
+                "SELECT lv, exp FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
+            ).fetchall()
+        return [sum(exp_to_next(level) for level in range(1, lv)) + exp
+                for lv, exp in rows]
 
     command, _ = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "24", "uid": uid})
@@ -2104,8 +2134,14 @@ def test_hunting_awards_pet_exp_and_levels_the_squad(tmp_path: Path):
         gained = connection.execute(
             "SELECT id, lv, exp FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
         ).fetchall()
+    from pet_hunter_server.app import LOCAL_MAX_PET_LEVEL, exp_to_next
+
+    expected_lv, expected_exp = 1, payload["reward_exp"]
+    while expected_lv < LOCAL_MAX_PET_LEVEL and expected_exp >= exp_to_next(expected_lv):
+        expected_exp -= exp_to_next(expected_lv)
+        expected_lv += 1
     for pet_id, lv, exp in gained:
-        assert (lv, exp) == (1, payload["reward_exp"]), "one hunt is below one level"
+        assert (lv, exp) == (expected_lv, expected_exp), "hunt exp must land on every pet"
 
     # Enough hunts must actually cross the level boundary.
     for _ in range(11):
