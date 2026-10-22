@@ -1945,22 +1945,48 @@ def _battle_side(
     return att_list, def_list
 
 
+# LOCAL DEFAULT: a same-level ordinary monster should take about four swings.
+# The original damage formula is not recoverable (monster.txt's own hp/att/def do
+# not scale with level at all), so the replay is budgeted rather than simulated.
+LOCAL_SWINGS_PER_MONSTER = 4
+LOCAL_BATTLE_STEP_LIMIT = 30
+# skill.txt 101 = 烈焰之刃 (a real, physical skill); only used for the animation.
+LOCAL_REPLAY_SKILL_ID = 101
+
+
 def _battle_record(att_list, def_list) -> list[dict]:
-    """Replay steps, one per defender, all struck down.
+    """Replay steps: several swings per defender, HP ticking down.
+
+    The old version emitted exactly one step per defender with `cur_hp` already
+    zero. The client does no combat maths of its own — HunterResultUI.as:421-462
+    hands each step to FightProcess, which reads the swing value from
+    `att.skill.dm` (FightProcess.as:716-718, :754, :763-764) and copies `cur_hp`
+    straight into the health bar. With no `skill` and an instant 0 the monster
+    simply vanished at full health: the "everything dies in one hit" report.
 
     FightProcess.as:1066-1068 reads cur_hp/is_dead/is_revive with no guard and
     HunterResultUI.as:578 never starts the replay timer when record is empty, so
-    every step carries all three on both sides.
+    every step must carry all three on both sides.
     """
-    steps = [
-        {"att": {"team": 1, "code": 0, "cur_hp": att_list[0]["hp"],
-                 "is_dead": False, "is_revive": False},
-         "def": {"team": 2, "code": i, "cur_hp": 0,
-                 "is_dead": True, "is_revive": False}}
-        for i in range(len(def_list))
-    ]
+    attacker_hp = int(att_list[0]["hp"])
+    steps: list[dict] = []
+    for index, defender in enumerate(def_list):
+        total = max(1, int(defender.get("hp") or 1))
+        swing = max(1, round(total / LOCAL_SWINGS_PER_MONSTER))
+        remaining = total
+        while remaining > 0 and len(steps) < LOCAL_BATTLE_STEP_LIMIT:
+            remaining = max(0, remaining - swing)
+            steps.append({
+                "att": {"team": 1, "code": 0, "cur_hp": attacker_hp,
+                        "is_dead": False, "is_revive": False,
+                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": swing}},
+                "def": {"team": 2, "code": index, "cur_hp": remaining,
+                        "is_dead": remaining <= 0, "is_revive": False},
+            })
+        if len(steps) >= LOCAL_BATTLE_STEP_LIMIT:
+            break
     if not steps:
-        steps = [{"att": {"team": 1, "code": 0, "cur_hp": att_list[0]["hp"],
+        steps = [{"att": {"team": 1, "code": 0, "cur_hp": attacker_hp,
                           "is_dead": False, "is_revive": False},
                   "def": {"team": 2, "code": 0, "cur_hp": 0,
                           "is_dead": True, "is_revive": False}}]

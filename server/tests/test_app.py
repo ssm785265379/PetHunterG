@@ -2706,6 +2706,42 @@ def test_explore_map_list_pages_within_the_world_in_gid(tmp_path: Path):
     assert far["list"] == []
 
 
+def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
+    # The replay used to hold one step per monster with cur_hp already 0 and no
+    # `skill`, so the client (which only plays the script back) drew a one-shot
+    # kill with no damage number. FightProcess.as:716-764 reads att.skill.dm.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "Replay1")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET ht_ap = 5, max_ht_ap = 20 WHERE uid = ?", (uid,))
+        connection.commit()
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+    )
+    assert command == 6
+    record = payload["record"]
+    assert len(record) >= 4, "a monster must take several swings, not one"
+
+    for step in record:
+        assert set(step) == {"att", "def"}
+        skill = step["att"]["skill"]
+        assert skill["dm"] >= 1 and skill["pro"] in (1, 2)
+        assert step["def"]["is_dead"] == (step["def"]["cur_hp"] <= 0)
+
+    by_code: dict[int, list[int]] = {}
+    for step in record:
+        by_code.setdefault(step["def"]["code"], []).append(step["def"]["cur_hp"])
+    for code, series in by_code.items():
+        assert series[0] > 0, f"monster {code} starts at full health"
+        assert series[-1] == 0, f"monster {code} must end dead"
+        assert all(a > b for a, b in zip(series, series[1:])), f"monster {code} hp not decreasing"
+
+    # The settlement bar is still driven by rage_point (D-10).
+    assert payload["rage_point"] == 100
+
+
 def test_hunt_result_fills_the_rage_bar(tmp_path: Path):
     # FightResultItem.as:211-215 feeds param2.rage_point into PercentUItem and
     # :169 gates the bonus button on ==100, so a win has to report 100 (it was
