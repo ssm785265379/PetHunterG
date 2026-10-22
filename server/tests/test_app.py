@@ -1780,6 +1780,54 @@ def test_explore_stamina_is_real_and_refills(tmp_path: Path):
     assert refused.get_data(as_text=True).startswith("-1:")
 
 
+def test_pet_stats_come_from_pet_txt_not_a_two_entry_hardcode(tmp_path: Path):
+    # The all-stats panel (13) used to read LOCAL_PET_BASE_STATS, which only knew
+    # 1001 and 2019 and fell back to 1001 for everything else — so every caught
+    # creature showed 火龙's numbers. pet.txt carries the real per-species stats.
+    from pet_hunter_server import config_tables as tables
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "StatsOne")
+    with sqlite3.connect(database) as connection:
+        pet_index = connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE pets SET pet_id = 5001, icon = 5001, lv = 3 WHERE id = ?", (pet_index,)
+        )
+        connection.commit()
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "13", "uid": uid, "index": str(pet_index)})
+    )
+    assert command == 13
+    record = tables.pet_record(5001)
+    for column, key in (("hp", "hp"), ("speed", "speed"), ("phyAtt", "phy_att"),
+                        ("magAtt", "mag_att"), ("phyDef", "phy_def"), ("magDef", "mag_def")):
+        assert payload[key] == int(str(record[column]).strip())
+    assert payload["hp"] != 39, "fell back to the starter species"
+
+
+def test_picture_book_detail_returns_a_renderable_icon(tmp_path: Path):
+    # IllustrationInfoUI.as:162 prefixes "p" itself, so 26 must answer a number;
+    # without the field the detail page silently rendered no artwork.
+    from pet_hunter_server import config_tables as tables
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicTwo")
+    pics = tables._table("pic.txt")
+    gid = sorted(pics)[0]
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "26", "uid": uid, "gid": str(gid)})
+    )
+    assert command == 26
+    icon = payload["icon"]
+    assert isinstance(icon, int) and icon > 0
+    assert isinstance(payload["pics"][0]["icon"], int)
+
+
 def test_arena_star_prize_is_claimable_once_per_week(tmp_path: Path):
     # RingTopStarUI.as:178-193 reads id/name/is_reward/img for the page and
     # :195-232 renders the prize through pic.txt, so reward_goods_id has to be a

@@ -103,6 +103,20 @@ def skin_table() -> dict[int, dict[str, str]]:
     return _skin_table()
 
 
+@lru_cache(maxsize=1)
+def _pet_table() -> dict[int, dict[str, str]]:
+    return _table("pet.txt")
+
+
+def pet_table() -> dict[int, dict[str, str]]:
+    return _pet_table()
+
+
+def pet_record(pet_id: int) -> dict[str, str] | None:
+    """REAL pet.txt row: hp/speed/phyAtt/magAtt/phyDef/magDef, grows, buffSkills…"""
+    return pet_table().get(pet_id)
+
+
 def equip_record(item_id: int) -> dict[str, str] | None:
     return equip_table().get(item_id)
 

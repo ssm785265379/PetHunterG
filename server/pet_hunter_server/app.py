@@ -2,6 +2,7 @@ import ipaddress
 import hashlib
 import hmac
 import json
+import math
 import random
 import secrets
 import sqlite3
@@ -1713,7 +1714,13 @@ def _pic_info(database_path: Path) -> Response:
     try: gid=int(_request_value("gid",""))
     except ValueError:return _pet_error(100)
     if gid not in LOCAL_PICS:return _pet_error(506)
-    return _protocol_response(26,{"id":gid,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"is_reward":LOCAL_PICS[gid]["reward"]}]})
+    # IllustrationInfoUI.as:162 does getDefinition("p" + param2.icon) itself, so
+    # this must be a bare number; without it the detail page silently rendered no
+    # artwork (the failure is swallowed by a catch block).
+    record = config_tables._table("pic.txt").get(gid) or {}
+    raw_icon = str(record.get("iconId", "") or "").strip()
+    icon = int(raw_icon) if raw_icon.lstrip("-").isdigit() and int(raw_icon) > 0 else gid
+    return _protocol_response(26,{"id":gid,"icon":icon,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"icon":icon,"is_reward":LOCAL_PICS[gid]["reward"]}]})
 
 
 def _achievement_list(database_path: Path) -> Response:
@@ -3899,6 +3906,36 @@ def _player_pets(database_path: Path) -> Response:
     )
 
 
+_PET_STAT_COLUMNS = (
+    ("hp", "hp"),
+    ("speed", "speed"),
+    ("phy_att", "phyAtt"),
+    ("mag_att", "magAtt"),
+    ("phy_def", "phyDef"),
+    ("mag_def", "magDef"),
+)
+
+
+def _pet_base_stats(pet_id: int) -> dict[str, int]:
+    """Six base stats straight from pet.txt.
+
+    LOCAL_PET_BASE_STATS used to hardcode only 1001 and 2019 and fall back to
+    1001 for every other species, so all caught creatures displayed 火龙's
+    39/65/52/60/43/50 — the "attributes are all identical" symptom. pet.txt
+    carries the real per-species numbers (5001 is 99/90/115/90/78/95).
+    """
+    record = config_tables.pet_record(pet_id)
+    if record is not None:
+        stats = {}
+        for field, column in _PET_STAT_COLUMNS:
+            raw = str(record.get(column, "") or "").strip()
+            stats[field] = int(raw) if raw.lstrip("-").isdigit() else 0
+        if any(stats.values()):
+            return stats
+    # LOCAL DEFAULT: unknown species falls back to the starter's line.
+    return {"hp": 39, "speed": 65, "phy_att": 52, "mag_att": 60, "phy_def": 43, "mag_def": 50}
+
+
 def _player_pet_full_detail(database_path: Path) -> Response:
     uid = _request_value("uid")
     pet_index = _pet_index_from_request()
@@ -3908,9 +3945,19 @@ def _player_pet_full_detail(database_path: Path) -> Response:
         player, row = _find_player_pet(connection, uid, pet_index)
         if player is None: return _pet_error(103)
         if row is None: return _pet_error(506)
-        stats = LOCAL_PET_BASE_STATS.get(row["pet_id"], LOCAL_PET_BASE_STATS[1001])
+        stats = _pet_base_stats(row["pet_id"])
         skills = _skill_rows(row["skills"])
-        payload = {"index": row["index"], "id": row["pet_id"], "icon": row["icon"], "star": row["star"], "lv": row["lv"], "pro": row["pro"], "nature": row["nature"], "generation": row["generation"], "skills": skills, "buffs": [{"id": int(x)} for x in (row["buffs"] or "").split(":") if x.isdigit()], "hp": stats["hp"], "speed": stats["speed"], "phy_att": stats["phy_att"], "mag_att": stats["mag_att"], "phy_def": stats["phy_def"], "mag_def": stats["mag_def"], "hp_tp": 0, "speed_tp": 0, "phy_att_tp": 0, "mag_att_tp": 0, "phy_def_tp": 0, "mag_def_tp": 0, "hp_gw": row["gw_hp"], "speed_gw": row["gw_speed"], "phy_att_gw": row["gw_phy_att"], "mag_att_gw": row["gw_mag_att"], "phy_def_gw": row["gw_phy_def"], "mag_def_gw": row["gw_mag_def"], "total_gw": sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def")), "gw_rate": 1}
+        growth_total = sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def"))
+        raw_grows = str((config_tables.pet_record(row["pet_id"]) or {}).get("grows", "") or "").strip()
+        parts = [part.strip() for part in raw_grows.split(":")]
+        lo, hi = 0, 0
+        if len(parts) == 2 and all(part.lstrip("-").isdigit() for part in parts):
+            lo, hi = int(parts[0]), int(parts[1])
+        # ui.txt 51-55 scale. Normalise against the pet's own `grows` range: high
+        # stars start at 10..80, so a birth-value roll must not read as "中超".
+        span = 6 * (hi - lo)
+        growth_rate = max(1, min(5, math.ceil((growth_total - 6 * lo) / span * 5))) if span > 0 else 1
+        payload = {"index": row["index"], "id": row["pet_id"], "icon": row["icon"], "star": row["star"], "lv": row["lv"], "pro": row["pro"], "nature": row["nature"], "generation": row["generation"], "skills": skills, "buffs": [{"id": int(x)} for x in (row["buffs"] or "").split(":") if x.isdigit()], "hp": stats["hp"], "speed": stats["speed"], "phy_att": stats["phy_att"], "mag_att": stats["mag_att"], "phy_def": stats["phy_def"], "mag_def": stats["mag_def"], "hp_tp": row["pro_hp"], "speed_tp": row["pro_speed"], "phy_att_tp": row["pro_phy_att"], "mag_att_tp": row["pro_mag_att"], "phy_def_tp": row["pro_phy_def"], "mag_def_tp": row["pro_mag_def"], "hp_gw": row["gw_hp"], "speed_gw": row["gw_speed"], "phy_att_gw": row["gw_phy_att"], "mag_att_gw": row["gw_mag_att"], "phy_def_gw": row["gw_phy_def"], "mag_def_gw": row["gw_mag_def"], "total_gw": sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def")), "gw_rate": growth_rate}
     return _protocol_response(13, payload)
 
 
@@ -3927,12 +3974,6 @@ def _player_pet_detail(database_path: Path) -> Response:
     if row is None:
         return _pet_error(506, status=404)
     return _protocol_response(12, _pet_detail_payload(row))
-
-
-LOCAL_PET_BASE_STATS = {
-    1001: {"hp": 39, "speed": 65, "phy_att": 52, "mag_att": 60, "phy_def": 43, "mag_def": 50},
-    2019: {"hp": 56, "speed": 76, "phy_att": 78, "mag_att": 45, "phy_def": 48, "mag_def": 43},
-}
 
 
 def _mutation_inventory(connection, player_id: int, item_id: int):
@@ -3966,7 +4007,7 @@ def _pet_flush_grow(database_path: Path) -> Response:
         if pet["is_locked"]: return _pet_error(100)
         item = _mutation_inventory(connection, player["id"], 10001)
         if item is None or item["quantity"] <= 0: return _pet_error(400)
-        stats = LOCAL_PET_BASE_STATS.get(pet["pet_id"], LOCAL_PET_BASE_STATS[1001])
+        stats = _pet_base_stats(pet["pet_id"])
         values = [int(pet[k]) for k in ("gw_hp", "gw_speed", "gw_phy_att", "gw_mag_att", "gw_phy_def", "gw_mag_def")]
         total = sum(values)
         if total == 0: values[0] = 1; total = 1
@@ -4077,7 +4118,7 @@ def _pet_divide_pro(database_path: Path) -> Response:
             if vals[source] <= 0: return _pet_error(523)
             amount = min(vals[source], 1000); vals[source] -= amount; vals[dest] += amount
             c.execute("UPDATE pets SET " + ",".join(x+"=?" for x in cols) + " WHERE id=?", (*vals, idx)); _consume_mutation_item(c, item)
-            return _protocol_response(114, {"id": pet["pet_id"], "add_type": names[dest], "diff_type": names[source], "value": amount})
+            return _protocol_response(114, {"id": pet["pet_id"], "icon": pet["icon"], "name": pet["name"], "add_type": names[dest], "diff_type": names[source], "value": amount})
         payload = {"id": pet["pet_id"], "hp_tp": vals[0], "speed_tp": vals[1], "phy_att_tp": vals[2], "mag_att_tp": vals[3], "phy_def_tp": vals[4], "mag_def_tp": vals[5], "value": 0}
     return _protocol_response(114, payload)
 
