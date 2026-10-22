@@ -2706,6 +2706,42 @@ def test_explore_map_list_pages_within_the_world_in_gid(tmp_path: Path):
     assert far["list"] == []
 
 
+def test_caught_pets_roll_element_growth_skills_and_traits(tmp_path: Path):
+    # `pro` is the ELEMENT (ui.txt 29 原 / 33 火 / 31 草 / 32 水 / 34 土), not a
+    # quality tier, and the catch used to INSERT a literal 1 — so every catch was
+    # 火 with identical growth, born skills and no traits.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "CatchOne")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET ht_ap = 60, max_ht_ap = 60")
+        connection.execute("UPDATE players SET pet_capacity = 30")
+        connection.commit()
+
+    elements, growths, skillsets, traits = set(), set(), set(), set()
+    for _ in range(8):
+        command, payload = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": "1"})
+        )
+        assert command == 7
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                "SELECT pro, skills, buffs, gw_hp, gw_speed, gw_phy_att, gw_mag_att,"
+                " gw_phy_def, gw_mag_def FROM pets WHERE id = ?",
+                (payload["index"],),
+            ).fetchone()
+        assert 0 <= row[0] <= 4, "element must stay inside the ui.txt 29-34 band"
+        assert row[1], "born skills must never be empty"
+        assert row[2], "traits must be seeded or item 10034 stays unusable"
+        elements.add(row[0])
+        growths.add(tuple(row[3:]))
+        skillsets.add(row[1])
+        traits.add(row[2])
+
+    assert len(elements) > 1, "every catch is still the same element"
+    assert len(growths) > 1, "growth values are not rolling"
+
+
 def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
     # The replay used to hold one step per monster with cur_hp already 0 and no
     # `skill`, so the client (which only plays the script back) drew a one-shot
@@ -3261,7 +3297,12 @@ def test_pet_release_deletes_but_refuses_locked_pets(tmp_path: Path):
 
     assert _envelope(locked) == (55, {"value": "true"})
     assert refused.get_data(as_text=True) == "-1:524"
-    assert _envelope(released) == (15, {"value": "ok"})
+    # 15 also reports the recycle payout: pet.txt `recyclePoint` is "goodsId:num"
+    # and PetInfoUI.as:278-285 draws the refund line from these two fields.
+    command, released_payload = _envelope(released)
+    assert command == 15
+    assert released_payload["value"] == "ok"
+    assert "free_goods_id" in released_payload and "free_goods_num" in released_payload
     assert listed["pet_num"] == 1
     assert [pet["id"] for pet in listed["pets"]] == [2019]
 

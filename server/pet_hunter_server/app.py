@@ -2137,6 +2137,69 @@ def _catchable_pet(hid: int, ttype: int) -> tuple[int, dict] | None:
     return None
 
 
+def _pet_grows_range(pet_id: int) -> tuple[int, int]:
+    """pet.txt `grows` is a `lo:hi` roll range for the six growth values.
+
+    Low-star species use "0:30", but high stars use e.g. "40:120", so callers must
+    NOT assume lo == 0 (doing so graded every high-star pet as "中" or better).
+    """
+    record = config_tables.pet_record(pet_id) or {}
+    parts = [part.strip() for part in str(record.get("grows", "") or "").split(":")]
+    if len(parts) == 2 and all(part.lstrip("-").isdigit() for part in parts):
+        lo, hi = int(parts[0]), int(parts[1])
+        return (lo, hi) if hi > lo else (lo, max(lo, hi))
+    return 0, 0
+
+
+def _gw_rate(total: int, lo: int, hi: int) -> int:
+    """1..5 -> ui.txt 51-55 (渣/低/中/高/超), normalised against the pet's range."""
+    span = 6 * (hi - lo)
+    if span <= 0:
+        return 1
+    return max(1, min(5, math.ceil((total - 6 * lo) / span * 5)))
+
+
+def _buffs_for_pet(pet_id: int, generation: int = 1) -> str:
+    """Pick traits from pet.txt `buffSkills`.
+
+    help.txt id 10 caps the trait count at floor(sqrt(世代)) + 1, so a first
+    generation pet carries two of them. Without this `pets.buffs` stayed empty and
+    the 遗忘卡牌 item (10034) always answered error 522.
+    """
+    record = config_tables.pet_record(pet_id) or {}
+    tokens = [token for token in str(record.get("buffSkills", "") or "").split(":") if token.isdigit()]
+    cap = min(30, math.isqrt(max(1, int(generation or 1))) + 1)
+    return ":".join(tokens[:cap])
+
+
+def _pet_energy(pet_id: int) -> int:
+    record = config_tables.pet_record(pet_id) or {}
+    raw = str(record.get("energy", "") or "").strip()
+    return int(raw) if raw.isdigit() else 0
+
+
+def _roll_pet_traits(pet_id: int, generation: int = 1) -> dict[str, object]:
+    """LOCAL DEFAULT individual variation for a freshly caught creature.
+
+    pet.txt fixes the species (six stats, star, skill pool, trait pool) and `grows`
+    is the growth roll range, so what legitimately differs between two individuals
+    is rolled here. The old INSERT wrote `pro` as a literal 1, and `pro` is the
+    ELEMENT (ui.txt 29 原 / 33 火 / 31 草 / 32 水 / 34 土), which is why every
+    catch showed up as 火 with identical growth, skills and no traits.
+    """
+    record = config_tables.pet_record(pet_id) or {}
+    lo, hi = _pet_grows_range(pet_id)
+    growth = [random.randint(lo, hi) for _ in range(6)] if hi > 0 else [0] * 6
+    pool = [token for token in str(record.get("skills", "") or "").split(":") if token.isdigit()]
+    if pool:
+        keep = min(len(pool), random.randint(2, 4))
+        born = ":".join(pool[i] for i in sorted(random.sample(range(len(pool)), keep)))
+    else:
+        born = "101:5101"
+    return {"pro": random.randint(0, 4), "gw": growth, "skills": born,
+            "buffs": _buffs_for_pet(pet_id, generation)}
+
+
 def _hunter_catch(database_path: Path) -> Response:
     """7 (CATCH_KEY) — catch a pet.
 
@@ -2169,13 +2232,19 @@ def _hunter_catch(database_path: Path) -> Response:
         star=str(record.get("star","1") or 1).strip()
         skills=str(record.get("skills","") or "").strip()
         nature_ids=sorted(config_tables._table("nature.txt").keys()) or [1]
+        rolled=_roll_pet_traits(pet_id, 1)
         cursor=c.execute(
-            """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation, nature)
-               VALUES (?,?,?,?,1,?,?,1,?)""",
+            """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation,
+                                 nature, buffs,
+                                 gw_hp, gw_speed, gw_phy_att, gw_mag_att, gw_phy_def, gw_mag_def)
+               VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)""",
             (p["id"],pet_id,level,int(star) if star.isdigit() else 1,
+             rolled["pro"],
              int(icon) if icon.isdigit() else pet_id,
-             skills or "101:5101",
-             random.choice(nature_ids)),
+             rolled["skills"],
+             random.choice(nature_ids),
+             rolled["buffs"],
+             *rolled["gw"]),
         )
         index=cursor.lastrowid
         # Catching registers the creature in the picture book, which is what the
@@ -2390,9 +2459,12 @@ def _explore_start(database_path: Path) -> Response:
         _credit_battle_rewards(c, p["id"], point=reward_point, crystal=reward_crystal)
         # Expedition battles train the squad too, so exploring is a viable way to
         # level pets for evolution (LOCAL DEFAULT exp amount).
-        explore_pets=[r[0] for r in c.execute(
-            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+        explore_rows=[r for r in c.execute(
+            "SELECT id, pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
             (p["id"],))]
+        explore_pets=[r["id"] for r in explore_rows]
+        # _pet_energy takes the pet.txt SPECIES id, not the pets.id row id.
+        lead_species=int(explore_rows[0]["pet_id"]) if explore_rows else 0
         _grant_pet_exp(c,explore_pets,LOCAL_EXPLORE_EXP)
     horse=_explore_horse(database_path, p["id"])
     att_list, def_list, record=_fight_payload(
@@ -2408,7 +2480,7 @@ def _explore_start(database_path: Path) -> Response:
         "is_finish":1,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
         "now_discover_rate":0,"add_discover_rate":0,
         "need_discover_rate":m["need_discover_rate"],
-        "energy":0,"cost_energy":0,"add_energy":0,
+        "energy":_pet_energy(lead_species),"cost_energy":0,"add_energy":0,
         "supply":0,"cost_supply":0,"add_supply":0,
         "discover_days":1,"add_discover_days":0,
         # ExploreUI.as:167-168 does getDefinition("map_terrain_" + terrain) with no
@@ -2582,7 +2654,7 @@ def _pet_name(pet_id: int, fallback: object = None) -> str:
 def _pet_list_entry(row: sqlite3.Row) -> dict[str, object]:
     return {"index": row["index"], "id": row["id"], "icon": row["icon"],
             "name": _pet_name(row["id"], row["name"]), "lv": row["lv"],
-            "num": 0, "energy": 0}
+            "num": 0, "energy": _pet_energy(row["id"])}
 
 
 def _training_list(database_path: Path) -> Response:
@@ -2605,7 +2677,7 @@ def _training_detail(database_path: Path) -> Response:
         if player is None: return _pet_error(103)
         if row is None: return _pet_error(506)
         total=sum(row[k] for k in ("pro_hp","pro_speed","pro_phy_att","pro_mag_att","pro_phy_def","pro_mag_def"))
-        payload={"index":idx,"id":row["pet_id"],"icon":row["icon"],"total_tp":total,"energy":0,"hp_tp":row["pro_hp"],"speed_tp":row["pro_speed"],"phy_att_tp":row["pro_phy_att"],"mag_att_tp":row["pro_mag_att"],"phy_def_tp":row["pro_phy_def"],"mag_def_tp":row["pro_mag_def"]}
+        payload={"index":idx,"id":row["pet_id"],"icon":row["icon"],"total_tp":total,"energy":_pet_energy(row["pet_id"]),"hp_tp":row["pro_hp"],"speed_tp":row["pro_speed"],"phy_att_tp":row["pro_phy_att"],"mag_att_tp":row["pro_mag_att"],"phy_def_tp":row["pro_phy_def"],"mag_def_tp":row["pro_mag_def"]}
     return _protocol_response(9,payload)
 
 
@@ -4123,12 +4195,19 @@ def _pet_flush_nature(database_path: Path) -> Response:
 
 
 def _skill_rows(skill_text: str):
+    """skill.txt carries a real `damageType` column (1 physical, 2 magical).
+
+    The previous `startswith("51")` guess labelled 5002 斗气 / 5201 毒雾 / 5202 /
+    5004 as physical, so the stat panel and the forget-skill tip showed the wrong
+    school for several pets in the live save.
+    """
+    table = config_tables._table("skill.txt")
     result = []
     for token in (skill_text or "").split(":"):
         if not token.isdigit(): continue
         sid = int(token)
-        dm_type = 2 if str(sid).startswith("51") else 1
-        result.append({"id": sid, "dm_type": dm_type})
+        raw = str(table.get(sid, {}).get("damageType", "")).strip()
+        result.append({"id": sid, "dm_type": int(raw) if raw in ("1", "2") else 1})
     return result
 
 
@@ -4269,12 +4348,25 @@ def _pet_release(database_path: Path) -> Response:
             return _pet_error(524)
         if row["battle_state"]:
             return _pet_error(517)
+        # pet.txt `recyclePoint` is "goodsId:num" per species (2019 -> 11100:8).
+        # PetInfoUI.as:278-285 reads free_goods_id/free_goods_num to draw the
+        # refund line; without it releasing destroyed the pet for nothing.
+        record = config_tables.pet_record(row["pet_id"]) or {}
+        free_goods_id = free_goods_num = 0
+        raw = str(record.get("recyclePoint", "") or "").strip()
+        if ":" in raw:
+            gid_raw, num_raw = (part.strip() for part in raw.split(":", 1))
+            if gid_raw.isdigit() and num_raw.isdigit():
+                free_goods_id, free_goods_num = int(gid_raw), int(num_raw)
+        if free_goods_id and free_goods_num:
+            _grant_goods(connection, player["id"], ((free_goods_id, free_goods_num),))
         connection.execute(
             "DELETE FROM pets WHERE id = ? AND player_id = ?",
             (pet_index, player["id"]),
         )
-    # No free_goods_id: the client goes straight back and the list re-requests.
-    return _protocol_response(15, {"value": "ok"})
+    return _protocol_response(15, {"value": "ok",
+                                   "free_goods_id": free_goods_id,
+                                   "free_goods_num": free_goods_num})
 
 
 def _pet_evolve(database_path: Path) -> Response:
@@ -4341,14 +4433,20 @@ def _pet_synthesis_pick(database_path: Path, command_id: int) -> Response:
         player = connection.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
-        # LOCKED pets cannot be consumed or used as material.
+        # LOCKED pets cannot be consumed or used as material, and the vice-pet
+        # picker (63) must not offer the main pet the player just chose — the
+        # client sends it as `main`, and picking it made 65 fail with -1:100.
+        try:
+            main_filter = int(_request_value("main", "0") or 0)
+        except ValueError:
+            main_filter = 0
         rows = connection.execute(
             """
             SELECT id AS "index", pet_id AS id, icon, name, lv FROM pets
-            WHERE player_id=? AND battle_state=0 AND is_locked=0
+            WHERE player_id=? AND battle_state=0 AND is_locked=0 AND id <> ?
             ORDER BY id LIMIT ? OFFSET ?
             """,
-            (player["id"], page_size, (page - 1) * page_size),
+            (player["id"], main_filter, page_size, (page - 1) * page_size),
         ).fetchall()
     return _protocol_response(
         command_id,
