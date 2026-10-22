@@ -606,6 +606,18 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # Weekly arena star prize (commands 82/83). The key is the ISO week so the
+        # reward re-arms every week, matching the "每周3、6刷新" note on the rank page.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS arena_star_claimed (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                week_key TEXT NOT NULL,
+                claimed_at TEXT,
+                PRIMARY KEY (player_id, week_key)
+            )
+            """
+        )
         connection.execute("DELETE FROM tasks")
         for task in LOCAL_TASKS:
             connection.execute(
@@ -3084,6 +3096,119 @@ def _picstep_reward(database_path: Path) -> Response:
     return _protocol_response(49, payload)
 
 
+LOCAL_RAGE_REWARD = 50
+
+
+def _rage_reward(database_path: Path) -> Response:
+    """97 (RAGE_REWARD_KEY) — open the rage chest on a result screen.
+
+    FightResultItem.as:903 and DevelopResultUI.as:338-352 hand the whole response
+    to GameUtil.getBox, which switches on `box_type` (1 pic, 2 pet, 3 silver,
+    4 crystal) and returns null when the matching amount is zero; the caller then
+    calls TipItem.show() with that null. So the payout must be non-zero.
+
+    LOCAL DEFAULT: the original rage/consume formula is not recoverable, so each
+    chest pays a flat silver amount.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        _credit_battle_rewards(c, player["id"], point=LOCAL_RAGE_REWARD, crystal=0)
+    return _protocol_response(97, {
+        "box_type": 3,
+        "id": 0,
+        "num": 0,
+        "point": LOCAL_RAGE_REWARD,
+        "crystal": 0,
+        "pic": [],
+        "value": "ok",
+    })
+
+
+# LOCAL DEFAULT: the arena star prize is one picture-book entry plus silver, paid
+# once per calendar week (the rank page's own note says the board resets weekly).
+LOCAL_ARENA_STAR_PIC = 1001
+LOCAL_ARENA_STAR_POINT = 500
+
+
+def _arena_week_key() -> str:
+    """ISO year+week, e.g. "2026-W42", so the star prize re-arms each week."""
+    now = time.localtime()
+    return f"{now.tm_year}-W{time.strftime('%W', now)}"
+
+
+def _arena_star_state(connection, player_id: int) -> tuple[str, bool]:
+    key = _arena_week_key()
+    claimed = connection.execute(
+        "SELECT 1 FROM arena_star_claimed WHERE player_id=? AND week_key=?",
+        (player_id, key),
+    ).fetchone()
+    return key, claimed is not None
+
+
+def _arena_star_info(database_path: Path) -> Response:
+    """82 (ARENA_STAR_CONFIRM_KEY) — the star prize page behind the rank chest.
+
+    RingTopStarUI.as:178-193 reads id/name/is_reward/img with no null guard and
+    feeds `img` straight into a Player paper doll.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,nick,sex FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        worn = _worn_equipment(c, player["id"])
+        _key, claimed = _arena_star_state(c, player["id"])
+    return _protocol_response(82, {
+        "id": 1,
+        "name": player["nick"] or "猎人",
+        "is_reward": 0 if claimed else 1,
+        "img": _role_skin_string(worn, player["sex"]),
+        "value": "ok",
+    })
+
+
+def _arena_star_reward(database_path: Path) -> Response:
+    """83 (ARENA_STAR_REWARD_KEY) — claim the weekly star prize.
+
+    RingTopStarUI.as:195-232 renders top_star_name plus one icon looked up through
+    pic.txt (`reward_goods_id` must therefore be a real pic id) and then hands
+    `pic` to GameUtil.getPic.
+    """
+    uid = _request_value("uid")
+    pics = config_tables._table("pic.txt")
+    if LOCAL_ARENA_STAR_PIC not in pics:
+        return _pet_error(504)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,nick FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        key, claimed = _arena_star_state(c, player["id"])
+        if claimed:
+            return _pet_error(504)
+        _credit_battle_rewards(c, player["id"], point=LOCAL_ARENA_STAR_POINT, crystal=0)
+        _unlock_pic(c, player["id"], [LOCAL_ARENA_STAR_PIC])
+        c.execute(
+            "INSERT OR REPLACE INTO arena_star_claimed (player_id, week_key, claimed_at) VALUES (?,?,?)",
+            (player["id"], key, time.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+    record = pics[LOCAL_ARENA_STAR_PIC]
+    return _protocol_response(83, {
+        "top_star_name": player["nick"] or "猎人",
+        "reward_goods_id": LOCAL_ARENA_STAR_PIC,
+        "reward_goods_num": 1,
+        "reward_point": LOCAL_ARENA_STAR_POINT,
+        "pic": [{
+            "id": LOCAL_ARENA_STAR_PIC,
+            "icon": int(str(record.get("iconId", "") or LOCAL_ARENA_STAR_PIC).strip() or LOCAL_ARENA_STAR_PIC),
+            "reward_point": 0, "reward_crystal": 0, "reward_goods": [],
+        }],
+        "value": "ok",
+    })
+
+
 def _forge_refine(database_path: Path) -> Response:
     try: idx=int(_request_value("index",""))
     except ValueError: return _pet_error(100)
@@ -4140,6 +4265,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _explore_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "49":
             return _picstep_reward(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "82":
+            return _arena_star_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "83":
+            return _arena_star_reward(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "97":
+            return _rage_reward(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "506":
             return _arena_fighter(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "507":

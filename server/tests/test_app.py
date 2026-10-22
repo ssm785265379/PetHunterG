@@ -1714,6 +1714,63 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     assert row[1] > 0
 
 
+def test_arena_star_prize_is_claimable_once_per_week(tmp_path: Path):
+    # RingTopStarUI.as:178-193 reads id/name/is_reward/img for the page and
+    # :195-232 renders the prize through pic.txt, so reward_goods_id has to be a
+    # real pic id even though the payout itself is silver + a picture-book entry.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "StarOne")
+    pics = config_tables._table("pic.txt")
+    skin = config_tables.skin_table()
+
+    command, info = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "82", "uid": uid})
+    )
+    assert command == 82
+    assert info["is_reward"] == 1, "a fresh player has the prize available"
+    assert info["name"]
+    ids = [int(part) for part in str(info["img"]).split("_") if part.isdigit()]
+    assert ids and all(layer in skin for layer in ids), "img must render as a paper doll"
+
+    command, prize = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "83", "uid": uid})
+    )
+    assert command == 83
+    assert prize["reward_goods_id"] in pics
+    assert prize["top_star_name"]
+
+    # Second claim this week is refused, and the page reflects it.
+    again = client.post("/flash.do", data={"m": "show", "showId": "83", "uid": uid})
+    assert again.get_data(as_text=True) == "-1:504"
+    _, info = _envelope(client.post("/flash.do", data={"m": "show", "showId": "82", "uid": uid}))
+    assert info["is_reward"] == 0
+
+
+def test_rage_chest_always_returns_a_renderable_box(tmp_path: Path):
+    # GameUtil.getBox returns null when the matching amount is zero and the caller
+    # then calls TipItem.show(null), so 97 has to pay something.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RageOne")
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+    command, box = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "97", "uid": uid})
+    )
+    assert command == 97
+    assert box["box_type"] in (1, 2, 3, 4)
+    paid = box["point"] if box["box_type"] == 3 else box["crystal"] if box["box_type"] == 4 else box["num"]
+    assert paid > 0, "an empty box renders as null"
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+    assert after > before
+
+
 def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
     # picStep.txt lists milestones (value = how many picture-book entries are
     # needed). IllustrationTaskUI reads own_num/need_num from 48 and claims with
