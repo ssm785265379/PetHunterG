@@ -98,12 +98,26 @@ LOCAL_PROP_CATALOG = {
 # 4 = 神秘商店. `price_type` 1 = money, 2 = point, 3 = crystal, 4 = goods trade.
 # Only props whose effect USE_GOODS implements are stocked (see LOCAL_PROP_CATALOG).
 LOCAL_SHOP_GOODS = (
+    # 金币商店 (price_type 1 = money)
     {"item_id": 10007, "team": 1, "shop_type": 1, "price_type": 1, "price": 80, "icon": 10007, "sort": 1},
-    {"item_id": 10002, "team": 1, "shop_type": 1, "price_type": 1, "price": 360, "icon": 10002, "sort": 2},
+    {"item_id": 10001, "team": 1, "shop_type": 1, "price_type": 1, "price": 90, "icon": 10001, "sort": 2},
     {"item_id": 10014, "team": 1, "shop_type": 1, "price_type": 1, "price": 200, "icon": 10014, "sort": 3},
-    # 一袋银币 is normally loot, not shop stock; price 500 point is a local default.
-    {"item_id": 10022, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10022, "sort": 1},
+    {"item_id": 10002, "team": 1, "shop_type": 1, "price_type": 1, "price": 360, "icon": 10002, "sort": 4},
+    {"item_id": 10009, "team": 1, "shop_type": 1, "price_type": 1, "price": 460, "icon": 10009, "sort": 5},
+    {"item_id": 10505, "team": 1, "shop_type": 1, "price_type": 1, "price": 200, "icon": 10505, "sort": 6},
+    {"item_id": 10028, "team": 1, "shop_type": 1, "price_type": 1, "price": 1800, "icon": 10028, "sort": 7},
+    # 银币商店 (price_type 2 = point)
+    {"item_id": 10011, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10011, "sort": 1},
+    {"item_id": 10022, "team": 1, "shop_type": 2, "price_type": 2, "price": 500, "icon": 10022, "sort": 2},
+    {"item_id": 10015, "team": 1, "shop_type": 2, "price_type": 2, "price": 5000, "icon": 10015, "sort": 3},
+    {"item_id": 10023, "team": 1, "shop_type": 2, "price_type": 2, "price": 160000, "icon": 10023, "sort": 4},
 )
+# LOCAL DEFAULT 神秘商店: three random props a day, prices rolled inside a band
+# around the prop's own reference price. The rotation is keyed on the local date so
+# restarts within one day keep the same offer.
+LOCAL_MYSTERY_SHOP_SLOTS = 3
+LOCAL_MYSTERY_PRICE_MIN = 0.6
+LOCAL_MYSTERY_PRICE_MAX = 1.4
 # Local levelling rule for pet exp: the original curve is not recoverable.
 # LOCAL DEFAULT: a flat 1,000,000 exp per level. The bundled exp items carry real
 # per-item values in this range (prop.txt's 宠物经验道具 grants 1,330,000), so the
@@ -191,7 +205,26 @@ def _grant_goods(connection, player_id: int, goods) -> list[dict]:
             def stat(key: str) -> int:
                 raw = str(record.get(key, "") or "").strip()
                 return int(raw) if raw.lstrip("-").isdigit() else 0
-            icon = icon_override or stat("iconId") or gid
+            # Never hand a character the other sex's copy: equip.txt ships one row
+            # per sex and the bag hides (and 37 refuses) the mismatched one, so a
+            # cross-sex drop would be an item the player can see in the reward tip
+            # but never use. Map it to the (name, type) twin instead, and keep the
+            # icon/stat columns consistent with the twin.
+            owner = connection.execute(
+                "SELECT sex FROM players WHERE id = ?", (player_id,)
+            ).fetchone()
+            owner_sex = int(owner["sex"] or 0) if owner else 1
+            item_sex = config_tables.equip_sex(record)
+            if item_sex is not None and int(item_sex) != owner_sex:
+                twin_id = config_tables.equip_same_slot_other_sex(gid)
+                if twin_id is None:
+                    continue
+                gid = twin_id
+                record = equips.get(twin_id, {})
+                record_icon = icon_override or stat("iconId") or gid
+                icon = record_icon
+            else:
+                icon = icon_override or stat("iconId") or gid
             for _ in range(num):
                 # inventory is UNIQUE(player_id, item_id), so a repeat drop has to
                 # stack onto the existing row instead of inserting a second copy
@@ -439,6 +472,13 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
             )
+        if "rage_point" not in player_columns:
+            # FightResultItem.as:211-215 draws this as a 0..100 meter and :169
+            # unlocks 无双一击 at 100, so it has to accumulate between hunts
+            # rather than be a per-fight flag.
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN rage_point INTEGER NOT NULL DEFAULT 0"
+            )
         if "guild_id" not in player_columns:
             # 86/88/91 are real now, so membership has to live somewhere.
             connection.execute("ALTER TABLE players ADD COLUMN guild_id INTEGER")
@@ -543,6 +583,16 @@ def _initialize_database(database_path: Path) -> None:
                 icon INTEGER NOT NULL,
                 sort INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (item_id, team)
+            )
+            """
+        )
+        # 神秘商店 (shop_type 4) rotates daily; this remembers which day the rows
+        # were rolled for, so a restart inside the same day keeps the same offer.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shop_rotation (
+                shop_type INTEGER PRIMARY KEY,
+                day TEXT NOT NULL
             )
             """
         )
@@ -856,10 +906,33 @@ def _insert_starter_pets(connection: sqlite3.Connection, player_id: int) -> int:
     return added
 
 
-def _insert_starter_equipment(connection: sqlite3.Connection, player_id: int) -> int:
-    """Insert the local starter equipment; returns how many rows were added."""
+def _insert_starter_equipment(
+    connection: sqlite3.Connection, player_id: int, sex: int = 1
+) -> int:
+    """Insert the local starter equipment; returns how many rows were added.
+
+    equip.txt keeps one row per sex, so a female character must get the female
+    twin (same name/type, different imageId). Handing everyone the male 20001
+    left female saves with an unwearable, now-hidden row.
+    """
     added = 0
-    for item in LOCAL_STARTER_EQUIPMENT:
+    for configured in LOCAL_STARTER_EQUIPMENT:
+        item = dict(configured)
+        record = config_tables.equip_record(int(item["item_id"]))
+        item_sex = config_tables.equip_sex(record) if record else None
+        if item_sex is not None and int(item_sex) != int(sex):
+            counterpart = config_tables.equip_same_slot_other_sex(int(item["item_id"]))
+            if counterpart is None:
+                continue
+            twin = config_tables.equip_record(counterpart) or {}
+            stats = config_tables.equip_stats(twin)
+            item.update(
+                item_id=counterpart,
+                icon=config_tables.equip_icon(twin),
+                item_type=config_tables.equip_slot(twin) or item["item_type"],
+                star=config_tables.equip_star(twin),
+                **stats,
+            )
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO inventory (
@@ -893,9 +966,9 @@ def grant_starter_equipment(database_path: Path) -> int:
     _initialize_database(database_path)
     seeded = 0
     with _connect_database(database_path) as connection:
-        players = connection.execute("SELECT id FROM players ORDER BY id").fetchall()
+        players = connection.execute("SELECT id, sex FROM players ORDER BY id").fetchall()
         for player in players:
-            if _insert_starter_equipment(connection, player["id"]):
+            if _insert_starter_equipment(connection, player["id"], int(player["sex"] or 0)):
                 seeded += 1
     return seeded
 
@@ -964,7 +1037,7 @@ def _register_account_player(database_path: Path) -> Response:
                 (uid, nick, sex, skin, account["id"]),
             )
             _insert_starter_pets(connection, cursor.lastrowid)
-            _insert_starter_equipment(connection, cursor.lastrowid)
+            _insert_starter_equipment(connection, cursor.lastrowid, sex)
             player = {"uid": uid}
     return _protocol_response(4098, {"value": player["uid"]})
 
@@ -992,7 +1065,7 @@ def _auto_register_player(database_path: Path) -> Response:
                 (uid, nick, sex, skin),
             )
             _insert_starter_pets(connection, cursor.lastrowid)
-            _insert_starter_equipment(connection, cursor.lastrowid)
+            _insert_starter_equipment(connection, cursor.lastrowid, sex)
             player = {"uid": uid}
     return _protocol_response(4099, {"value": player["uid"]})
 
@@ -1165,6 +1238,18 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
     return _protocol_response(command_id, payload)
 
 
+def _equip_matches_sex(item_id: int, sex: int) -> bool:
+    """equip.txt ships every piece twice, one row per sex (sex 0 female, 1 male).
+
+    A row belonging to the other sex must never show up in this character's bag:
+    wearing it stacked a female sprite onto a male paper doll, and the equipment
+    tab simply has no business listing it.
+    """
+    record = config_tables.equip_record(item_id)
+    item_sex = config_tables.equip_sex(record) if record else None
+    return item_sex is None or int(item_sex) == int(sex)
+
+
 def _player_inventory(database_path: Path) -> Response:
     uid = _request_value("uid")
     try:
@@ -1178,23 +1263,40 @@ def _player_inventory(database_path: Path) -> Response:
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
-            "SELECT id, bag_capacity FROM players WHERE uid = ?", (uid,)
+            "SELECT id, bag_capacity, sex FROM players WHERE uid = ?", (uid,)
         ).fetchone()
         if player is None:
             return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
-        rows = connection.execute(
-            """
-            SELECT id AS "index", item_id AS id, team, quantity AS num, icon,
-                   item_type AS type, use_type, level
-            FROM inventory WHERE player_id = ? AND team = ?
-            ORDER BY id LIMIT ? OFFSET ?
-            """,
-            (player["id"], item_type, page_size, (page - 1) * page_size),
-        ).fetchall()
-        count = connection.execute(
-            "SELECT COUNT(*) FROM inventory WHERE player_id = ? AND team = ?",
-            (player["id"], item_type),
-        ).fetchone()[0]
+        sex = int(player["sex"] or 0)
+        if item_type == 3:
+            # Sex filtering has to happen before paging, otherwise page 1 shows
+            # 9 rows, page 2 repeats some of them and the count is wrong.
+            every_row = connection.execute(
+                """
+                SELECT id AS "index", item_id AS id, team, quantity AS num, icon,
+                       item_type AS type, use_type, level
+                FROM inventory WHERE player_id = ? AND team = 3 ORDER BY id
+                """,
+                (player["id"],),
+            ).fetchall()
+            visible = [r for r in every_row if _equip_matches_sex(r["id"], sex)]
+            count = len(visible)
+            start = (page - 1) * page_size
+            rows = visible[start:start + page_size]
+        else:
+            rows = connection.execute(
+                """
+                SELECT id AS "index", item_id AS id, team, quantity AS num, icon,
+                       item_type AS type, use_type, level
+                FROM inventory WHERE player_id = ? AND team = ?
+                ORDER BY id LIMIT ? OFFSET ?
+                """,
+                (player["id"], item_type, page_size, (page - 1) * page_size),
+            ).fetchall()
+            count = connection.execute(
+                "SELECT COUNT(*) FROM inventory WHERE player_id = ? AND team = ?",
+                (player["id"], item_type),
+            ).fetchone()[0]
 
     goods = []
     for row in rows:
@@ -1283,6 +1385,60 @@ def _player_equipment_detail(database_path: Path) -> Response:
 _SHOP_PRICE_COLUMN = {1: "money", 2: "point", 3: "crystal"}
 
 
+def _refresh_mystery_shop(connection: sqlite3.Connection) -> None:
+    """LOCAL DEFAULT 神秘商店: three random usable props per local day.
+
+    Seeded from the date, so every restart inside one day keeps the same offer,
+    and the picks are written into `shop_goods` so commands 28/29 need no special
+    case. Prices roll inside a band around the prop's own reference price
+    (prop.txt `money` first, then `point`).
+    """
+    today = time.strftime("%Y-%m-%d")
+    current = connection.execute(
+        "SELECT day FROM shop_rotation WHERE shop_type = 4"
+    ).fetchone()
+    if current is not None and current["day"] == today:
+        return
+
+    def price_of(record: dict[str, str], key: str) -> int:
+        raw = str(record.get(key, "") or "").strip()
+        return int(raw) if raw.lstrip("-").isdigit() else 0
+
+    pool: list[tuple[int, dict[str, str]]] = []
+    for item_id, record in config_tables.prop_table().items():
+        kind = price_of(record, "type")
+        # Only props whose effect USE_GOODS can actually apply, and only ones with
+        # a non-zero effect amount (value 0 props are the dedicated-command pets).
+        if kind == 0 or price_of(record, "value") <= 0:
+            continue
+        if str(record.get("team", "")).strip() not in ("1", "2"):
+            continue
+        pool.append((item_id, record))
+    if not pool:
+        return
+
+    rng = random.Random(f"mystery-{today}")
+    picks = rng.sample(pool, min(LOCAL_MYSTERY_SHOP_SLOTS, len(pool)))
+    connection.execute("DELETE FROM shop_goods WHERE shop_type = 4")
+    for sort, (item_id, record) in enumerate(picks, start=1):
+        money, point = price_of(record, "money"), price_of(record, "point")
+        base = money or point or 200
+        price = max(1, round(base * rng.uniform(LOCAL_MYSTERY_PRICE_MIN,
+                                                LOCAL_MYSTERY_PRICE_MAX)))
+        price_type = 1 if money else 2
+        connection.execute(
+            "INSERT OR REPLACE INTO shop_goods"
+            " (item_id, team, shop_type, price_type, price, icon, sort)"
+            " VALUES (?, 1, 4, ?, ?, ?, ?)",
+            (item_id, price_type, price, price_of(record, "iconId") or item_id, sort),
+        )
+    connection.execute(
+        "INSERT INTO shop_rotation (shop_type, day) VALUES (4, ?)"
+        " ON CONFLICT(shop_type) DO UPDATE SET day = excluded.day",
+        (today,),
+    )
+
+
 def _shop_list(database_path: Path) -> Response:
     uid = _request_value("uid")
     try:
@@ -1300,6 +1456,8 @@ def _shop_list(database_path: Path) -> Response:
         ).fetchone()
         if player is None:
             return _pet_error(103)
+        if shop_type == 4:
+            _refresh_mystery_shop(connection)
         rows = connection.execute(
             """
             SELECT item_id, team, price_type, price, icon
@@ -2092,6 +2250,14 @@ def _hunter_task(database_path: Path) -> Response:
 LOCAL_HUNT_MONSTER_COUNT = 2
 # LOCAL DEFAULT: how far a map's monsters may stray from its base monster's level.
 LOCAL_HUNT_LEVEL_BAND = 15
+# LOCAL DEFAULT elite encounter: chance, stat multiplier and payout multiplier.
+# "无双一击" (the client's rage button) is gated on clearing one of these.
+# LOCAL DEFAULT: one win fills a quarter of the meter, so 无双 lands every ~4th
+# clear (every ~2nd if it was an elite encounter).
+LOCAL_RAGE_GAIN_PER_WIN = 25
+LOCAL_ELITE_CHANCE = 0.15
+LOCAL_ELITE_SCALE = 1.6
+LOCAL_ELITE_REWARD_MULT = 2
 
 
 def _monster_table() -> dict:
@@ -2169,6 +2335,14 @@ def _monsters_for_map(hid: int) -> list[dict[str, object]]:
             picked.append(monster)
         if len(picked) >= LOCAL_HUNT_MONSTER_COUNT:
             break
+    if picked and random.random() < LOCAL_ELITE_CHANCE:
+        # LOCAL DEFAULT elite encounter: one flagged leader plus the ordinary pair.
+        # Only an elite clear unlocks 无双一击 (rage_point == 100 in the result) and
+        # it pays double exp/silver, so the "无双" button stops appearing on every
+        # single hunt.
+        leader = dict(picked[0])
+        leader["elite"] = True
+        return [leader] + picked
     return picked
 
 
@@ -2277,6 +2451,10 @@ def _battle_side(
     def_list = []
     for i, d in enumerate(defenders):
         mon_hp, mon_att, mon_def = _monster_stats(int(d["lv"] or 1))
+        if d.get("elite"):
+            mon_hp = round(mon_hp * LOCAL_ELITE_SCALE)
+            mon_att = round(mon_att * LOCAL_ELITE_SCALE)
+            mon_def = round(mon_def * LOCAL_ELITE_SCALE)
         combat["def"][i] = {"hp": mon_hp, "att": mon_att, "def": mon_def, "speed": 0}
         def_list.append({"team": 2, "code": i, "is_pet": 0, "id": d["id"],
                          "name": d["name"], "lv": d["lv"], "hp": mon_hp, "img": d["icon"]})
@@ -2420,7 +2598,7 @@ def _hunter_fight(database_path: Path) -> Response:
     monsters=_monsters_for_map(hid)
     if not monsters: return _pet_error(400)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,nick,lv,sex,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,nick,lv,sex,ht_ap,max_ht_ap,rage_point FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
@@ -2446,8 +2624,12 @@ def _hunter_fight(database_path: Path) -> Response:
             int(m.get("exp") or 0) or LOCAL_HUNT_EXP_PER_LEVEL * int(m["lv"])
             for m in monsters
         )
+        elite_fight=any(m.get("elite") for m in monsters)
+        if elite_fight:
+            base_exp *= LOCAL_ELITE_REWARD_MULT
         exp_reward=base_exp if is_win else base_exp // 10
         point_reward=(LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
+                      * (LOCAL_ELITE_REWARD_MULT if elite_fight else 1)
                       if is_win else 0)
         _credit_battle_rewards(c,p["id"],point=point_reward,crystal=0)
         # The pets that actually fought gain the battle exp, so levelling (and the
@@ -2455,15 +2637,28 @@ def _hunter_fight(database_path: Path) -> Response:
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
         if is_win:
             _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
+        # FightResultItem.as:211-215 feeds `rage_point` into PercentUItem and :169
+        # gates the 无双一击 button on ==100, so one value drives both the bar and
+        # the button. It therefore accumulates across hunts: each win adds a
+        # chunk, 100 triggers 无双 and spends the meter. Hardcoding it to 100 made
+        # 无双 fire on every single hunt; hardcoding it to 0 (elite-only) put the
+        # progress bar back at zero, which was the earlier complaint.
+        rage_gain = LOCAL_RAGE_GAIN_PER_WIN * (2 if elite_fight else 1) if is_win else 0
+        stored_rage = int(p["rage_point"] or 0) if "rage_point" in p.keys() else 0
+        rage_after = min(100, stored_rage + rage_gain) if is_win else stored_rage
+        if rage_after >= 100:
+            # Spend the meter: this fight is the 无双 one, the next starts empty.
+            c.execute("UPDATE players SET rage_point = 0 WHERE id = ?", (p["id"],))
+        elif rage_gain:
+            c.execute("UPDATE players SET rage_point = ? WHERE id = ?", (rage_after, p["id"]))
 
     pic=_pic_entries(monsters) if is_win else []
     return _protocol_response(6,{
         "is_win":1 if is_win else 0,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
         "ht_ap":ap,"max_ht_ap":p["max_ht_ap"],"ap_goods_index":0,
-        # FightResultItem.as:211-215 feeds this straight into PercentUItem and
-        # :169 gates the "无与伦比/再战" button on ==100, so a win must report 100.
-        "rage_point":100 if is_win else 0,"finish_rate":100 if is_win else 0,"pic":pic,
+        "rage_point":rage_after,
+        "finish_rate":100 if is_win else 0,"pic":pic,
         "reward_exp":exp_reward,"reward_point":point_reward,"reward_crystal":0,
         "pet_exp":pet_exp,
         "reward_rate":1 if is_win else 0,"reward_goods":[],

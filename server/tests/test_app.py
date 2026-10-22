@@ -766,6 +766,47 @@ def test_grant_starter_equipment_is_idempotent_and_keeps_existing_items(tmp_path
         ).fetchone()[0] == 1
 
 
+def test_shop_stock_is_expanded_and_the_mystery_shop_rotates_daily(tmp_path: Path):
+    """金币/银币商店扩容 + 神秘商店每日随机三件（当天稳定）。"""
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ShopRot")
+
+    def rows(shop_type: int) -> list[dict]:
+        command, payload = _envelope(client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "27", "uid": uid, "ttype": str(shop_type),
+                  "p": "1", "n": "9"},
+        ))
+        assert command == 27
+        return payload["list"]
+
+    gold, silver = rows(1), rows(2)
+    assert len(gold) >= 5, "金币商店 should stock more than the first three props"
+    assert len(silver) >= 3, "银币商店 should stock more than one prop"
+    assert all(row["money"] > 0 for row in gold)
+    assert all(row["point"] > 0 for row in silver)
+
+    first = rows(4)
+    assert len(first) == 3, "神秘商店 stocks three slots"
+    assert all(row["id"] > 0 and (row.get("money") or row.get("point")) for row in first)
+    # Stable inside the same local day (the rotation is seeded on the date).
+    assert [row["id"] for row in rows(4)] == [row["id"] for row in first]
+    # And every slot is actually buyable through command 29.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET money = 10000000, point = 10000000 WHERE uid = ?", (uid,)
+        )
+    for row in first:
+        price_type = int(row["type"])
+        bought = client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "29", "uid": uid, "gid": str(row["id"]),
+                  "count": "1", "ttype": str(price_type), "loc": "1"},
+        )
+        assert bought.get_data(as_text=True) == '29\t{"value":"ok"}'
+
+
 def test_shop_lists_local_stock_per_category(tmp_path: Path):
     client = create_app(
         {"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}
@@ -792,17 +833,18 @@ def test_shop_lists_local_stock_per_category(tmp_path: Path):
     )[1]
 
     assert gold["shop_type"] == 1
-    assert [row["id"] for row in gold["list"]] == [10007, 10002, 10014]
+    # Expanded stock: the old three are still first, more props follow.
+    assert [row["id"] for row in gold["list"]][:3] == [10007, 10001, 10014]
+    assert len(gold["list"]) >= 5
     assert all(row["team"] == 1 and row["type"] == 1 for row in gold["list"])
-    assert [row["money"] for row in gold["list"]] == [80, 360, 200]
+    assert gold["list"][0]["money"] == 80
     # ShopListUI hands the row icon to PropItem, which prefixes "p" itself.
     assert gold["list"][0]["icon"] == 10007
     assert silver["shop_type"] == 2
-    assert [(row["id"], row["type"], row["point"]) for row in silver["list"]] == [
-        (10022, 2, 500)
-    ]
+    assert len(silver["list"]) >= 3
+    assert all(row["type"] == 2 and row["point"] > 0 for row in silver["list"])
     assert mystery["shop_type"] == 4
-    assert mystery["list"] == []
+    assert len(mystery["list"]) == 3, "神秘商店 stocks three daily slots"
 
 
 def test_shop_detail_returns_goods_and_own_currency(tmp_path: Path):
@@ -2649,7 +2691,10 @@ def test_hunt_win_pays_full_and_a_lost_dungeon_pays_nothing(tmp_path: Path):
     ))[1]
     assert hunt["is_win"] == 1
     assert hunt["reward_point"] > 0 and hunt["reward_exp"] > 0
-    assert hunt["rage_point"] == 100 and hunt["finish_rate"] == 100
+    # rage_point only reaches 100 on an elite clear now, so the bar is not pinned
+    # to 100 here — test_hunt_result_fills_the_rage_bar owns that rule.
+    assert isinstance(hunt["rage_point"], int) and 0 <= hunt["rage_point"] <= 100
+    assert hunt["finish_rate"] == 100
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT point FROM players WHERE uid = ?", (uid,)
@@ -2993,27 +3038,58 @@ def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
     high_hp = _hunter_combat_stats({"lv": 50}, {})[0]
     assert high_hp > low_hp == ROLE_BASE_STATS["hp"]
 
-    # The settlement bar is still driven by rage_point (D-10).
-    assert payload["rage_point"] == 100
+    # The settlement bar is still driven by rage_point (D-10); elite clears are
+    # covered separately, so a normal hunt may legitimately report 0.
+    assert isinstance(payload["rage_point"], int) and 0 <= payload["rage_point"] <= 100
 
 
-def test_hunt_result_fills_the_rage_bar(tmp_path: Path):
-    # FightResultItem.as:211-215 feeds param2.rage_point into PercentUItem and
-    # :169 gates the bonus button on ==100, so a win has to report 100 (it was
-    # hardcoded 0, which also left the map progress at 0%).
+def test_hunt_rage_meter_fills_then_triggers_once(tmp_path: Path):
+    # `rage_point` drives BOTH the settlement bar (PercentUItem) and the 无双一击
+    # button (:169 tests ==100), so it is a meter that accumulates across hunts:
+    # hardcoding 100 made 无双 fire every fight, hardcoding 0 left the bar empty.
+    from pet_hunter_server import app as A
+
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "RageBar")
     with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE players SET ht_ap = 5, max_ht_ap = 20 WHERE uid = ?", (uid,))
+        connection.execute("UPDATE players SET ht_ap = 40, max_ht_ap = 40 WHERE uid = ?", (uid,))
         connection.commit()
-    command, payload = _envelope(
-        client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+
+    original = A.LOCAL_ELITE_CHANCE
+    A.LOCAL_ELITE_CHANCE = 0.0        # normal encounters only: one chunk per win
+    try:
+        reports = []
+        for _ in range(6):
+            _, payload = _envelope(
+                client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+            )
+            assert payload["is_win"] == 1
+            reports.append(payload["rage_point"])
+    finally:
+        A.LOCAL_ELITE_CHANCE = original
+
+    assert all(0 <= value <= 100 for value in reports), reports
+    assert reports.count(100) == 1, f"无双 must trigger once per filled meter: {reports}"
+    assert reports[0] < 100, "the first win cannot already be 无双"
+    # The win right after the 无双 one starts the meter over from a single chunk.
+    spent = reports.index(100) + 1
+    assert spent >= len(reports) or reports[spent] == A.LOCAL_RAGE_GAIN_PER_WIN, reports
+
+    # An elite clear fills twice as fast.
+    A.LOCAL_ELITE_CHANCE = 1.0
+    try:
+        _, elite = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+        )
+    finally:
+        A.LOCAL_ELITE_CHANCE = original
+    assert len(elite["def_list"]) >= 3, "an elite encounter fields leader + pair"
+    # The meter stood at one chunk after the last normal win; an elite clear adds
+    # two, so the result is either that value or 100 when it tips over.
+    assert elite["rage_point"] in (
+        0, 100, A.LOCAL_RAGE_GAIN_PER_WIN, A.LOCAL_RAGE_GAIN_PER_WIN * 3,
     )
-    assert command == 6
-    assert payload["is_win"] == 1
-    assert payload["rage_point"] == 100
-    assert payload["finish_rate"] == 100
 
 
 def test_explore_hire_list_only_lists_what_is_rented(tmp_path: Path):
