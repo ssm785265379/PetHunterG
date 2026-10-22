@@ -3609,6 +3609,85 @@ def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
     assert len(set(totals)) > 1, f"total_gw never moved, still rotating: {totals}"
 
 
+def test_guild_lifecycle_create_list_members_rename_quit(tmp_path: Path):
+    # 86 only opens the guild page when `position` is truthy (MainUI.as:212-221),
+    # so a guildless player must answer position 0 rather than an empty guild.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GuildOne")
+
+    command, mine = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "86", "uid": uid})
+    )
+    assert command == 86
+    assert mine["position"] == 0
+
+    # 92 sends no parameters at all, so the server has to name the guild.
+    command, created = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "92", "uid": uid})
+    )
+    assert command == 92
+    assert created["value"] == "ok"
+    guild_id = created["guild_id"]
+
+    _, mine = _envelope(client.post("/flash.do", data={"m": "show", "showId": "86", "uid": uid}))
+    assert mine["position"] == 1, "the creator becomes the leader"
+    assert mine["guild_id"] == guild_id
+    assert mine["mem_num"] == 1
+    assert mine["leader_name"] == "GuildOne"
+
+    # 88 feeds SocietiesTopUI.as:201-218.
+    command, board = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "88", "uid": uid})
+    )
+    assert command == 88
+    row = next(g for g in board["guilds"] if g["id"] == guild_id)
+    for field in ("id", "name", "mem_num", "max_mem_num", "leader_name"):
+        assert field in row
+    assert row["mem_num"] == 1
+
+    # 91 feeds SocietiesListUI.as:180-195.
+    command, members = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "91", "uid": uid, "gid": guild_id})
+    )
+    assert command == 91
+    assert [m["position"] for m in members["list"]] == [1]
+    assert members["list"][0]["name"] == "GuildOne"
+
+    # 89 renames (leader only).
+    command, renamed = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "89", "uid": uid, "pName": "夜行团"})
+    )
+    assert command == 89 and renamed["value"] == "ok"
+    _, mine = _envelope(client.post("/flash.do", data={"m": "show", "showId": "86", "uid": uid}))
+    assert mine["guild_name"] == "夜行团"
+
+    # 90 disbands when the leader is the only member.
+    command, quit_payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "90", "uid": uid})
+    )
+    assert command == 90 and quit_payload["value"] == "ok"
+    _, mine = _envelope(client.post("/flash.do", data={"m": "show", "showId": "86", "uid": uid}))
+    assert mine["position"] == 0
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM guilds").fetchone()[0] == 0
+
+
+def test_guild_list_always_has_something_to_render(tmp_path: Path):
+    # A solo hunter should still see a populated board instead of an empty page.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GuildTwo")
+    command, board = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "88", "uid": uid})
+    )
+    assert command == 88
+    assert len(board["guilds"]) >= 3
+    for guild in board["guilds"]:
+        assert guild["max_mem_num"] >= guild["mem_num"] >= 0
+        assert guild["name"]
+
+
 def test_pet_evolve_returns_new_detail_and_enforces_level_and_chain(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     config = {"TESTING": True, "DATABASE": database}

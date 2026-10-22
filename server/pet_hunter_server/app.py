@@ -439,6 +439,14 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
             )
+        if "guild_id" not in player_columns:
+            # 86/88/91 are real now, so membership has to live somewhere.
+            connection.execute("ALTER TABLE players ADD COLUMN guild_id INTEGER")
+        if "guild_position" not in player_columns:
+            # GameUtil.getGuildPost: 1 = leader, 2 = officer, 3 = member.
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN guild_position INTEGER NOT NULL DEFAULT 0"
+            )
         if "max_explore_ap" not in player_columns:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN max_explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
@@ -649,6 +657,17 @@ def _initialize_database(database_path: Path) -> None:
         # picStep.txt holds the milestones (value = entries required).
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS guilds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                leader_player_id INTEGER,
+                max_mem_num INTEGER NOT NULL DEFAULT 10,
+                created_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS pic_unlocked (
                 player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
                 pic_id INTEGER NOT NULL,
@@ -714,6 +733,19 @@ def _initialize_database(database_path: Path) -> None:
                 """,
                 (prop["type"], prop["use_type"], item_id),
             )
+        # Pets created before `buffSkills` was read (old saves, seed scripts) carry
+        # an empty `buffs`: 10034 (遗忘卡牌) then answers 522 forever and command
+        # 13's 特性 section stays blank. Seed the first traits for the generation.
+        for pet in connection.execute(
+            "SELECT id, pet_id, generation, buffs FROM pets"
+        ).fetchall():
+            if pet["buffs"]:
+                continue
+            seeded = _buffs_for_pet(pet["pet_id"], int(pet["generation"] or 1))
+            if seeded:
+                connection.execute(
+                    "UPDATE pets SET buffs=? WHERE id=?", (seeded, pet["id"])
+                )
 
 
 def _password_hash(password: str, salt: bytes) -> bytes:
@@ -1764,20 +1796,208 @@ def _achievement_list(database_path: Path) -> Response:
     return _protocol_response(107,{"id":1,"need_money":0,"is_reward":0,"pics":[]})
 
 
+# LOCAL DEFAULT: the original server was shared by many players; this one has a
+# single hunter. These NPC guilds keep the 公会 board from being an empty page and
+# give the member list something to render. They are not joinable (ids 9xxx are
+# outside the guilds table and _join is never offered by the client anyway).
+LOCAL_GUILD_FILLER = (
+    (9001, "樱花猎人团", "风间彻", 7),
+    (9002, "神龙卫队", "龙崎", 5),
+    (9003, "夜市商会", "阿福", 4),
+    (9004, "星光旅团", "露娜", 6),
+    (9005, "无名剑客会", "剑心", 3),
+)
+LOCAL_GUILD_MAX_MEMBERS = 10
+LOCAL_GUILD_DEFAULT_SUFFIX = "的公会"
+
+
+def _guild_row(connection: sqlite3.Connection, guild_id: int):
+    return connection.execute(
+        "SELECT id, name, leader_player_id, max_mem_num FROM guilds WHERE id = ?",
+        (guild_id,),
+    ).fetchone()
+
+
+def _member_count(connection: sqlite3.Connection, guild_id: int) -> int:
+    return connection.execute(
+        "SELECT COUNT(*) FROM players WHERE guild_id = ?", (guild_id,)
+    ).fetchone()[0]
+
+
 def _guild_own(database_path: Path) -> Response:
-    uid=_request_value("uid")
+    """86 (MY_GUILD_KEY) — the player's own guild card.
+
+    MainUI.as:212-221 only opens the page when `position` is truthy; otherwise it
+    pops the bundled "还没有加入公会" alert, so a guildless player must report
+    position 0 rather than an empty guild.
+    """
+    uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT nick,img FROM players WHERE uid=?",(uid,)).fetchone()
-    if p is None:return _pet_error(103)
-    return _protocol_response(86,{"guild_id":0,"leader_img":p["img"],"guild_name":"","position":0,"leader_name":"","mem_num":0})
+        p = c.execute(
+            "SELECT id, nick, img, guild_id, guild_position FROM players WHERE uid=?",
+            (uid,),
+        ).fetchone()
+        if p is None:
+            return _pet_error(103)
+        if not p["guild_id"]:
+            return _protocol_response(86, {"guild_id": 0, "position": 0,
+                                           "guild_name": "", "leader_name": "",
+                                           "leader_img": p["img"], "mem_num": 0,
+                                           "value": "ok"})
+        guild = _guild_row(c, p["guild_id"])
+        if guild is None:
+            return _protocol_response(86, {"guild_id": 0, "position": 0,
+                                           "guild_name": "", "leader_name": "",
+                                           "leader_img": p["img"], "mem_num": 0,
+                                           "value": "ok"})
+        leader = c.execute(
+            "SELECT nick, img FROM players WHERE id = ?",
+            (guild["leader_player_id"],),
+        ).fetchone()
+        members = _member_count(c, guild["id"])
+    return _protocol_response(86, {
+        "guild_id": guild["id"],
+        "guild_name": guild["name"],
+        "position": p["guild_position"] or 3,
+        "leader_name": (leader["nick"] if leader else "") or "",
+        "leader_img": (leader["img"] if leader else "") or p["img"],
+        "mem_num": members,
+        "value": "ok",
+    })
 
 
 def _guild_list(database_path: Path) -> Response:
-    return _protocol_response(88,{"guilds":[]})
+    """88 (GUILD_LIST_KEY) — SocietiesTopUI.as:201-218 walks `guilds[]`."""
+    with _connect_database(database_path) as c:
+        rows = c.execute(
+            "SELECT id, name, leader_player_id, max_mem_num FROM guilds ORDER BY id"
+        ).fetchall()
+        guilds = []
+        for row in rows:
+            leader = c.execute(
+                "SELECT nick FROM players WHERE id = ?", (row["leader_player_id"],)
+            ).fetchone()
+            guilds.append({
+                "id": row["id"],
+                "name": row["name"],
+                "mem_num": _member_count(c, row["id"]),
+                "max_mem_num": row["max_mem_num"] or LOCAL_GUILD_MAX_MEMBERS,
+                "leader_name": (leader["nick"] if leader else "") or "",
+            })
+    for guild_id, name, leader_name, mem_num in LOCAL_GUILD_FILLER:
+        guilds.append({
+            "id": guild_id,
+            "name": name,
+            "mem_num": mem_num,
+            "max_mem_num": LOCAL_GUILD_MAX_MEMBERS,
+            "leader_name": leader_name,
+        })
+    return _protocol_response(88, {"guilds": guilds, "type": 0, "value": "ok"})
 
 
 def _guild_members(database_path: Path) -> Response:
-    return _protocol_response(91,{"list":[]})
+    """91 (GUILD_MEMBER_LIST_KEY) — SocietiesListUI.as:180-195 reads `list[]`."""
+    uid = _request_value("uid")
+    try:
+        guild_id = int(_request_value("gid", "0") or 0)
+    except ValueError:
+        guild_id = 0
+    with _connect_database(database_path) as c:
+        p = c.execute(
+            "SELECT id, nick, img, guild_id FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if p is None:
+            return _pet_error(103)
+        if not guild_id:
+            guild_id = p["guild_id"] or 0
+        if guild_id in {entry[0] for entry in LOCAL_GUILD_FILLER}:
+            # LOCAL DEFAULT filler roster for the NPC guilds above.
+            name, leader, count = next(
+                (e[1], e[2], e[3]) for e in LOCAL_GUILD_FILLER if e[0] == guild_id
+            )
+            members = [{"id": 0, "name": leader, "position": 1, "img": p["img"]}]
+            for index in range(1, count):
+                members.append({"id": -index, "name": "团员%02d" % index,
+                                "position": 3, "img": ""})
+            return _protocol_response(91, {"list": members[:10], "value": "ok"})
+        rows = c.execute(
+            "SELECT id, nick, img, guild_position FROM players WHERE guild_id=? ORDER BY guild_position, id",
+            (guild_id,),
+        ).fetchall()
+    members = [
+        {"id": row["id"], "name": row["nick"], "position": row["guild_position"] or 3,
+         "img": row["img"] or ""}
+        for row in rows
+    ]
+    return _protocol_response(91, {"list": members, "value": "ok"})
+
+
+def _create_guild(database_path: Path) -> Response:
+    """92 (CREATE_GUILD_KEY) — SocietiesTopUI.as:157 sends no parameters at all.
+
+    The client therefore expects the server to pick the name; the resulting alert
+    (ui/257) is immediately followed by a return to the board, and the player can
+    rename it through 89 if they want.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        p = c.execute(
+            "SELECT id, nick, guild_id FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if p is None:
+            return _pet_error(103)
+        if p["guild_id"]:
+            return _pet_error(100)  # already in one
+        name = f"{p['nick'] or '猎人'}{LOCAL_GUILD_DEFAULT_SUFFIX}"
+        cursor = c.execute(
+            "INSERT INTO guilds (name, leader_player_id, max_mem_num, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (name, p["id"], LOCAL_GUILD_MAX_MEMBERS, time.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        c.execute(
+            "UPDATE players SET guild_id = ?, guild_position = 1 WHERE id = ?",
+            (cursor.lastrowid, p["id"]),
+        )
+    return _protocol_response(92, {"value": "ok", "guild_id": cursor.lastrowid})
+
+
+def _guild_change_name(database_path: Path) -> Response:
+    """89 (GUILD_CHANGE_NAME_KEY) — SocietiesMyUI.as:244 sends {index, pName}."""
+    uid = _request_value("uid")
+    name = (_request_value("pName") or "").strip()
+    if not 1 <= len(name) <= 8:
+        return _pet_error(514)  # bundled "名字不合法"
+    with _connect_database(database_path) as c:
+        p = c.execute(
+            "SELECT id, guild_id, guild_position FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if p is None:
+            return _pet_error(103)
+        if not p["guild_id"] or (p["guild_position"] or 0) != 1:
+            return _pet_error(100)  # leader only
+        c.execute("UPDATE guilds SET name = ? WHERE id = ?", (name, p["guild_id"]))
+    return _protocol_response(89, {"value": "ok"})
+
+
+def _quit_guild(database_path: Path) -> Response:
+    """90 (QUIT_GUILD_KEY) — a sole leader disbands, everyone else just leaves."""
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        p = c.execute(
+            "SELECT id, guild_id, guild_position FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if p is None:
+            return _pet_error(103)
+        if not p["guild_id"]:
+            return _pet_error(100)
+        if (p["guild_position"] or 0) == 1:
+            c.execute("UPDATE players SET guild_id = NULL, guild_position = 0 WHERE guild_id = ?",
+                      (p["guild_id"],))
+            c.execute("DELETE FROM guilds WHERE id = ?", (p["guild_id"],))
+        else:
+            c.execute("UPDATE players SET guild_id = NULL, guild_position = 0 WHERE id = ?",
+                      (p["id"],))
+    return _protocol_response(90, {"value": "ok"})
 
 
 def _guild_battle(database_path: Path) -> Response:
@@ -4969,6 +5189,12 @@ def create_app(config: dict | None = None) -> Flask:
             return _guild_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "91":
             return _guild_members(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "89":
+            return _guild_change_name(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "90":
+            return _quit_guild(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "92":
+            return _create_guild(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "94":
             return _guild_battle(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "3":
