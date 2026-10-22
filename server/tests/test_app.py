@@ -1714,6 +1714,36 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     assert row[1] > 0
 
 
+def test_arena_rank_ladder_feeds_the_rank_page(tmp_path: Path):
+    # RingTopUI.as:206-247 reads refresh_time, arena_rank and a `ranks` array and
+    # calls int(ranks.length) with no null guard; each row needs rank/id/name/img
+    # because TopItem.as:126-128 loads img_top_<rank> for the top three.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RankOne")
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "507", "uid": uid, "p": 1, "n": 9})
+    )
+    assert command == 507
+    assert isinstance(payload["refresh_time"], int) and payload["refresh_time"] > 0
+    assert payload["arena_rank"] == 1
+    ranks = payload["ranks"]
+    assert ranks, "the rank page indexes ranks.length"
+    assert [r["rank"] for r in ranks] == list(range(1, len(ranks) + 1))
+    for row in ranks:
+        assert row["name"]
+        # img is a ShowItem layer string; every layer must exist in skin.txt or
+        # ShowItem.as:49 silently drops it and the row renders faceless.
+        skin = config_tables.skin_table()
+        ids = [int(part) for part in str(row["img"]).split("_") if part.isdigit()]
+        assert ids and all(layer in skin for layer in ids)
+    # Paging must not run off the end of the ladder.
+    _, page2 = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "507", "uid": uid, "p": 2, "n": 9})
+    )
+    assert isinstance(page2["ranks"], list)
+
+
 def test_arena_and_dungeon_also_train_the_squad(tmp_path: Path):
     # Hunt and expedition already pay pet exp; the arena bout and dungeon clear
     # must too, otherwise the same pets level at different rates per mode.

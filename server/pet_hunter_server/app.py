@@ -2870,6 +2870,52 @@ def _arena_fighter(database_path: Path) -> Response:
     )
 
 
+LOCAL_ARENA_LADDER_SIZE = 9
+
+
+def _arena_rank(database_path: Path) -> Response:
+    """507 (REQUEST_ARENA_RANK_KEY) — the leaderboard behind 积分排名.
+
+    RingTopUI.as:206-247 reads refresh_time, arena_rank and a `ranks` array, then
+    calls int(ranks.length) with no null guard; each row needs rank/id/name/img.
+    rank 1..3 additionally loads `img_top_<rank>` in TopItem.as:126-128.
+
+    LOCAL DEFAULT: this offline server only ever holds the one account, so the
+    player sits at rank 1 and the rest of the ladder is filler. TopItem has no
+    click handler, so the filler rows are display-only and safe.
+    """
+    uid = _request_value("uid")
+    try:
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,nick,lv,sex FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        worn = _worn_equipment(c, player["id"])
+    player_img = _role_skin_string(worn, player["sex"])
+    filler_img = _role_skin_string({})
+    name = player["nick"] or "猎人"
+    ladder = [{"rank": 1, "id": player["id"], "name": name, "img": player_img}]
+    for rank in range(2, LOCAL_ARENA_LADDER_SIZE + 1):
+        ladder.append({
+            "rank": rank,
+            "id": rank,
+            "name": f"猎人{rank}号",
+            "img": filler_img,
+        })
+    start = (page - 1) * size
+    return _protocol_response(507, {
+        "refresh_time": int(time.time()) + 86400,
+        "arena_rank": 1,
+        "ranks": ladder[start:start + size],
+        "value": "ok",
+    })
+
+
 def _forge_refine(database_path: Path) -> Response:
     try: idx=int(_request_value("index",""))
     except ValueError: return _pet_error(100)
@@ -3926,6 +3972,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _explore_detail(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "506":
             return _arena_fighter(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "507":
+            return _arena_rank(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "42":
             return _choose_pet_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "104":
