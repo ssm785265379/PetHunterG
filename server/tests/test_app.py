@@ -2460,17 +2460,38 @@ def test_training_action_reports_the_matching_stat_gain(tmp_path: Path):
             connection.commit()
             indexes = [r[0] for r in connection.execute("SELECT id FROM pets ORDER BY id")]
 
+    # LOCAL DEFAULT gains: 5 + level // 20 per run (x3 for the vacation branch).
+    from pet_hunter_server.app import _train_gain
+
+    with sqlite3.connect(database) as connection:
+        levels = {
+            row[0]: row[1]
+            for row in connection.execute("SELECT id, lv FROM pets")
+        }
+
     hp = train(indexes[0], 1)
-    assert hp["add_hp_tp"] == 1 and hp["train_type"] == 1
+    hp_gain = _train_gain(levels[indexes[0]])
+    assert hp["add_hp_tp"] == hp_gain and hp["train_type"] == 1
+    # ttype 1 also raises speed, which used to be reported as a hard 0.
+    assert hp["add_speed_tp"] == hp_gain
     assert hp["add_phy_att_tp"] == 0 and hp["add_mag_def_tp"] == 0
 
     att = train(indexes[1], 2)
-    assert att["add_phy_att_tp"] == 1 and att["add_mag_att_tp"] == 1
+    att_gain = _train_gain(levels[indexes[1]])
+    assert att["add_phy_att_tp"] == att_gain and att["add_mag_att_tp"] == att_gain
     assert att["add_hp_tp"] == 0
 
     defence = train(indexes[2], 3)
-    assert defence["add_phy_def_tp"] == 1 and defence["add_mag_def_tp"] == 1
+    def_gain = _train_gain(levels[indexes[2]]) * 3
+    assert defence["add_phy_def_tp"] == def_gain and defence["add_mag_def_tp"] == def_gain
     assert defence["add_hp_tp"] == 0
+
+    # The reinforcement must actually land in the row, otherwise the run is a
+    # no-op that the client can never "collect" (there is no collect command).
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT pro_hp, pro_speed FROM pets WHERE id=?", (indexes[0],)
+        ).fetchone() == (hp_gain, hp_gain)
 
     for payload in (hp, att, defence):
         assert payload["pet"]["name"], "a null name renders as the string null"

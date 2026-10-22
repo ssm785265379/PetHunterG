@@ -2583,14 +2583,24 @@ def _training_detail(database_path: Path) -> Response:
     return _protocol_response(9,payload)
 
 
-LOCAL_TRAIN_SECONDS = 60
+# LOCAL DEFAULT: the original duration/gain tables are not in the shipped config
+# (the config bundle has no training table at all), so these are our numbers.
+LOCAL_TRAIN_SECONDS = 600
+# prop.txt 10505's remark states a single reinforcement tops out around 1000.
+LOCAL_PRO_CAP = 1000
 # LOCAL DEFAULT gains per training type; the original duration/gain tables are
 # not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
+# ttype -> the two reinforcement columns that run raises (ui.txt 63-68 labels).
 LOCAL_TRAIN_GAIN = {
-    1: {"pro_hp": 1},
-    2: {"pro_phy_att": 1, "pro_mag_att": 1},
-    3: {"pro_phy_def": 1, "pro_mag_def": 1},
+    1: ("pro_hp", "pro_speed"),
+    2: ("pro_phy_att", "pro_mag_att"),
+    3: ("pro_phy_def", "pro_mag_def"),
 }
+
+
+def _train_gain(lv: int) -> int:
+    """LOCAL DEFAULT per-run reinforcement gain, scaled by pet level."""
+    return 5 + max(0, int(lv)) // 20
 
 
 def _training_action(database_path: Path) -> Response:
@@ -2612,21 +2622,41 @@ def _training_action(database_path: Path) -> Response:
         if row is None: return _pet_error(506)
         if row["is_locked"]: return _pet_error(100)
         if row["train_end"] and row["train_end"] > now: return _pet_error(100)
+        # The client has no "collect" command: DevelopItem just re-reads 504 when
+        # the countdown ends. Applying the gain only at collection time therefore
+        # never happened — training was a no-op and every reinforcement stayed 0.
+        # Write it at start instead, so the numbers are real the moment it begins.
+        per_run = _train_gain(row["lv"] or 1) * (3 if ttype == 3 else 1)
+        columns = LOCAL_TRAIN_GAIN[ttype]
+        applied: dict[str,int] = {}
+        values: list[int] = []
+        for column in columns:
+            current = int(row[column] or 0)
+            step = min(per_run, max(0, LOCAL_PRO_CAP - current))
+            applied[column] = step
+            values.append(current + step)
+        if not any(applied.values()):
+            return _pet_error(100)  # already capped; don't burn the cooldown
+        assignments = ", ".join(f"{column} = ?" for column in columns)
         c.execute(
-            "UPDATE pets SET train_state=?, train_type=?, train_end=? WHERE id=?",
-            (ttype, ttype, now + LOCAL_TRAIN_SECONDS, idx),
+            f"UPDATE pets SET {assignments}, train_state=?, train_type=?, train_end=? WHERE id=?",
+            (*values, ttype, ttype, now + LOCAL_TRAIN_SECONDS, idx),
         )
+        reward_point = 50 * int(row["lv"] or 1) if ttype == 2 else 0
+        reward_exp = 10 * int(row["lv"] or 1) if ttype == 3 else 0
+        if reward_point:
+            c.execute("UPDATE players SET point = point + ? WHERE id = ?", (reward_point, player["id"]))
         pet={"id":row["pet_id"],"icon":row["icon"],"name":_pet_name(row["pet_id"], row["name"])}
-    gain=LOCAL_TRAIN_GAIN[ttype]
+    if reward_exp:
+        with _connect_database(database_path) as c:
+            _grant_pet_exp(c, [idx], reward_exp)
     # "pro_hp" -> "add_hp_tp". The client field names carry a "_tp" suffix
-    # (DevelopResultUI.as:164-336 reads add_hp_tp and friends), so the mapping has
-    # to produce that exact name — "pro_hp".split("_")[1] would yield "hp" and
-    # every add_*_tp would come back as 0.
-    adds={f"add_{k.split('_', 1)[1]}_tp": v for k, v in gain.items()}
+    # (DevelopResultUI.as:164-336 reads add_hp_tp and friends).
+    adds={f"add_{column.split('_', 1)[1]}_tp": value for column, value in applied.items()}
     return _protocol_response(10,{
-        "pet":pet,"train_type":ttype,"reward_point":0,"reward_crystal":0,
+        "pet":pet,"train_type":ttype,"reward_point":reward_point,"reward_crystal":0,
         "add_hp_tp":adds.get("add_hp_tp",0),"add_phy_att_tp":adds.get("add_phy_att_tp",0),
-        "add_mag_att_tp":adds.get("add_mag_att_tp",0),"add_speed_tp":0,
+        "add_mag_att_tp":adds.get("add_mag_att_tp",0),"add_speed_tp":adds.get("add_speed_tp",0),
         "add_phy_def_tp":adds.get("add_phy_def_tp",0),"add_mag_def_tp":adds.get("add_mag_def_tp",0),
         "add_energy":0,
     })
