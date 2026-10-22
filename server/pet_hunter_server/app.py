@@ -2510,6 +2510,9 @@ LOCAL_COPY_MAPS = (1001, 1002, 1003, 1004)
 LOCAL_ARENA_REWARD = 20
 LOCAL_COPY_REWARD = 50
 LOCAL_EXPLORE_REWARD = 30
+# LOCAL DEFAULT: exp each pet gains from one arena bout / one dungeon clear.
+LOCAL_ARENA_EXP = 200000
+LOCAL_COPY_EXP = 400000
 
 
 def _defenders_from_monsters(ids) -> list[dict[str, object]]:
@@ -2562,6 +2565,11 @@ def _arena_battle(database_path: Path) -> Response:
         c.execute("UPDATE players SET arena_ap=? WHERE id=?", (ap, p["id"]))
         max_ap = p["max_arena_ap"] or LOCAL_ARENA_RIVAL_LEVEL
         _credit_battle_rewards(c, p["id"], point=LOCAL_ARENA_REWARD, crystal=0)
+        # Arena bouts train the squad too, matching the hunt/expedition payouts.
+        arena_pets=[r[0] for r in c.execute(
+            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            (p["id"],))]
+        _grant_pet_exp(c, arena_pets, LOCAL_ARENA_EXP)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
         "is_win": 1, "arena_ap": ap, "max_arena_ap": max_ap, "arena_rank": 0,
@@ -2622,6 +2630,10 @@ def _copy_battle(database_path: Path) -> Response:
         if player is None:
             return _pet_error(103)
         _credit_battle_rewards(c, player["id"], point=LOCAL_COPY_REWARD, crystal=0)
+        copy_pets=[r[0] for r in c.execute(
+            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            (player["id"],))]
+        _grant_pet_exp(c, copy_pets, LOCAL_COPY_EXP)
     # LOCAL DEFAULT rewards; reward_goods[].id resolves through pic.txt
     # (FightResultItem.as:476), so it stays empty rather than guessing an id.
     return _protocol_response(74, {

@@ -1714,6 +1714,60 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     assert row[1] > 0
 
 
+def test_arena_and_dungeon_also_train_the_squad(tmp_path: Path):
+    # Hunt and expedition already pay pet exp; the arena bout and dungeon clear
+    # must too, otherwise the same pets level at different rates per mode.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "MixExp")
+    with sqlite3.connect(database) as connection:
+        pet_ids = [r[0] for r in connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 2"
+        )]
+        connection.execute("UPDATE pets SET lv = 1, exp = 0")
+        connection.execute("UPDATE players SET arena_ap = 5, max_arena_ap = 5")
+        connection.commit()
+
+    def exp_of() -> list[int]:
+        with sqlite3.connect(database) as connection:
+            return [r[0] for r in connection.execute(
+                "SELECT exp FROM pets WHERE id IN (?,?) ORDER BY id", pet_ids
+            )]
+
+    command, _ = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "24", "uid": uid})
+    )
+    assert command == 24
+    after_arena = exp_of()
+    assert all(value > 0 for value in after_arena), "arena must award pet exp"
+
+    command, _ = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": 1001})
+    )
+    assert command == 74
+    after_copy = exp_of()
+    assert all(a > b for a, b in zip(after_copy, after_arena)), "dungeon must award pet exp"
+
+
+def test_catching_from_an_explore_map_works_too(tmp_path: Path):
+    # ExploreMapInfoUI.as:218 sends CATCH_KEY with {hid: <explore map id>, ttype: 2},
+    # so that path has to resolve a catchable pet as well as the hunt maps do.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ExCatch")
+    command, caught = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": 1, "ttype": 2})
+    )
+    assert command == 7
+    assert caught["is_success"] == 1
+    pets = config_tables._table("pet.txt")
+    assert caught["id"] in pets
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE id = ?", (caught["index"],)
+        ).fetchone()[0] == 1
+
+
 def test_explore_pays_the_maps_real_pass_reward(tmp_path: Path):
     # exploreMap.txt carries passRewardPoint / passRewardCrystal / passRewardGoods
     # per map. The expedition used to pay a flat LOCAL_EXPLORE_REWARD and never
@@ -1856,7 +1910,7 @@ def test_synthesis_consumes_the_vice_pet_and_raises_generation(tmp_path: Path):
     assert row[0] == (generation or 1) + 1
 
 
-
+def test_catching_a_pet_actually_adds_it_to_the_roster(tmp_path: Path):
     # HunterCatchUI.as:128-150 renders index/id/icon/pic and never inspects
     # is_success, so a catch must hand back a real pet that already exists in the
     # database — the previous implementation always returned is_success 0 and
