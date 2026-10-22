@@ -3209,6 +3209,32 @@ def _arena_star_reward(database_path: Path) -> Response:
     })
 
 
+def _own_info(database_path: Path) -> Response:
+    """1 (OWN_INFO_KEY) — the paid-gold balance shown on the shop pay page.
+
+    ShopPayUI.as:323-330 does `GameUtil.gold = "" + param2.money` with no guard,
+    so a missing field renders the literal string "undefined" next to the gold
+    icon. This offline server never grants paid currency, so the balance is 0.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+    return _protocol_response(1, {"money": 0, "gold": 0, "value": "ok"})
+
+
+def _gold_exchange(database_path: Path) -> Response:
+    """300 (GOLD_EXCHANG) — Google Play receipt redemption.
+
+    ShopPayUI.as:292-296 posts a store receipt, transaction id and signing key.
+    Redeeming that requires the Play billing service, which an offline personal
+    server cannot verify, so the request is refused rather than fabricating a
+    purchase. Error 100 surfaces the client's generic "操作失败" alert.
+    """
+    return _pet_error(100)
+
+
 def _forge_refine(database_path: Path) -> Response:
     try: idx=int(_request_value("index",""))
     except ValueError: return _pet_error(100)
@@ -4271,6 +4297,10 @@ def create_app(config: dict | None = None) -> Flask:
             return _arena_star_reward(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "97":
             return _rage_reward(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "1":
+            return _own_info(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "300":
+            return _gold_exchange(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "506":
             return _arena_fighter(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "507":

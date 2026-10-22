@@ -142,20 +142,28 @@ def test_unknown_flash_command_is_observed_without_leaking_request_values(caplog
 
 
 def test_unimplemented_show_id_never_returns_a_transport_error(tmp_path: Path):
-    # Every one of the 48 commands the client sends but this server has not
-    # implemented used to answer 501, which AIR turns into "网络错误". A normal
-    # 200 envelope keeps the page usable; the command id is echoed back so
-    # MainUI.readDatas can route it to its own branch.
+    # Any command the client sends but this server has not implemented used to
+    # answer 501, which AIR turns into "网络错误". A normal 200 envelope (or a
+    # normal "-1:<id>" protocol error, which the client already understands) keeps
+    # the page usable.
     client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
     uid = _create_local_player(client, "NoErr")
-    for show_id in (87, 93, 300, 1004, 1005):
+    for show_id in (87, 93, 1004, 1005, 4096):
         response = client.post(
             "/flash.do", data={"m": "show", "showId": str(show_id), "uid": uid, "p": 1, "n": 9}
         )
         assert response.status_code == 200, f"showId={show_id} must not be a transport error"
-        command, payload = response.get_data(as_text=True).split("\t", 1)
+        body = response.get_data(as_text=True)
+        assert "\t" in body, f"showId={show_id} must answer with a protocol envelope"
+        command, payload = body.split("\t", 1)
         assert command == str(show_id)
         assert json.loads(payload) == {"value": "ok"}
+
+    # 300 is deliberately refused (offline IAP), but still as a protocol error
+    # rather than an HTTP failure.
+    refused = client.post("/flash.do", data={"m": "show", "showId": "300", "uid": uid})
+    assert refused.status_code == 200
+    assert refused.get_data(as_text=True).startswith("-1:")
 
 
 def test_account_registration_hashes_password_and_returns_registration_envelope(tmp_path: Path):
