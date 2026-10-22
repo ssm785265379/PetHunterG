@@ -117,6 +117,9 @@ LOCAL_EXPLORE_EXP = 300000
 # reward is an item or a picture-book entry — so a flat silver bonus is added on
 # top to keep expeditions worth running.
 LOCAL_EXPLORE_BONUS_POINT = 30
+# LOCAL DEFAULT: expedition stamina cap. The original AP table is not recoverable;
+# the HUD prints explore_ap/max_explore_ap directly, so they have to be real.
+LOCAL_DEFAULT_EXPLORE_AP = 20
 # LOCAL DEFAULT: silver awarded per monster level on a hunt win.
 LOCAL_HUNT_POINT_REWARD = 50
 
@@ -405,6 +408,17 @@ def _initialize_database(database_path: Path) -> None:
             # the server has to remember the map the player opened with 99.
             connection.execute(
                 "ALTER TABLE players ADD COLUMN cur_explore_map INTEGER"
+            )
+        # Expedition stamina. The explore HUD concatenates explore_ap/max_explore_ap
+        # straight into text, so without these columns it printed "0/0" on every
+        # page. LOCAL DEFAULT: 20 points, refilled to the cap on each read.
+        if "explore_ap" not in player_columns:
+            connection.execute(
+                f"ALTER TABLE players ADD COLUMN explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
+            )
+        if "max_explore_ap" not in player_columns:
+            connection.execute(
+                f"ALTER TABLE players ADD COLUMN max_explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
             )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
@@ -2140,14 +2154,20 @@ def _explore_start(database_path: Path) -> Response:
         gid=int(gid_value) if gid_value else None
     except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,point,money,cur_explore_map FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,point,money,cur_explore_map,explore_ap,max_explore_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if gid is None:
             gid=p["cur_explore_map"]
         m=_explore_map_row(gid)
         if m is None: return _pet_error(400)
+        # An expedition costs one stamina point; the client renders the value the
+        # response reports, so it has to be the post-spend number.
+        if (p["explore_ap"] or 0) < 1: return _pet_error(100)
+        explore_ap = p["explore_ap"] - 1
+        max_explore_ap = p["max_explore_ap"] or LOCAL_DEFAULT_EXPLORE_AP
         if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
-        c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=? WHERE id=?",(m["cost_point"],m["cost_money"],gid,p["id"]))
+        c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=?,explore_ap=? WHERE id=?",
+                  (m["cost_point"],m["cost_money"],gid,explore_ap,p["id"]))
         # LOCAL DEFAULT: an expedition always resolves against the first monsters
         # in monster.txt, since the per-map spawn table is not recoverable.
         # REAL rewards from exploreMap.txt's passReward* columns (the earlier
@@ -2205,7 +2225,7 @@ def _explore_start(database_path: Path) -> Response:
         "value":"ok","event_type":_explore_event_type(gid),
         "world":m["world"],"world_id":m["world"],
         "is_tired":0,
-        "is_finish":1,"explore_ap":0,"max_explore_ap":0,
+        "is_finish":1,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
         "now_discover_rate":0,"add_discover_rate":0,
         "need_discover_rate":m["need_discover_rate"],
         "energy":0,"cost_energy":0,"add_energy":0,
@@ -2243,8 +2263,20 @@ def _explore_list(database_path: Path) -> Response:
     try: world=int(_request_value("ttype","1"))
     except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id FROM players WHERE uid=?",(uid,)).fetchone()
-        if p is None: return _pet_error(103)
+        player = c.execute(
+            "SELECT id,explore_ap,max_explore_ap FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        # Refill lazily: a solo offline server has no scheduled job, so topping up
+        # on read keeps the HUD from being stuck at 0 after a few expeditions.
+        if (player["explore_ap"] or 0) < (player["max_explore_ap"] or 0):
+            c.execute(
+                "UPDATE players SET explore_ap=max_explore_ap WHERE id=?", (player["id"],)
+            )
+            player = c.execute(
+                "SELECT id,explore_ap,max_explore_ap FROM players WHERE id=?", (player["id"],)
+            ).fetchone()
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
     rows=[]
@@ -2256,7 +2288,12 @@ def _explore_list(database_path: Path) -> Response:
                      "name":row["name"],
                      "star":row["star"],"max_days":row["max_days"]})
     if not rows: return _pet_error(400)
-    return _protocol_response(98,{"world":world,"explore_ap":0,"max_explore_ap":0,"list":rows})
+    return _protocol_response(98,{
+        "world":world,
+        "explore_ap":player["explore_ap"],
+        "max_explore_ap":player["max_explore_ap"],
+        "list":rows,
+    })
 
 
 def _explore_detail(database_path: Path) -> Response:

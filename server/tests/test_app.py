@@ -1722,6 +1722,40 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     assert row[1] > 0
 
 
+def test_explore_stamina_is_real_and_refills(tmp_path: Path):
+    # ExploreMapListUI.as:200-260 concatenates explore_ap/max_explore_ap into the
+    # HUD text, so the earlier hardcoded 0/0 rendered as a broken counter. An
+    # expedition costs one point and the value tops back up on read.
+    from pet_hunter_server.app import LOCAL_DEFAULT_EXPLORE_AP
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ApOne")
+    command, listing = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "98", "uid": uid, "ttype": 1})
+    )
+    assert command == 98
+    assert listing["max_explore_ap"] == LOCAL_DEFAULT_EXPLORE_AP
+    assert listing["explore_ap"] == LOCAL_DEFAULT_EXPLORE_AP
+
+    gid = sorted(config_tables._table("exploreMap.txt"))[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert payload["max_explore_ap"] == LOCAL_DEFAULT_EXPLORE_AP
+    assert payload["explore_ap"] == LOCAL_DEFAULT_EXPLORE_AP - 1
+
+    # Draining it must refuse the expedition rather than going negative.
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET explore_ap = 0 WHERE uid = ?", (uid,))
+        connection.commit()
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    refused = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    assert refused.get_data(as_text=True).startswith("-1:")
+
+
 def test_arena_star_prize_is_claimable_once_per_week(tmp_path: Path):
     # RingTopStarUI.as:178-193 reads id/name/is_reward/img for the page and
     # :195-232 renders the prize through pic.txt, so reward_goods_id has to be a
