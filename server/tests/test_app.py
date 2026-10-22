@@ -3052,6 +3052,44 @@ def test_hunt_replay_is_multi_round_and_carries_swing_damage(tmp_path: Path):
     assert isinstance(payload["rage_point"], int) and 0 <= payload["rage_point"] <= 100
 
 
+def test_use_goods_rejects_the_wrong_usage_context(tmp_path: Path):
+    # prop.txt `useType`: 2 = used on a pet, 1 = used on the hunter/home. The
+    # client only gates this by which grid cell is tappable, so without a server
+    # check a pet snack can be eaten from the home screen and a silver bag can be
+    # fed to a pet.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "Context")
+    _set_currency(client, database, uid, money=100000, point=100000)
+
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id"
+        ).fetchall()
+    pet_id = rows[0][0]
+
+    # 10002 is pet food (useType 2): fine on a pet, refused at home.
+    food = _buy(client, uid, 10002, 1, 1)
+    refused = client.post(
+        "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
+                           "index": str(food), "index1": "0"}
+    )
+    assert refused.get_data(as_text=True) == "-1:506"
+    _, accepted = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "50", "uid": uid,
+                                       "index": str(food), "index1": str(pet_id)})
+    )
+    assert accepted["type"] == 5
+
+    # 10022 is a silver bag (useType 1): fine at home, refused on a pet.
+    bag = _buy(client, uid, 10022, 1, 2)
+    refused = client.post(
+        "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
+                           "index": str(bag), "index1": str(pet_id)}
+    )
+    assert refused.get_data(as_text=True) == "-1:100"
+
+
 def test_hunt_map_progress_accumulates_and_clears(tmp_path: Path):
     # HunterMapUI.as:206 draws `maps[].rate` as a progress bar; it used to be a
     # hardcoded 0, so farming a map forever still read 0%.

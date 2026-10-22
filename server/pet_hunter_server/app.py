@@ -1693,6 +1693,19 @@ def _player_use_goods(database_path: Path) -> Response:
                 (effect, prop["use_type"], row["id"]),
             )
 
+        # prop.txt `useType` is the usage context: 2 = used on a pet, 1 = used on
+        # the hunter/home. The client only enforces this through which grid cell
+        # it lets you tap, so the server has to reject the mismatched direction —
+        # otherwise pet food can be eaten from the home screen (target 0) and a
+        # silver bag can be "fed" to a pet.
+        use_type = prop["use_type"]
+        if target <= 0 and use_type == 2:
+            # 506 is the bundled "没有这只宠物" error; using a pet item from the
+            # home screen has no target pet, so it reads correctly to the player.
+            return _pet_error(506)
+        if target > 0 and use_type == 1:
+            return _pet_error(100)
+
         payload: dict[str, int] = {}
         if effect == 7:  # restore hunt action points
             if player["ht_ap"] >= player["max_ht_ap"]:
