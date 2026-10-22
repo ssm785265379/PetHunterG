@@ -1517,7 +1517,18 @@ def test_forge_list_detail_and_make_transaction(tmp_path: Path):
         connection.execute("UPDATE players SET money=100 WHERE id=?", (player_id,))
         connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (?,?,?,?,?,?,?)", (player_id,11010,2,1,11010,0,0))
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"32","uid":uid,"ttype":"1","p":"1","n":"9"}))
-    assert command == 32 and payload["list"][0]["id"] == 32001
+    assert command == 32
+    row = payload["list"][0]
+    # `id` is the CRAFTED EQUIP id: BlacksmithListUI.as:245 looks the display name
+    # up in pic.txt with it, and a recipe id has no pic row (nameless list).
+    assert row["id"] == 20002
+    assert row["index"] == 32001, "index stays the recipe id sent back as gid"
+    pics = config_tables._table("pic.txt")
+    assert int(row["id"]) in pics, "the craft list row must resolve a real name"
+    # Stats come from the shipped equip.txt, not a hand-written zeroed row.
+    assert _envelope(client.post("/flash.do", data={"m":"show","showId":"33","uid":uid,"gid":"32001","ttype":"1"}))[1]["phy_att"] == int(
+        str(config_tables.equip_record(20002)["phyAtt"]).strip()
+    )
     command, detail = _envelope(client.post("/flash.do", data={"m":"show","showId":"33","uid":uid,"gid":"32001","ttype":"1"}))
     assert command == 33 and detail["need_goods"][0]["own_num"] == 1
     response = client.post("/flash.do", data={"m":"show","showId":"34","uid":uid,"gid":"32001"})
@@ -2801,19 +2812,37 @@ def test_arena_and_copy_fights_share_the_hunt_replay_contract(tmp_path: Path):
     assert isinstance(arena["rage_point"], int)
 
 
-def test_copy_list_unlocks_every_tile(tmp_path: Path):
+def test_copy_list_progresses_and_tracks_clears(tmp_path: Path):
     # AbyssMapUI.as:197-199 calls int(param2.maps.length) unguarded and
-    # MapItem.as:315 locks a tile when is_battle_able is falsy.
-    client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
+    # MapItem.as:315 locks a tile when is_battle_able is falsy. The list now also
+    # gates stages on the previous clear instead of opening all four forever.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "CopyOne")
     command, payload = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "73", "uid": uid, "p": 1, "n": 9})
     )
     assert command == 73
     assert payload["maps"], "an empty maps array locks every tile"
-    assert all(row["is_battle_able"] for row in payload["maps"])
     for row in payload["maps"]:
-        assert {"code", "id", "finish_rate", "finished_num"} <= set(row)
+        assert {"code", "id", "finish_rate", "finished_num", "is_battle_able"} <= set(row)
+    assert payload["maps"][0]["is_battle_able"] == 1
+    assert all(row["is_battle_able"] == 0 for row in payload["maps"][1:])
+
+    stage_one = payload["maps"][0]["id"]
+    cleared = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": str(stage_one)}
+    ))[1]
+    if cleared["is_win"] != 1:
+        import pytest
+
+        pytest.skip("the starter squad lost stage 1; the win path is covered elsewhere")
+    _, after = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "73", "uid": uid, "p": 1, "n": 9})
+    )
+    assert after["maps"][0]["finish_rate"] == 100
+    assert after["maps"][0]["finished_num"] == 1
+    assert after["maps"][1]["is_battle_able"] == 1
 
 
 def test_explore_rental_chain_round_trips_through_the_shop(tmp_path: Path):

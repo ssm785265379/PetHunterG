@@ -596,6 +596,19 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # 深渊 (commands 73/74) clears. One row per stage means command 73 can show
+        # real progress ("通关人数/完成度") and gate the next stage instead of
+        # advertising four permanently-open tiles.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS copy_cleared (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                stage_id INTEGER NOT NULL,
+                cleared_at TEXT,
+                PRIMARY KEY (player_id, stage_id)
+            )
+            """
+        )
         # The shop table is a local default, not player data, so it is rewritten
         # from LOCAL_SHOP_GOODS on every start. That keeps removed goods from
         # lingering in older saves (purchases go to `inventory`, not here).
@@ -3743,14 +3756,26 @@ def _copy_list(database_path: Path) -> Response:
     if page < 1 or not 1 <= size <= 9:
         return _pet_error(100)
     with _connect_database(database_path) as c:
-        if c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone() is None:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
             return _pet_error(103)
-    # LOCAL DEFAULT: four stages, all unlocked, from LOCAL_COPY_MAPS.
-    maps = [
-        {"code": i, "id": map_id, "is_battle_able": 1,
-         "finish_rate": 0, "finished_num": 0}
-        for i, map_id in enumerate(LOCAL_COPY_MAPS[:size], start=1)
-    ]
+        cleared = {
+            row[0] for row in c.execute(
+                "SELECT stage_id FROM copy_cleared WHERE player_id=?", (player["id"],)
+            )
+        }
+    # 深渊按层推进：第一层常开，之后每层要求上一层已通关；已通关的层显示
+    # 100% 完成度，未解锁的层客户端会画锁（MapItem.as:315 看 is_battle_able）。
+    maps = []
+    for index, map_id in enumerate(LOCAL_COPY_MAPS[:size]):
+        previous_cleared = index == 0 or LOCAL_COPY_MAPS[index - 1] in cleared
+        maps.append({
+            "code": index + 1,
+            "id": map_id,
+            "is_battle_able": 1 if previous_cleared else 0,
+            "finish_rate": 100 if map_id in cleared else 0,
+            "finished_num": 1 if map_id in cleared else 0,
+        })
     return _protocol_response(73, {"cd": 0, "maps": maps, "value": "ok"})
 
 
@@ -3788,6 +3813,13 @@ def _copy_battle(database_path: Path) -> Response:
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
         copy_exp = _battle_exp(stage_level, LOCAL_COPY_EXP_SHARE)
         _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
+        if is_win:
+            # 记通关，73 才能显示完成度并解锁下一层（同层重复通关不重复推进）。
+            c.execute(
+                "INSERT OR REPLACE INTO copy_cleared (player_id, stage_id, cleared_at)"
+                " VALUES (?, ?, ?)",
+                (player["id"], hid, time.strftime("%Y-%m-%d %H:%M:%S")),
+            )
     # LOCAL DEFAULT rewards; reward_goods[].id resolves through pic.txt
     # (FightResultItem.as:476), so it stays empty rather than guessing an id.
     return _protocol_response(74, {
@@ -4389,11 +4421,51 @@ def _forge_enchant(database_path: Path) -> Response:
     return _protocol_response(36,{"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"]+1,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":0,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":10,"own_crystal":p["crystal"]})
 
 
+_FORGE_FIELD_ALIASES = {
+    "iconId": "iconId",
+    "star": "star",
+    "pro": "pro",
+    "hp": "hp",
+    "speed": "speed",
+    "phyAtt": "phy_att",
+    "magAtt": "mag_att",
+    "phyDef": "phy_def",
+    "magDef": "mag_def",
+    "level": "level",
+}
+
+
+def _forge_equip_field(equip_id: int, column: str) -> int | None:
+    """Read one crafting-result stat from the shipped equip.txt.
+
+    The local LOCAL_FORGE_EQUIPMENT table only carried a hand-written row (all zero
+    except two defences), so the craft page advertised a sword with 0 attack while
+    equip.txt holds the real numbers.
+    """
+    record = config_tables.equip_record(equip_id)
+    if record is None:
+        return None
+    raw = str(record.get(column, "") or "").strip()
+    return int(raw) if raw.lstrip("-").isdigit() else None
+
+
 def _forge_list(database_path: Path) -> Response:
     try: ttype = int(_request_value("ttype", "1")); page = int(_request_value("p", "1")); size = int(_request_value("n", "9"))
     except ValueError: return _pet_error(100)
     if ttype != 1: return _protocol_response(32, {"list": []})
-    rows = [{"index": rid, "id": rid, "icon": LOCAL_FORGE_EQUIPMENT.get(recipe["output"], {}).get("icon", recipe["output"]), "level": 1} for rid, recipe in LOCAL_FORGE_RECIPES.items()]
+    # `id` must be the CRAFTED EQUIP id: BlacksmithListUI.as:245 resolves the row
+    # name with getConfigValue("pic", row.id, "name"), and a recipe id (32001) has
+    # no pic row, so the list rendered nameless. `index` stays the recipe id
+    # because that is what the client sends back as `gid` to command 33.
+    rows = [
+        {
+            "index": rid,
+            "id": recipe["output"],
+            "icon": _forge_equip_field(recipe["output"], "iconId") or recipe["output"],
+            "level": _forge_equip_field(recipe["output"], "level") or 1,
+        }
+        for rid, recipe in LOCAL_FORGE_RECIPES.items()
+    ]
     start = max(0, page - 1) * size
     return _protocol_response(32, {"list": rows[start:start + max(0, size)]})
 
@@ -4412,7 +4484,29 @@ def _forge_detail(database_path: Path) -> Response:
         for gid, num in recipe["goods"]:
             own = c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"], gid)).fetchone()[0]
             needs.append({"id": gid, "need_num": num, "own_num": own})
-    return _protocol_response(33, {"id": recipe["output"], "icon": output["icon"], "star": output["star"], "pro": output["pro"], "hp": output["hp"], "phy_att": output["phy_att"], "mag_att": output["mag_att"], "phy_def": output["phy_def"], "mag_def": output["mag_def"], "speed": output["speed"], "need_money": recipe["money"], "own_money": player["money"], "need_point": recipe["point"], "own_point": player["point"], "need_crystal": recipe["crystal"], "own_crystal": player["crystal"], "need_goods": needs})
+    def stat(column: str) -> int:
+        value = _forge_equip_field(recipe["output"], column)
+        if value is not None:
+            return value
+        return output.get(_FORGE_FIELD_ALIASES[column], 0)
+
+    return _protocol_response(33, {
+        "id": recipe["output"],
+        "icon": stat("iconId") or output["icon"],
+        "star": stat("star"),
+        "pro": stat("pro"),
+        "hp": stat("hp"),
+        "phy_att": stat("phyAtt"),
+        "mag_att": stat("magAtt"),
+        "phy_def": stat("phyDef"),
+        "mag_def": stat("magDef"),
+        "speed": stat("speed"),
+        "level": stat("level"),
+        "need_money": recipe["money"], "own_money": player["money"],
+        "need_point": recipe["point"], "own_point": player["point"],
+        "need_crystal": recipe["crystal"], "own_crystal": player["crystal"],
+        "need_goods": needs,
+    })
 
 
 def _forge_make(database_path: Path) -> Response:
