@@ -3307,6 +3307,41 @@ def test_pet_release_deletes_but_refuses_locked_pets(tmp_path: Path):
     assert [pet["id"] for pet in listed["pets"]] == [2019]
 
 
+def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
+    # Command 19 used to rotate the six growth numbers, so `total_gw` (label 成长,
+    # ui.txt 36) never moved and the sixth use restored the original layout.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GrowRoll")
+    with sqlite3.connect(database) as connection:
+        pet_id, species = connection.execute(
+            "SELECT id, pet_id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1"
+        ).fetchone()
+        connection.execute(
+            "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)"
+            " VALUES (1, 10001, 1, 8, 10001, 1, 2)"
+        )
+        connection.commit()
+    lo, hi = config_tables.pet_record(species)["grows"].split(":")
+    lo, hi = int(lo), int(hi)
+
+    totals: list[int] = []
+    for _ in range(4):
+        command, payload = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "19", "uid": uid, "index": pet_id})
+        )
+        assert command == 19
+        for key in ("hp_gw", "speed_gw", "phy_att_gw", "mag_att_gw", "phy_def_gw", "mag_def_gw"):
+            assert lo <= payload[key] <= hi, f"{key} fell outside pet.txt grows {lo}:{hi}"
+        assert 1 <= payload["gw_rate"] <= 5
+        assert payload["total_gw"] == sum(
+            payload[k] for k in ("hp_gw", "speed_gw", "phy_att_gw",
+                                 "mag_att_gw", "phy_def_gw", "mag_def_gw")
+        )
+        totals.append(payload["total_gw"])
+    assert len(set(totals)) > 1, f"total_gw never moved, still rotating: {totals}"
+
+
 def test_pet_evolve_returns_new_detail_and_enforces_level_and_chain(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     config = {"TESTING": True, "DATABASE": database}

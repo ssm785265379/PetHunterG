@@ -4165,15 +4165,19 @@ def _pet_flush_grow(database_path: Path) -> Response:
         item = _mutation_inventory(connection, player["id"], 10001)
         if item is None or item["quantity"] <= 0: return _pet_error(400)
         stats = _pet_base_stats(pet["pet_id"])
-        values = [int(pet[k]) for k in ("gw_hp", "gw_speed", "gw_phy_att", "gw_mag_att", "gw_phy_def", "gw_mag_def")]
+        # Command 19 rerolls every growth value inside pet.txt `grows` (lo:hi).
+        # It used to merely *rotate* the six numbers, so `total_gw` — the value
+        # ui.txt 36 labels 成长 — never changed, and the sixth use restored the
+        # starting layout exactly. That is the "using the item does nothing" report.
+        lo, hi = _pet_grows_range(pet["pet_id"])
+        if hi <= lo:
+            lo, hi = 0, max(1, hi)
+        values = [random.randint(lo, hi) for _ in range(6)]
         total = sum(values)
-        if total == 0: values[0] = 1; total = 1
-        shift = (int(pet["gw_flush_count"]) + pet["id"]) % 6
-        values = values[shift:] + values[:shift]
         columns = ("gw_hp", "gw_speed", "gw_phy_att", "gw_mag_att", "gw_phy_def", "gw_mag_def")
         connection.execute("UPDATE pets SET " + ", ".join(f"{c} = ?" for c in columns) + ", gw_flush_count = gw_flush_count + 1 WHERE id = ?", (*values, pet_index))
         _consume_mutation_item(connection, item)
-        payload = {"value": "ok", "hp": stats["hp"], "hp_gw": values[0], "speed": stats["speed"], "speed_gw": values[1], "phy_att": stats["phy_att"], "phy_att_gw": values[2], "mag_att": stats["mag_att"], "mag_att_gw": values[3], "phy_def": stats["phy_def"], "phy_def_gw": values[4], "mag_def": stats["mag_def"], "mag_def_gw": values[5], "total_gw": total, "gw_rate": min(5, max(1, total // 20 + 1))}
+        payload = {"value": "ok", "hp": stats["hp"], "hp_gw": values[0], "speed": stats["speed"], "speed_gw": values[1], "phy_att": stats["phy_att"], "phy_att_gw": values[2], "mag_att": stats["mag_att"], "mag_att_gw": values[3], "phy_def": stats["phy_def"], "phy_def_gw": values[4], "mag_def": stats["mag_def"], "mag_def_gw": values[5], "total_gw": total, "gw_rate": _gw_rate(total, lo, hi)}
     return _protocol_response(19, payload)
 
 
