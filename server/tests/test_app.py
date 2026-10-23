@@ -1618,11 +1618,11 @@ def test_explore_maps_unlock_through_the_progress_chain(tmp_path: Path):
             " VALUES (1, ?, ?)", (int(page[0]["id"]), need)
         )
         connection.commit()
-    # Normal paging: page 1 still leads with the chain root, and the next map is
-    # now unlocked.
+    # The list now starts at the first not-yet-cleared map, so the unlocked one is
+    # the first entry rather than the second.
     after = rows()
-    assert after[1]["id"] == second
-    assert after[1]["is_open"] == 1, "clearing the previous map must unlock the next"
+    assert after[0]["id"] == second, "the page must lead with the current frontier"
+    assert after[0]["is_open"] == 1, "clearing the previous map must unlock the next"
 
 
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
