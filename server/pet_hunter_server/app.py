@@ -3749,7 +3749,7 @@ def _explore_list(database_path: Path) -> Response:
         chain = _explore_chain_order()
     else:
         chain = [gid for gid in _explore_chain_order() if _explore_map_world(gid) == world]
-    for gid in chain:
+    for chain_position, gid in enumerate(chain, start=1):
         if page_type != 1 and _explore_map_world(gid) != world:
             continue
         row=_explore_map_row(gid)
@@ -3758,7 +3758,9 @@ def _explore_list(database_path: Path) -> Response:
             (player["id"], gid),
         ).fetchone()
         rate = int(progress["discover_rate"] or 0) if progress else 0
-        rows.append({"index":gid,"code":gid,"id":gid,"terrain":row["terrain"],
+        # 角标显示链上的序号（1,2,3…），不是地图 id —— 全局链里 id 会跨世界跳动
+        # （101、212…），看起来像乱码。id 仍用于 99/103。
+        rows.append({"index":gid,"code":chain_position,"id":gid,"terrain":row["terrain"],
                      "name":row["name"],
                      "star":row["star"],"max_days":row["max_days"],
                      # 客户端把 isClick 硬编码为 true，所以这些字段目前只用于展示；
