@@ -2143,6 +2143,9 @@ LOCAL_EXPLORE_DISCOVER_GAIN = 100
 # 每张图需要几次探险才能打满（LOCAL DESIGN）。
 LOCAL_EXPLORE_RUNS_PER_MAP = 3
 
+# 装备租赁默认开通的槽位（LOCAL DESIGN）。上限 9 对应客户端 3x3 网格。
+LOCAL_EXPLORE_DEFAULT_SLOTS = 3
+
 
 def _explore_discover_gain(need_rate: int) -> int:
     """一次探险给多少发现率：按该图真实通关线的一半 —— 每张图两次通关。
