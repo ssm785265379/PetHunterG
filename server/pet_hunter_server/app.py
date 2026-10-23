@@ -676,6 +676,8 @@ def _initialize_database(database_path: Path) -> None:
             # 出战槽位（1/2，0=未安排）。和 battle_state 分开：后者被"能否放生/合成"
             # 等逻辑当作"在队里"使用，直接改它会牵动十几处查询。
             ("squad_slot", "ALTER TABLE pets ADD COLUMN squad_slot INTEGER NOT NULL DEFAULT 0"),
+            # 训练收益先记账、到点再发放（用户要求"时间结束再点才加属性"）。
+            ("train_gain", "ALTER TABLE pets ADD COLUMN train_gain INTEGER NOT NULL DEFAULT 0"),
             ("train_state", "ALTER TABLE pets ADD COLUMN train_state INTEGER NOT NULL DEFAULT 0"),
             ("train_type", "ALTER TABLE pets ADD COLUMN train_type INTEGER NOT NULL DEFAULT 0"),
             ("train_end", "ALTER TABLE pets ADD COLUMN train_end INTEGER NOT NULL DEFAULT 0"),
@@ -3652,8 +3654,27 @@ def _training_overview(database_path: Path) -> Response:
         player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
-        # Drop finished runs first so the list never reports a stale countdown.
-        c.execute("UPDATE pets SET train_state=0, train_type=0, train_end=0 WHERE train_end>0 AND train_end<=?", (now,))
+        # 结算已到期的训练：把开始时就记下的 train_gain 写进对应两项强化值，
+        # 然后清空时间与欠账。这样玩家看到的行为是"倒计时走完、下次打开养成页
+        # 属性才涨"，与界面预期一致（训练进行中不会提前加）。
+        finished = c.execute(
+            "SELECT id, train_type, train_gain, pro_hp, pro_speed, pro_phy_att,"
+            " pro_mag_att, pro_phy_def, pro_mag_def FROM pets"
+            " WHERE player_id=? AND train_end>0 AND train_end<=?",
+            (player["id"], now),
+        ).fetchall()
+        for pet in finished:
+            gain = int(pet["train_gain"] or 0)
+            for column in LOCAL_TRAIN_GAIN.get(int(pet["train_type"] or 0), ()):
+                current = int(pet[column] or 0)
+                step = min(gain, max(0, LOCAL_PRO_CAP - current))
+                if step:
+                    c.execute(f"UPDATE pets SET {column} = ? WHERE id = ?",
+                              (current + step, pet["id"]))
+            c.execute(
+                "UPDATE pets SET train_state=0, train_type=0, train_end=0, train_gain=0"
+                " WHERE id=?", (pet["id"],)
+            )
         training = c.execute(
             """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
                FROM pets WHERE player_id=? AND train_end>?
@@ -3766,25 +3787,20 @@ def _training_action(database_path: Path) -> Response:
         if row is None: return _pet_error(506)
         if row["is_locked"]: return _pet_error(100)
         if row["train_end"] and row["train_end"] > now: return _pet_error(100)
-        # The client has no "collect" command: DevelopItem just re-reads 504 when
-        # the countdown ends. Applying the gain only at collection time therefore
-        # never happened — training was a no-op and every reinforcement stayed 0.
-        # Write it at start instead, so the numbers are real the moment it begins.
+        # 训练收益先记账（train_gain），到点由 _training_overview 发放。
+        # 直接开始就加属性会让"训练中"和"练完"没有区别，也看不出倒计时的意义。
         per_run = _train_gain(row["lv"] or 1) * (3 if ttype == 3 else 1)
         columns = LOCAL_TRAIN_GAIN[ttype]
         applied: dict[str,int] = {}
-        values: list[int] = []
         for column in columns:
             current = int(row[column] or 0)
-            step = min(per_run, max(0, LOCAL_PRO_CAP - current))
-            applied[column] = step
-            values.append(current + step)
+            applied[column] = min(per_run, max(0, LOCAL_PRO_CAP - current))
         if not any(applied.values()):
-            return _pet_error(100)  # already capped; don't burn the cooldown
-        assignments = ", ".join(f"{column} = ?" for column in columns)
+            return _pet_error(100)  # 已到上限，不白占冷却
         c.execute(
-            f"UPDATE pets SET {assignments}, train_state=?, train_type=?, train_end=? WHERE id=?",
-            (*values, ttype, ttype, now + LOCAL_TRAIN_SECONDS, idx),
+            "UPDATE pets SET train_state=?, train_type=?, train_end=?, train_gain=?"
+            " WHERE id=?",
+            (ttype, ttype, now + LOCAL_TRAIN_SECONDS, applied[columns[0]], idx),
         )
         reward_point = 50 * int(row["lv"] or 1) if ttype == 2 else 0
         reward_exp = 10 * int(row["lv"] or 1) if ttype == 3 else 0

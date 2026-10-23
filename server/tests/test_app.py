@@ -2920,12 +2920,21 @@ def test_training_action_reports_the_matching_stat_gain(tmp_path: Path):
     assert defence["add_phy_def_tp"] == def_gain and defence["add_mag_def_tp"] == def_gain
     assert defence["add_hp_tp"] == 0
 
-    # The reinforcement must actually land in the row, otherwise the run is a
-    # no-op that the client can never "collect" (there is no collect command).
+    # 训练收益是"到点发放"而不是"开始即加"：开始时只记账，
+    # 倒计时结束后由 504（养成总览）结算。
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT pro_hp, pro_speed FROM pets WHERE id=?", (indexes[0],)
-        ).fetchone() == (hp_gain, hp_gain)
+            "SELECT pro_hp, pro_speed, train_gain FROM pets WHERE id=?", (indexes[0],)
+        ).fetchone() == (0, 0, hp_gain), "starting a run must not change stats yet"
+
+        # 把倒计时拨到过去，再打开养成页 -> 收益到账
+        connection.execute("UPDATE pets SET train_end=1 WHERE id=?", (indexes[0],))
+        connection.commit()
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid}))
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT pro_hp, pro_speed, train_gain FROM pets WHERE id=?", (indexes[0],)
+        ).fetchone() == (hp_gain, hp_gain, 0), "the finished run must pay out on read"
 
     for payload in (hp, att, defence):
         assert payload["pet"]["name"], "a null name renders as the string null"
