@@ -3439,6 +3439,9 @@ def _explore_start(database_path: Path) -> Response:
     is_win/hunt_type/map_id/monster_group/att_list/def_list/record contract as the
     hunt screen, so the shared battle builder applies.
     """
+    # 非战斗事件（城镇/温泉/绿洲/灾难）不打架，但会让这一天过去：
+    # ExploreEventResultUI 显示文案后会自动再发一次 103（或回地图列表）。
+    non_battle = _request_value("ttype") != "1"
     gid_value=_request_value("gid")
     uid=_request_value("uid")
     try:
@@ -3479,6 +3482,47 @@ def _explore_start(database_path: Path) -> Response:
             _explore_reference_level(gid),
             int(squad_lv) + LOCAL_HUNT_LEVEL_BAND,
         )
+        event_type = _explore_roll_event(gid)
+        if event_type != 1:
+            # 休整（2 城镇 / 3 温泉 / 5 绿洲）给一半发现率；灾难（6-12）无进展。
+            rest = event_type in (2, 3, 5)
+            gain = _explore_discover_gain(int(m["need_discover_rate"] or 0))
+            gain = max(1, gain // 2) if rest else 0
+            if gain:
+                c.execute(
+                    "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
+                    " VALUES (?, ?, ?) ON CONFLICT(player_id, map_id)"
+                    " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
+                    (p["id"], gid, gain),
+                )
+            row = c.execute(
+                "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+                (p["id"], gid),
+            ).fetchone()
+            rate_now = int(row["discover_rate"] or 0) if row else 0
+            done = rate_now >= int(m["need_discover_rate"] or 0)
+            if done:
+                c.execute(
+                    "UPDATE explore_progress SET pass_claimed=1, star_best=5"
+                    " WHERE player_id=? AND map_id=?", (p["id"], gid))
+            return _protocol_response(103, {
+                "value": "ok",
+                "event_type": event_type,
+                "world": m["world"], "world_id": m["world"],
+                "is_tired": 0,
+                "is_finish": 1 if done else 0,
+                "explore_ap": explore_ap, "max_explore_ap": max_explore_ap,
+                "now_discover_rate": rate_now, "add_discover_rate": gain,
+                "need_discover_rate": m["need_discover_rate"],
+                "energy": _pet_energy(_explore_lead_species(c, p["id"])),
+                "cost_energy": 0, "add_energy": 0,
+                "supply": 0, "cost_supply": 0, "add_supply": 0,
+                "discover_days": 1, "add_discover_days": 1 if rest else 0,
+                "terrain": m["terrain"],
+                "horse": _explore_horse(database_path, p["id"]),
+                "finish_reward": _reward_block(0, 0, []),
+                "max_star_reward": _reward_block(0, 0, []),
+            })
         defenders = _defenders_for_level(1, reference_lv, terrain=m["terrain"])
         if not defenders:
             # 该地形在等级带内没有合适属性的怪，回退到不筛地形，避免空战斗。
@@ -3775,6 +3819,40 @@ def _explore_chain_order() -> tuple[int, ...]:
     # 断链的尾部按 id 兜底，保证不会丢图
     order.extend(gid for gid in sorted(need) if gid not in placed)
     return tuple(order)
+
+
+def _explore_lead_species(connection, player_id: int) -> int:
+    """探险队伍的领队物种 id（_pet_energy 需要 species，不是 pets.id）。"""
+    row = connection.execute(
+        "SELECT pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0"
+        " ORDER BY id LIMIT 1", (player_id,)).fetchone()
+    return int(row["pet_id"]) if row else 0
+
+
+def _explore_roll_event(gid: int) -> int:
+    """按 exploreMap.txt 的 events / eventProbability 抽一个事件类型。
+
+    `events` 是 11:12:13:14:15 这样的 id 列表，`eventProbability` 是权重
+    （5700:2000:500:500:1300）。事件 id 的**末位**就是类型：
+    1 战斗 / 2 城镇 / 3 温泉 / 4 未知 / 5 绿洲（见 GameUtil.getExploreEvent）。
+    原来恒定返回 1，等于把 43% 的事件全部吞掉。
+    """
+    record = _explore_map_table().get(gid)
+    if record is None:
+        return 1
+    ids = [part for part in str(record.get("events", "")).split(":") if part.strip()]
+    weights = [
+        int(part) if part.strip().isdigit() else 0
+        for part in str(record.get("eventProbability", "")).split(":")
+    ]
+    if not ids or not weights:
+        return 1
+    weights = (weights + [0] * len(ids))[: len(ids)]
+    if sum(weights) <= 0:
+        return 1
+    chosen = random.choices(ids, weights=weights, k=1)[0]
+    digits = "".join(ch for ch in str(chosen) if ch.isdigit())
+    return int(digits[-1]) if digits else 1
 
 
 def _explore_map_open(connection, player_id: int, gid: int) -> bool:

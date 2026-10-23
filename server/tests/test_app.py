@@ -22,6 +22,9 @@ def _deterministic_encounters(monkeypatch):
     from pet_hunter_server import app as _app
 
     monkeypatch.setattr(_app, "LOCAL_ELITE_CHANCE", 0.0, raising=False)
+    # 探险现在按 events/eventProbability 抽事件（约 43% 是非战斗）。
+    # 测试默认钉成"战斗"，需要休整/灾难的用例自己 monkeypatch。
+    monkeypatch.setattr(_app, "_explore_roll_event", lambda gid: 1, raising=False)
 
 
 def test_health_check_is_available_to_local_client():
@@ -2211,6 +2214,38 @@ def test_terrain_picks_matching_monster_families(tmp_path: Path):
 
     # 没有地形的旧调用路径不受影响。
     assert A._defenders_for_level(1, 60, count=2)
+
+
+def test_explore_rest_event_advances_without_a_battle(tmp_path: Path, monkeypatch):
+    # 事件池里 43% 是城镇/温泉/绿洲(休整) 或灾难。原来服务端恒发 event_type=1，
+    # 等于把这些交互全吞了。休整给一半发现率、不打架；灾难不给进展。
+    from pet_hunter_server import app as A
+
+    table = config_tables._table("exploreMap.txt")
+    gid = sorted(int(k) for k in table)[0]
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RestEv")
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": str(gid)}))
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 2)
+    command, rest = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert rest["event_type"] == 2, "a town event must not be reported as a battle"
+    assert "battle_result" not in rest
+    assert rest["add_discover_rate"] > 0, "resting still advances the trip"
+    assert rest["now_discover_rate"] > 0
+
+    # 灾难：没有进展，也不打架
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 6)
+    command, bad = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert bad["event_type"] == 6
+    assert bad["add_discover_rate"] == 0, "a blocked day must not advance discovery"
 
 
 def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
