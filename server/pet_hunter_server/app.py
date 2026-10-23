@@ -3479,7 +3479,10 @@ def _explore_start(database_path: Path) -> Response:
             _explore_reference_level(gid),
             int(squad_lv) + LOCAL_HUNT_LEVEL_BAND,
         )
-        defenders = _defenders_for_level(1, reference_lv)
+        defenders = _defenders_for_level(1, reference_lv, terrain=m["terrain"])
+        if not defenders:
+            # 该地形在等级带内没有合适属性的怪，回退到不筛地形，避免空战斗。
+            defenders = _defenders_for_level(1, reference_lv)
         if defenders and random.random() < LOCAL_ELITE_CHANCE:
             # 探险也吃精英遭遇：领队 ×1.6，奖励翻倍（与狩猎同一套开关）。
             leader = dict(defenders[0])
@@ -4174,7 +4177,20 @@ def _defenders_from_monsters(ids) -> list[dict[str, object]]:
     return [m for m in (_pick_monster(i) for i in ids) if m is not None]
 
 
-def _defenders_for_level(base_id: int, reference_lv: int, count: int = 2) -> list[dict[str, object]]:
+# 地形 -> monster.txt 的 properties 偏好（故事/视觉一致，非配置表原值）。
+# 1 平原 野兽(4)/波利(0)；2 草地 草系(2)；3 雪地 水系(3)；4 沙漠 兽/岩(4)；5 火山 火系(1)
+LOCAL_TERRAIN_PROPERTIES = {
+    1: (0, 4),
+    2: (2,),
+    3: (3,),
+    4: (4, 0),
+    5: (1,),
+}
+
+
+def _defenders_for_level(
+    base_id: int, reference_lv: int, count: int = 2, terrain: int | None = None
+) -> list[dict[str, object]]:
     """Base monster plus the one closest to `reference_lv` (same level or above).
 
     Fixed id pairs made fights lopsided: the dungeon used monster 1 (L1) together
@@ -4187,6 +4203,9 @@ def _defenders_for_level(base_id: int, reference_lv: int, count: int = 2) -> lis
     if len(picked) >= count:
         return picked
     candidates: list[tuple[int, int]] = []
+    fallback: list[tuple[int, int]] = []
+    preferred = LOCAL_TERRAIN_PROPERTIES.get(int(terrain or 0))
+    preferred_set = {str(value) for value in preferred} if preferred else set()
     for monster_id in sorted(int(m) for m in table):
         if monster_id == base_id:
             continue
@@ -4195,9 +4214,16 @@ def _defenders_for_level(base_id: int, reference_lv: int, count: int = 2) -> lis
         delta = level - reference_lv
         if delta < 0 or delta > LOCAL_HUNT_LEVEL_BAND:
             continue
-        candidates.append((delta, monster_id))
+        # 地形决定出什么怪：沙漠出兽系、雪地出水系、火山出火系，平原则混杂。
+        # 属性不符的进 fallback，保证不会因为该地形怪太少而凑不满队伍。
+        prop = str(table[monster_id].get("properties", "")).strip()
+        if preferred_set and prop not in preferred_set:
+            fallback.append((delta, monster_id))
+        else:
+            candidates.append((delta, monster_id))
     candidates.sort()
-    for _, monster_id in candidates:
+    fallback.sort()
+    for _, monster_id in candidates + fallback:
         monster = _pick_monster(monster_id)
         if monster is not None:
             picked.append(monster)

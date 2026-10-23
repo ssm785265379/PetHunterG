@@ -2184,6 +2184,35 @@ def test_explore_reward_grammar_is_kind_id_icon_num():
     assert _parse_map_goods("10016:1") == [(1, 10016, 1, 10016)]
 
 
+def test_terrain_picks_matching_monster_families(tmp_path: Path):
+    # 地形决定怪物族群：火山出火系(1)、雪地出水系(3)、草地出草系(2)、沙漠出兽系(4)。
+    from pet_hunter_server import app as A
+    from pet_hunter_server import config_tables as tables
+
+    monsters = tables._table("monster.txt")
+    expected = {1: ("0", "4"), 2: ("2",), 3: ("3",), 4: ("4", "0"), 5: ("1",)}
+    for terrain, props in expected.items():
+        picked = A._defenders_for_level(1, 60, count=3, terrain=terrain)
+        assert picked, f"terrain {terrain} must still produce defenders"
+        got = {
+            str(monsters[int(p["id"])].get("properties", "")).strip()
+            for p in picked
+            if int(p["id"]) in monsters
+        }
+        # 等级带里存在该地形属性的怪时，必须优先选到；否则允许回退。
+        in_band = {
+            str(monsters[mid].get("properties", "")).strip()
+            for mid in monsters
+            if str(monsters[mid].get("level", "")).strip().isdigit()
+            and 0 <= int(str(monsters[mid]["level"]).strip()) - 60 <= A.LOCAL_HUNT_LEVEL_BAND
+        }
+        if in_band & set(props):
+            assert got & set(props), f"terrain {terrain} produced {got}, wanted {props}"
+
+    # 没有地形的旧调用路径不受影响。
+    assert A._defenders_for_level(1, 60, count=2)
+
+
 def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     # Map 13's pass reward is equipment 50001, which lives in equip.txt rather than
     # prop.txt. inventory is UNIQUE(player_id, item_id), so a repeat drop has to
