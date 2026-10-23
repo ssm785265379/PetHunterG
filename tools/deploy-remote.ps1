@@ -18,7 +18,10 @@ param(
     [int]$LocalAppPort = 8081,
     [string]$User = "root",
     [string]$RemoteDir = "/opt/pethunter",
-    [switch]$SkipApk
+    [switch]$SkipApk,
+    # 默认**不**用本机存档覆盖远端：部署后进度以服务器为准，误覆盖会丢档。
+    # 只有首次部署或明确要回迁本机存档时才加 -WithSave。
+    [switch]$WithSave
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +40,12 @@ New-Item -ItemType Directory -Path "$stage\instance" -Force | Out-Null
 Copy-Item (Join-Path $repo "server\pet_hunter_server") -Destination $stage -Recurse
 Copy-Item (Join-Path $repo "client\air51-repack\src\data\zh-CN\config\*.txt") -Destination "$stage\config-data\zh-CN\config"
 Copy-Item (Join-Path $repo "client\air51-repack\src\data\skin.txt") -Destination "$stage\config-data"
-Copy-Item (Join-Path $repo "server\instance\game.sqlite3") -Destination "$stage\instance"
+if ($WithSave) {
+    Copy-Item (Join-Path $repo "server\instance\game.sqlite3") -Destination "$stage\instance"
+    Write-Host "      已包含本机存档（-WithSave）" -ForegroundColor Yellow
+} else {
+    Write-Host "      不含存档：部署后保留服务器上现有进度" -ForegroundColor Green
+}
 Remove-Item "$stage\pet_hunter_server\__pycache__" -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
@@ -76,7 +84,12 @@ sftp.put(zip_path, "/tmp/pethunter-deploy.zip")
 sftp.close()
 
 run("which unzip >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq unzip) 2>&1 | tail -1")
+# 远端存档必须保住：先备份到 /tmp，重装后还原（除非本次带了新存档）
+run(f"[ -f {remote}/instance/game.sqlite3 ] && cp -f {remote}/instance/game.sqlite3 /tmp/ph-save.sqlite3 || true")
 run(f"rm -rf {remote} && mkdir -p {remote} && cd {remote} && unzip -q /tmp/pethunter-deploy.zip")
+run(f"mkdir -p {remote}/instance && "
+    f"if [ -f /tmp/ph-save.sqlite3 ]; then cp -f /tmp/ph-save.sqlite3 {remote}/instance/game.sqlite3; "
+    f"echo 'kept remote save'; fi")
 run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3.12-venv 2>&1 | tail -1")
 run(f"python3 -m venv {remote}/.venv && {remote}/.venv/bin/pip install -q --upgrade pip "
     f"&& {remote}/.venv/bin/pip install -q flask")
