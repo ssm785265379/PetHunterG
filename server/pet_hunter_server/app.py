@@ -4122,9 +4122,12 @@ def _explore_hire_list(database_path: Path) -> Response:
         # (command 100) could never be reached and the mount was unpickable.
         # Filter by the requested category: without it the mount page counted the
         # expedition gear too (equip_count read 6/6) and listed gear as "mounts".
+        # 坐骑页只读 list[0] 当作"当前坐骑"（HireMountsUI.as:204），所以必须把
+        # 正在使用的那只排在第一位——而"在用"就是最近租的那只（id 最大）。
+        order = " ORDER BY id DESC" if ttype == 1 else " ORDER BY equip_id"
         rented_rows = c.execute(
             "SELECT equip_id, slot_type FROM explore_rented WHERE player_id=? AND slot_type=?"
-            " ORDER BY equip_id",
+            + order,
             (player["id"], ttype),
         ).fetchall()
     rented_entries = [
