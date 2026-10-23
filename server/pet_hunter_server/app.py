@@ -4645,6 +4645,14 @@ def _explore_rent(database_path: Path) -> Response:
             or own_point < need_point
             or own_crystal < need_crystal
         ):
+            # 客户端对失败分支是静默 return（HireShopInfoUI.as:166-179），玩家看到的
+            # 就是"点了没反应"，所以这里必须留下可查的日志。
+            current_app.logger.warning(
+                "RENT_REJECTED gid=%s ttype=%s need(money=%s point=%s crystal=%s) "
+                "own(money=%s point=%s crystal=%s)",
+                gid, ttype, need_money, need_point, need_crystal,
+                own_money, own_point, own_crystal,
+            )
             return _protocol_response(102, {
                 "value": "not_enough",
                 "need_money": need_money, "own_money": own_money,
@@ -4663,6 +4671,10 @@ def _explore_rent(database_path: Path) -> Response:
         # Mounts (slot_type 1) are a single-slot choice, not a growing roster: the
         # old rows are deleted below, so a full category must not block switching.
         if ttype != 1 and count >= LOCAL_EXPLORE_HIRE_SLOTS:
+            current_app.logger.warning(
+                "RENT_REJECTED gid=%s ttype=%s reason=slots_full count=%s",
+                gid, ttype, count,
+            )
             return _protocol_response(
                 102, {"value": "full", "need_money": 0, "own_money": 0}
             )
