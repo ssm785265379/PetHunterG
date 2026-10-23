@@ -9,11 +9,11 @@
 #   * 存档是 server/instance/game.sqlite3 的一份**拷贝**；部署后进度以服务器上的为准。
 #
 # 用法（在本机仓库根目录执行）：
-#   pwsh -File tools\deploy-remote.ps1 -Host 43.173.99.241 -Port 8080
+#   pwsh -File tools\deploy-remote.ps1 -ServerHost 43.173.99.241 -Port 8080
 # 需要环境变量 VPS_PWD 提供 SSH 密码；脚本不会把密码写进任何文件。
 
 param(
-    [Parameter(Mandatory = $true)][string]$Host,
+    [Parameter(Mandatory = $true)][string]$ServerHost,
     [int]$Port = 8080,
     [int]$LocalAppPort = 8081,
     [string]$User = "root",
@@ -53,7 +53,7 @@ Write-Host "      已生成 $([math]::Round((Get-Item $zip).Length/1KB,1)) KB" -
 
 # 2) 上传并安装 ---------------------------------------------------------
 Write-Host "[2/5] 上传并安装到 $RemoteDir" -ForegroundColor Cyan
-$env:DEPLOY_HOST = $Host
+$env:DEPLOY_HOST = $ServerHost
 $env:DEPLOY_PORT = "$Port"
 $env:DEPLOY_APP_PORT = "$LocalAppPort"
 $env:DEPLOY_USER = $User
@@ -154,7 +154,7 @@ Remove-Item (Join-Path $env:TEMP "ph_deploy.py")
 # 3) 公网验证 -----------------------------------------------------------
 Write-Host "[3/5] 公网连通性验证" -ForegroundColor Cyan
 try {
-    $r = Invoke-WebRequest "http://${Host}:${Port}/data/android/zh-CN/server.xml" -UseBasicParsing -TimeoutSec 10
+    $r = Invoke-WebRequest "http://${ServerHost}:${Port}/data/android/zh-CN/server.xml" -UseBasicParsing -TimeoutSec 10
     Write-Host "      HTTP $($r.StatusCode) OK" -ForegroundColor Green
 } catch {
     Write-Host "      公网访问失败：请到云控制台安全组放行 TCP $Port" -ForegroundColor Red
@@ -182,6 +182,6 @@ if (-not $SkipApk) {
 # 5) 收尾 ---------------------------------------------------------------
 Write-Host "[5/5] 完成" -ForegroundColor Cyan
 Write-Host "  服务端：$RemoteDir（systemd: pethunter）"
-Write-Host "  公网入口：http://${Host}:${Port}/"
+Write-Host "  公网入口：http://${ServerHost}:${Port}/"
 Write-Host "  APK：client\air51-repack\build\out\PetHunterG-Remote.apk（需用 adt 打包并安装）"
 Write-Host "  注意：存档是拷贝，部署后以服务器上的为准。"
