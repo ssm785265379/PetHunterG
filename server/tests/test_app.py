@@ -1498,10 +1498,20 @@ def test_explore_list_rows_match_client_fields(tmp_path: Path):
     # ExploreMapListUI.as:200-260 needs world/explore_ap/max_explore_ap and rows
     # carrying code,id,terrain,star,max_days; ttype selects the world.
     database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"ExpT")
-    command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":98,"uid":uid,"ttype":1}))
-    assert command==98 and payload["world"]==1 and "explore_ap" in payload
-    row=payload["list"][0]
-    assert all(k in row for k in ("code","id","terrain","star","max_days"))
+    # ttype=1 is the WORLD picker: MainUI.as:262-272 only opens WorldMapUI when the
+    # response carries type == 1, and the rows are {id,state}.
+    command, worlds = _envelope(client.post("/flash.do", data={"m": "show", "showId": 98, "uid": uid, "ttype": 1}))
+    assert command == 98
+    assert worlds["type"] == 1
+    assert worlds["list"], "the world picker cannot be empty"
+    assert all("id" in row for row in worlds["list"])
+
+    # ttype=2 + gid selects a world and returns its map page.
+    command, payload = _envelope(client.post("/flash.do", data={"m": "show", "showId": 98, "uid": uid, "ttype": 2, "gid": 1}))
+    assert command == 98 and payload["world"] == 1 and payload["type"] == 2
+    assert "explore_ap" in payload
+    row = payload["list"][0]
+    assert all(k in row for k in ("code", "id", "terrain", "star", "max_days"))
 
 
 def test_hunt_task_response_carries_id_for_fight_buttons(tmp_path: Path):

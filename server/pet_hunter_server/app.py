@@ -3509,7 +3509,8 @@ def _explore_list(database_path: Path) -> Response:
         # world id travels in `gid`, while ttype is just the page kind. Reading
         # ttype as the world made page 2 of world 1 silently switch to world 2 and
         # replay its first screen forever.
-        world = int(_request_value("gid", "") or _request_value("ttype", "1"))
+        page_type = int(_request_value("ttype", "1") or 1)
+        world = int(_request_value("gid", "") or page_type or 1)
         page = int(_request_value("p", "1"))
         size = int(_request_value("n", "9"))
     except ValueError: return _pet_error(100)
@@ -3529,6 +3530,26 @@ def _explore_list(database_path: Path) -> Response:
             player = c.execute(
                 "SELECT id,explore_ap,max_explore_ap FROM players WHERE id=?", (player["id"],)
             ).fetchone()
+    # ttype=1 is the WORLD picker: MainUI.as:262-272 only routes to WorldMapUI when
+    # the response carries type == 1, otherwise it goes straight to a map list.
+    # Without this the player was locked into world 1 forever — and world 1 is
+    # almost entirely terrain 1, which is the "探险全是平原" report.
+    if page_type == 1:
+        world_table = config_tables._table("worldMap.txt")
+        worlds = [
+            {"id": int(world_id), "state": 0}
+            for world_id in sorted(int(k) for k in world_table)
+        ]
+        if not worlds:
+            worlds = [{"id": index, "state": 0} for index in range(1, 10)]
+        return _protocol_response(98, {
+            "type": 1,
+            "world": 0,
+            "explore_ap": player["explore_ap"],
+            "max_explore_ap": player["max_explore_ap"],
+            "list": worlds,
+        })
+
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
     rows=[]
@@ -3545,6 +3566,7 @@ def _explore_list(database_path: Path) -> Response:
     # the list.
     page_rows = rows[(page - 1) * size: page * size]
     return _protocol_response(98,{
+        "type": 2,
         "world":world,
         "explore_ap":player["explore_ap"],
         "max_explore_ap":player["max_explore_ap"],
@@ -3745,7 +3767,7 @@ LOCAL_ARENA_RIVAL_NAME = "试炼对手"
 LOCAL_ARENA_RIVAL_LEVEL = 5
 
 
-LOCAL_EXPLORE_HIRE_SLOTS = 6
+LOCAL_EXPLORE_HIRE_SLOTS = 9
 # LOCAL DEFAULT: the free starter mount (first row of exploreEquip type=1, 驴).
 # Giving every character one keeps the mount page usable; renting others switches.
 LOCAL_STARTER_MOUNT_ID = 100001
