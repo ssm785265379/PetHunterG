@@ -1222,7 +1222,14 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     #   overlay        - draw both (the historical behaviour; can look doubled)
     #   replace        - gear wins at its own z, base parts at that z are dropped
     #   gear_only      - hide the base triple entirely (debug)
-    mode = os.environ.get("PETHUNTER_SKIN_MODE", "overlay").strip().lower()
+    # DEFAULT IS replace: the base triple is not "body + head + hair" but a
+    # *complete default outfit* — 100002 (z4) is the body, 100003 (z5) the head and
+    # 100001 (z6) the arms holding a default weapon. Measured sprite sizes confirm
+    # it: 100001 is only 270x135 while the armour is 183x300, and the default arms
+    # sprite is the same shape as a weapon sprite (258x142). Equipment therefore
+    # REPLACES the base layer at its own depth, which is also why switching a
+    # weapon is supposed to change the arms+weapon sprite.
+    mode = os.environ.get("PETHUNTER_SKIN_MODE", "replace").strip().lower()
     if mode == "overlay_no_weapon" and gear:
         # 基础身体贴图 100001 本身已经握着一把剑（真机确认：裸装时手上仍有武器），
         # 所以再叠加装备里的武器图层就会看到两把。武器只保留属性、不再画第二把；

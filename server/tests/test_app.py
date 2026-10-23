@@ -2693,6 +2693,44 @@ def test_hunt_result_fills_the_picture_book_panel(tmp_path: Path):
     assert {entry["id"] for entry in pic} <= expected
 
 
+def test_equipped_layers_replace_the_base_depth(tmp_path: Path):
+    # The base triple is a complete default outfit, not body+head+hair:
+    #   100002 (z4) body, 100003 (z5) head, 100001 (z6) arms + default weapon.
+    # Sprite sizes back this up (100001 is 270x135, the armour is 183x300), so
+    # equipment REPLACES the base layer at its own depth. Stacking instead put a
+    # second weapon on the character and made weapon skins unchangeable.
+    from pet_hunter_server import app as A
+    from pet_hunter_server import config_tables as tables
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SkinRep")
+    with sqlite3.connect(database) as connection:
+        # one piece per depth: weapon z6, helmet z5, armour z4
+        rows = connection.execute(
+            "SELECT id, item_id FROM inventory WHERE player_id=1 AND team=3"
+        ).fetchall()
+        used = set()
+        for item_id, row_id in rows:
+            record = tables.equip_record(item_id) or {}
+            z = str(tables.skin_table().get(
+                int(str(record.get("imageId", "0") or 0).strip() or 0), {}
+            ).get("z", "")).strip()
+            if z in used or z not in ("4", "5", "6"):
+                continue
+            used.add(z)
+            connection.execute("UPDATE inventory SET equipped=1 WHERE id=?", (row_id,))
+        connection.commit()
+    _, payload = _envelope(client.post("/flash.do", data={"m": "show", "showId": "2", "uid": uid}))
+    ids = [int(part) for part in str(payload["img"]).split("_")]
+    depth = {z: [] for z in ("4", "5", "6")}
+    for lid in ids:
+        z = str(tables.skin_table().get(lid, {}).get("z", "")).strip()
+        depth.setdefault(z, []).append(lid)
+    for z in ("4", "5", "6"):
+        assert len(depth[z]) <= 1, f"depth {z} has two sprites stacked: {depth[z]}"
+
+
 def test_skin_string_carries_the_head_and_hair_layers(tmp_path: Path):
     # ShowItem.as:41-59 keeps only ids present in skin.txt (silently dropping the
     # rest) and :71 sorts by z DESCENDING, so the lowest z paints last / on top.
