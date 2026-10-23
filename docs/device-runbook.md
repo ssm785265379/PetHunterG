@@ -72,3 +72,59 @@
 - Iron-shop device check (2026-10-21 19:52): 主地图「集市」(688,924) → 城市 → 铁匠铺 (212,371) opened the blacksmith screen and rendered its 「完成所有的狩猎和探险地图，就能获得激活神器所需要的…」 gated text with no network error and no `#1065`.
 - Pet detail re-check (2026-10-21 19:49): 牧场 (345,793) → 宠物 (886,770) → first cell (202,564) produced `showId=11` then `showId=12` (both HTTP 200) and rendered 《宠物资料》/ 昵称 喷火龙 / 星级 / 等级 5 / 属性 火 / 进化 烈焰龙. Opening the mutation target bag produced `showId=22` (HTTP 200) and rendered 体力饮料 3.
 - Pet write commands (2026-10-21 14:49-14:51): server restarted onto the 39-test code. Writes were exercised against the live SQLite database over HTTP: rename 18 persisted (`name=阿火`), lock 55 returned `{"value":"true"}` then `{"value":"false"}`, evolve 14 returned the new detail (1001→1002, `next_pet`→1003), expand 40 changed `max_pet_num` 30→39, release 15 refused a locked pet with `-1:524` and succeeded after unlock. The on-device client then re-fetched and rendered the results: list showed `Lv5 阿火`, detail showed 名称 阿火 / 星级 ★★★ / 等级 5 / 属性 火 / 进化 烈焰龙 需要 Lv10, with the `p1002` icon resolving and no crash. The write commands' in-game button/confirm taps were **not** automated (confirm buttons are image assets and this session cannot read the screen), so UI-initiated write flow remains for a manual pass.
+
+
+## 公网服务器部署（2026-10-23）
+
+原先靠 USB + `adb reverse tcp:8080 tcp:8080` 把手机的 127.0.0.1:8080 转发到电脑，
+数据线一松就"网络错误"。现在改为部署到公网 VPS，手机直连，不再需要数据线。
+
+### 架构
+
+```
+手机 APK ──HTTP──> 43.173.99.241:8080 (nginx) ──> 127.0.0.1:8081 (Flask, systemd: pethunter)
+```
+
+服务端 CLI 有安全约束：**非回环地址必须是内网地址**，所以 Flask 只绑 127.0.0.1，
+公网入口交给 nginx 反代 —— 这样也不会去抢服务器上已有的 80/443（该机还跑着宝塔、k3s 和
+一个 h16e.asia 站点）。
+
+### 服务器上的位置
+
+| 项 | 路径 |
+|---|---|
+| 代码 + venv | `/opt/pethunter`（`.venv` 内置 Flask） |
+| 配置表 | `/opt/pethunter/config-data`（`PETHUNTER_CONFIG_ROOT`） |
+| 存档 | `/opt/pethunter/instance/game.sqlite3` |
+| 服务器列表 | `/opt/pethunter/fixtures/data/android/server.xml` |
+| systemd | `/etc/systemd/system/pethunter.service` |
+| nginx 站点 | `/www/server/panel/vhost/nginx/pethunter.conf`（监听 8080） |
+
+### 常用命令
+
+```bash
+systemctl status pethunter
+systemctl restart pethunter
+journalctl -u pethunter -n 50 --no-pager
+nginx -t && nginx -s reload
+```
+
+### 客户端
+
+APK 里的服务器地址是**编译进 SWF 的**（4 处字符串），改地址必须重新打包：
+
+1. `client/air51-repack/patch_swf_url.py` 把 `http://127.0.0.1:8080` 替换成公网地址；
+2. 用 `adt -package -target apk-captive-runtime` 打包；
+3. 新包名是 `air.com.lv1.hunter.iconless.remote`（与原 LocalUSB 包并存，互不影响）。
+
+> 签名用的是新生成的自签名证书 `build/remote.p12`（密码在 `build/remote-signing.txt`，
+> 都在被忽略的 build 目录里）。因为是新证书 + 新包名，所以必须旁装，不能覆盖安装旧包。
+> 存档在服务器上，旁装不会丢进度。
+
+### 已知限制
+
+- 服务端是**明文 HTTP**，且没有账号校验 —— 任何知道地址的人都能连。仅适合个人使用；
+  若要长期开放，建议至少加 nginx 的 IP 白名单或 basic auth。
+- 存档是部署时的一份**拷贝**：之后进度只在服务器上增长，本地那份会过期。
+  需要回迁时手工把 `/opt/pethunter/instance/game.sqlite3` 拉回来。
+- SSH 用的是 root 密码；建议之后改成密钥登录并更换密码。
