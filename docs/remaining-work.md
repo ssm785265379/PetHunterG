@@ -100,3 +100,36 @@ VPS 运行日志（近 3 小时无 500）、以及试玩反馈的归因记录。
 
 已给 `/flash.do` 加 `after_request` 钩子：任何 `-1:<errorId>` 业务错误都会写
 `PROTOCOL_ERROR showId=... error=... uid=... fields=...`，可直接 `journalctl -u pethunter | grep PROTOCOL_ERROR`。
+
+
+## 2026-10-23 晚：防崩修复与两处"有证据但不该动"的判断
+
+### 已修：41 / 107 会让页面抛异常卡死
+
+这两个命令原来落到兜底 `{"value":"ok"}`，而客户端**无判空**直接读列表：
+
+- `InfoUI.as:232` — `var _loc8_:Array = param2.list; _loc8_.length`
+- `ArtifactListUI.as:365` — `_list = param2.pics; _list.length`
+
+字段不存在 → `TypeError` → 页面停在上一次渲染（表现为"点了没反应"）。
+已改为返回形状正确的空载荷（`list: []` / `pics: []`），内容仍是未实现状态。
+提交 `072ac76`。
+
+### 判断一：探险随机事件暂时不启用（P0 风险）
+
+`exploreMap.txt` 的 `events` / `eventProbability` 是真实数据，
+例如地图 1 是 `11:12:13:14:15` 配 `5700:2000:500:500:1300`
+（战斗 57%、类型2 20%、3 5%、4 5%、5 13%），现在服务端恒取第一个（战斗）。
+
+背景图也都存在：`map_event_3/4/5` 与 `map_event_2<world>`（`map_event_1` 缺失，
+但战斗事件走 `ExploreUI` 不渲染该页）。
+
+**但事件页的收尾会再发 103（EXPLORE_KEY）或 98**（`ExploreEventResultUI.as:242-257`）。
+如果发的是 103 而服务端又重滚一次事件，就会**反复停在事件页**。
+在真机确认这条分支之前不启用，避免把玩家困住。
+
+### 判断二：图鉴弹出层"不居中"需要截图才能改
+
+`IllustrationTaskUI.as:104-132` 里的文字坐标是硬编码的 `x = 20/120`，
+看起来像左对齐；但用户反馈的是"获得图鉴"那个弹窗，可能不是同一个界面。
+没有截图就不改——改错会把本来就正常的布局弄乱。
