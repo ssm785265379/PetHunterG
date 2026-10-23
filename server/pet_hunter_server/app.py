@@ -752,9 +752,6 @@ def _initialize_database(database_path: Path) -> None:
                 player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
                 map_id INTEGER NOT NULL,
                 discover_rate INTEGER NOT NULL DEFAULT 0,
-                -- 一张图 = 3 场连续战斗；hp_pct 让血条跨场继承。
-                battles INTEGER NOT NULL DEFAULT 0,
-                hp_pct INTEGER NOT NULL DEFAULT 100,
                 -- 历史最佳星级（0-5）与通关奖励是否已领
                 star_best INTEGER NOT NULL DEFAULT 0,
                 pass_claimed INTEGER NOT NULL DEFAULT 0,
@@ -767,8 +764,6 @@ def _initialize_database(database_path: Path) -> None:
             row[1] for row in connection.execute("PRAGMA table_info(explore_progress)")
         }
         for column, ddl in (
-            ("battles", "battles INTEGER NOT NULL DEFAULT 0"),
-            ("hp_pct", "hp_pct INTEGER NOT NULL DEFAULT 100"),
             ("star_best", "star_best INTEGER NOT NULL DEFAULT 0"),
             ("pass_claimed", "pass_claimed INTEGER NOT NULL DEFAULT 0"),
         ):
