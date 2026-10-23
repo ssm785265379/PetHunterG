@@ -2,6 +2,7 @@ import ipaddress
 import hashlib
 import hmac
 import json
+import os
 import math
 import random
 import secrets
@@ -1196,7 +1197,8 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
         female armour sprite — the "男女图层重合" seen on screen.
     """
     skin = config_tables.skin_table()
-    layers: list[int] = [lid for lid in _base_skin_layers(sex) if lid in skin]
+    base = [lid for lid in _base_skin_layers(sex) if lid in skin]
+    gear: list[int] = []
     for row in worn.values():
         record = config_tables.equip_record(row["item_id"])
         if not record:
@@ -1210,8 +1212,29 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
             if not record:
                 continue
         image_id = config_tables.equip_image_id(record)
-        if image_id and image_id in skin and image_id not in layers:
-            layers.append(image_id)
+        if image_id and image_id in skin and image_id not in gear:
+            gear.append(image_id)
+
+    # PETHUNTER_SKIN_MODE picks how equipment combines with the base triple. The
+    # client only stacks layers (ShowItem.as:72-79); it never merges them, so
+    # whether gear should REPLACE the base part at the same depth is a design
+    # question we can only settle by looking at the result:
+    #   overlay        - draw both (the historical behaviour; can look doubled)
+    #   replace        - gear wins at its own z, base parts at that z are dropped
+    #   gear_only      - hide the base triple entirely (debug)
+    mode = os.environ.get("PETHUNTER_SKIN_MODE", "overlay").strip().lower()
+    if mode == "replace" and gear:
+        taken = {int(skin.get(lid, {}).get("z", "0") or 0) for lid in gear}
+        layers = [lid for lid in base if int(skin.get(lid, {}).get("z", "0") or 0) not in taken]
+        layers.extend(gear)
+    elif mode == "gear_only" and gear:
+        layers = list(gear)
+    elif mode == "base_only":
+        # Debug mode: bare character, no equipment. Lets us see whether the base
+        # sprite already carries a weapon (which would explain a "second sword").
+        layers = list(base)
+    else:
+        layers = base + [lid for lid in gear if lid not in base]
     # Match the client: highest z first (bottom), lowest z last (top).
     layers.sort(key=lambda lid: int(skin.get(lid, {}).get("z", "0") or 0), reverse=True)
     return "_".join(str(lid) for lid in layers)
