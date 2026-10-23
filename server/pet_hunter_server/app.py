@@ -759,6 +759,14 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS explore_slots (
+                player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+                equip_slots INTEGER NOT NULL DEFAULT 3
+            )
+            """
+        )
         # 老库升级：上表的新增列在已存在的库上不会自动出现。
         existing = {
             row[1] for row in connection.execute("PRAGMA table_info(explore_progress)")
@@ -4096,6 +4104,22 @@ LOCAL_STARTER_MOUNT_ID = 100001
 LOCAL_EXPLORE_SLOT_PRICE = 12000
 
 
+def _explore_equip_slots(connection, player_id: int, rented: int) -> int:
+    """装备租赁上报的槽位数。
+
+    HireListUI.as:269-281 用 `index < equip_count-1` 决定哪一格可点开商店：
+    等于已租数量时一格可点的都没有，商店就永久不可达；直接写 9 又等于全部开通。
+    这里取"默认 3 格"与"已租数量+1"的较大值，上限 9——既不一步到顶，
+    也保证永远留一个可点的空格。
+    """
+    purchased = connection.execute(
+        "SELECT equip_slots FROM explore_slots WHERE player_id=?", (player_id,)
+    ).fetchone()
+    base = int(purchased["equip_slots"] or 0) if purchased else LOCAL_EXPLORE_DEFAULT_SLOTS
+    base = max(LOCAL_EXPLORE_DEFAULT_SLOTS, base)
+    return min(LOCAL_EXPLORE_HIRE_SLOTS, max(base, rented + 1))
+
+
 def _explore_hire_list(database_path: Path) -> Response:
     """104 (EXPLORE_CANCEL_RENT_KEY) — despite the name this is the hire list.
 
@@ -4145,7 +4169,8 @@ def _explore_hire_list(database_path: Path) -> Response:
             # 原来 equip_count 直接等于"已租数量"，于是每一格都落在"有数据"分支，
             # 商店入口彻底消失——装备租赁"从来没有成功过"的真正原因。
             # 装备页改为上报槽位总数，保证始终有可点的空格。
-            "equip_count": rented if ttype == 1 else max(rented, LOCAL_EXPLORE_HIRE_SLOTS),
+            # 坐骑一栏只有"当前在用"这一格，沿用已租数量；装备栏按槽位规则上报。
+            "equip_count": rented if ttype == 1 else _explore_equip_slots(c, player["id"], rented),
             "max_equip_count": LOCAL_EXPLORE_HIRE_SLOTS,
             "list": entries,
             "value": "ok",
@@ -4695,6 +4720,16 @@ def _explore_rent(database_path: Path) -> Response:
         ).fetchone()[0]
         # Mounts (slot_type 1) are a single-slot choice, not a growing roster: the
         # old rows are deleted below, so a full category must not block switching.
+        # 槽位满了再租新装备 = 替换最旧的一件（ExploreEquip 没有"取消租赁"命令，
+        # 客户端也没有入口，所以用"先进先出"实现玩家要的替换语义）。
+        if ttype != 1 and count >= LOCAL_EXPLORE_HIRE_SLOTS:
+            oldest = c.execute(
+                "SELECT id, equip_id FROM explore_rented WHERE player_id=? AND slot_type=?"
+                " ORDER BY id LIMIT 1", (player["id"], ttype)
+            ).fetchone()
+            if oldest is not None:
+                c.execute("DELETE FROM explore_rented WHERE id=?", (oldest["id"],))
+                count -= 1
         if ttype != 1 and count >= LOCAL_EXPLORE_HIRE_SLOTS:
             current_app.logger.warning(
                 "RENT_REJECTED gid=%s ttype=%s reason=slots_full count=%s",
