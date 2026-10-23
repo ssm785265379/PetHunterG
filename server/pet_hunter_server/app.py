@@ -672,6 +672,9 @@ def _initialize_database(database_path: Path) -> None:
             ("generation", "ALTER TABLE pets ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"),
             # Farm training (DevelopUI.as:133-134): 1=training 2=work 3=vacation,
             # mirrored straight off DevelopPetInfoUI's three ttype buttons.
+            # 出战槽位（1/2，0=未安排）。和 battle_state 分开：后者被"能否放生/合成"
+            # 等逻辑当作"在队里"使用，直接改它会牵动十几处查询。
+            ("squad_slot", "ALTER TABLE pets ADD COLUMN squad_slot INTEGER NOT NULL DEFAULT 0"),
             ("train_state", "ALTER TABLE pets ADD COLUMN train_state INTEGER NOT NULL DEFAULT 0"),
             ("train_type", "ALTER TABLE pets ADD COLUMN train_type INTEGER NOT NULL DEFAULT 0"),
             ("train_end", "ALTER TABLE pets ADD COLUMN train_end INTEGER NOT NULL DEFAULT 0"),
@@ -2500,7 +2503,13 @@ def _hunter_task(database_path: Path) -> Response:
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,ht_ap,max_ht_ap FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
-        pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0",(p["id"],)).fetchall()
+        # HunterTaskUI.as:337-375 shifts exactly TWO entries into the two battle
+    # slots, so this answers the arranged squad first and fills the rest with the
+    # first available pets (otherwise both slots render empty placeholders).
+    pets=c.execute(
+        "SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets"
+        " WHERE player_id=? AND battle_state=0 AND is_locked=0"
+        " ORDER BY (squad_slot=0), squad_slot, id LIMIT 2",(p["id"],)).fetchall()
     return _protocol_response(5,{
         "id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],
         # HunterTaskUI.as:100-101 disables the hunt/catch buttons when these
@@ -3866,10 +3875,26 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
-        if slot == "1":
-            c.execute("UPDATE pets SET battle_state=1 WHERE id=?", (index,))
+        # ttype is the SLOT (1 or 2). The old code always wrote 1, so the two hunt
+        # slots could never hold different pets; and it wrote battle_state, which
+        # every fight query filters to 0 — so choosing a pet actually removed it
+        # from the squad instead of putting it in.
+        try:
+            wanted = int(slot or 1)
+        except ValueError:
+            wanted = 1
+        wanted = wanted if wanted in (1, 2) else 1
+        current = c.execute(
+            "SELECT squad_slot FROM pets WHERE id=?", (index,)
+        ).fetchone()
+        if current is not None and int(current["squad_slot"] or 0) == wanted:
+            c.execute("UPDATE pets SET squad_slot=0 WHERE id=?", (index,))
         else:
-            c.execute("UPDATE pets SET battle_state=0 WHERE id=?", (index,))
+            c.execute(
+                "UPDATE pets SET squad_slot=0 WHERE player_id=? AND squad_slot=? AND id<>?",
+                (player["id"], wanted, index),
+            )
+            c.execute("UPDATE pets SET squad_slot=? WHERE id=?", (wanted, index))
         pet = _pet_list_entry(row)
     return _protocol_response(44, {"value": "ok", "pet": pet})
 

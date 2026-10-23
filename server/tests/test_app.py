@@ -1853,6 +1853,46 @@ def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
             assert row["num"] > 0
 
 
+def test_hunt_slots_accept_two_different_pets(tmp_path: Path):
+    # Command 5's `pets` feeds HunterTaskUI.as:337-375, which shifts exactly two
+    # entries into the two battle slots. The old code answered every
+    # battle_state=0 pet, and 44 wrote battle_state=1 (which fight queries filter
+    # to 0) — so picking a pet removed it from the squad instead of putting it in.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SquadT")
+
+    def five():
+        return _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "5", "uid": uid, "hid": "1"})
+        )[1]["pets"]
+
+    def candidates():
+        return [row["index"] for row in _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "42", "uid": uid, "p": "1", "n": "9"})
+        )[1]["list"]]
+
+    slots = five()
+    assert len(slots) == 2, "the hunt screen consumes exactly two slots"
+    pool = candidates()
+    first, second = pool[0], pool[1]
+
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                                             "index": str(first), "ttype": "1"}))
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                                             "index": str(second), "ttype": "2"}))
+    chosen = [pet["index"] for pet in five()]
+    assert chosen == [first, second], f"slots must keep both picks in order: {chosen}"
+    # The picks must remain in the list (they are the squad, not removed from it).
+    assert set(chosen) <= {pet["index"] for pet in five()}
+
+    # Tapping the pet already in a slot clears that slot.
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                                             "index": str(first), "ttype": "1"}))
+    after = [pet["index"] for pet in five()]
+    assert first not in after[:1], f"slot 1 should have been cleared: {after}"
+
+
 def test_hunt_task_enables_buttons_and_names_pets(tmp_path: Path):
     # HunterTaskUI.as:100-101 disables hunt/catch when these are not > 0, and
     # :337-337 calls param2.pets.shift() with no null guard.
