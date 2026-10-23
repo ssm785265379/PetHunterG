@@ -2119,6 +2119,8 @@ LOCAL_HUNT_ORDER = (1, 2, 3, 4, 5, 6)
 # LOCAL DEFAULT: 一次探险胜利给多少发现率。配置表只给了每张图的通关线
 # （needDiscoverRate 400 起），没给单次增量，先取 100（4 次通关第一张图）。
 LOCAL_EXPLORE_DISCOVER_GAIN = 100
+# 每张图需要几次探险才能打满（LOCAL DESIGN）。
+LOCAL_EXPLORE_RUNS_PER_MAP = 3
 
 
 def _explore_discover_gain(need_rate: int) -> int:
@@ -2127,9 +2129,9 @@ def _explore_discover_gain(need_rate: int) -> int:
     needDiscoverRate 是配置表里的真实门槛（400/450/500…），原先固定 +100 会让
     第一张图就要跑 4 次、整条 185 张图的链几乎推不动。
     """
-    # 一次探险直接打满一张图：185 张的全局链如果每张要跑多次，单机服根本推不到
-    # 草地（第 23 关）之后的雪地/火山/沙漠。
-    return max(1, need_rate)
+    # 每张图需要打 3 次（LOCAL DESIGN）。一次打满会让玩家连着推好几关，观感不真实；
+    # 而按配置表的原始门槛又太慢。3 次是折中，风险最低的调法。
+    return max(1, -(-need_rate // LOCAL_EXPLORE_RUNS_PER_MAP))
 # Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
