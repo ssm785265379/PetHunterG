@@ -1149,6 +1149,57 @@ def test_use_goods_pet_exp_levels_target_pet(tmp_path: Path):
         ).fetchone()[0] == 0
 
 
+def test_boxes_and_pet_eggs_actually_pay_out(tmp_path: Path):
+    """type-15 props (宝箱 / 宠物蛋 / 许愿硬币) used to answer -1:100 for ever."""
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "BoxOpen")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET point = 0 WHERE uid = ?", (uid,))
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10016,1,1,10016,15,1)"
+        )
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,12001,1,1,12001,15,1)"
+        )
+        chest = connection.execute(
+            "SELECT id FROM inventory WHERE item_id = 10016"
+        ).fetchone()[0]
+        egg = connection.execute(
+            "SELECT id FROM inventory WHERE item_id = 12001"
+        ).fetchone()[0]
+        pets_before = connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id = 1"
+        ).fetchone()[0]
+
+    command, payload = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
+                           "index": str(chest), "index1": "0"},
+    ))
+    assert command == 50
+    box = payload["value"]
+    assert isinstance(box, dict) and box["box_type"] == 3, "星星宝箱 pays silver"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT point FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0] == box["point"]
+
+    command, payload = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
+                           "index": str(egg), "index1": "0"},
+    ))
+    assert command == 50
+    box = payload["value"]
+    assert isinstance(box, dict) and box["box_type"] == 2, "4级宠物蛋 pays a pet"
+    assert box["id"] > 0 and box["num"] == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id = 1"
+        ).fetchone()[0] == pets_before + 1
+
+
 def test_home_use_goods_rejects_an_unimplemented_effect_without_eating_it(
     tmp_path: Path,
 ):
@@ -1506,6 +1557,95 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     assert command == 99 and payload["id"] == 1
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"103","uid":uid,"gid":1}))
     assert command == 103 and payload["is_finish"] == 1
+
+
+def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
+    # 77/78 list candidates, 79 previews, 80 fuses. IntegrationListUI.as:227-234
+    # reads index/id/icon/loc, IntegrationInfoUI reads the merged stats plus the
+    # fee, and IntegrationResultUI reads index/id/icon.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "SynthEq")
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)
+        ).fetchone()[0]
+        connection.execute("UPDATE players SET money = 100000 WHERE id = ?", (player_id,))
+        ids = [r[0] for r in connection.execute(
+            "SELECT id FROM inventory WHERE player_id=? AND team=3 ORDER BY id LIMIT 2",
+            (player_id,),
+        )]
+        if len(ids) < 2:
+            connection.execute(
+                "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type,"
+                " level, star, hp, speed, phy_att, mag_att, phy_def, mag_def)"
+                " SELECT player_id, 20002, 3, 1, 20002, 1, 1, 1, 0, 0, 0, 0, 20, 20"
+                " FROM inventory WHERE player_id=? LIMIT 1",
+                (player_id,),
+            )
+            ids = [r[0] for r in connection.execute(
+                "SELECT id FROM inventory WHERE player_id=? AND team=3 ORDER BY id LIMIT 2",
+                (player_id,),
+            )]
+        connection.commit()
+    main_id, vice_id = ids[0], ids[1]
+
+    command, main_list = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "77", "uid": uid,
+                                       "ttype": "2", "loc": "0", "p": "1", "n": "9"})
+    )
+    assert command == 77
+    assert main_list["list"], "the main picker needs candidates"
+    for row in main_list["list"]:
+        assert {"index", "id", "icon", "loc"} <= set(row)
+
+    command, vice_list = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "78", "uid": uid,
+                                       "ttype": "2", "main": str(main_id), "loc": "0",
+                                       "p": "1", "n": "9"})
+    )
+    assert command == 78
+    assert all(row["index"] != main_id for row in vice_list["list"]), "main must not repeat"
+
+    with sqlite3.connect(database) as connection:
+        main_stats = connection.execute(
+            "SELECT hp, speed, phy_att, mag_att, phy_def, mag_def FROM inventory WHERE id=?",
+            (main_id,),
+        ).fetchone()
+        vice_stats = connection.execute(
+            "SELECT hp, speed, phy_att, mag_att, phy_def, mag_def FROM inventory WHERE id=?",
+            (vice_id,),
+        ).fetchone()
+    expected = [
+        max(main_stats[i], vice_stats[i]) + min(main_stats[i], vice_stats[i]) // 4
+        for i in range(6)
+    ]
+
+    command, preview = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "79", "uid": uid,
+                                       "main": str(main_id), "vice": str(vice_id)})
+    )
+    assert command == 79
+    assert [preview[k] for k in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")] == expected
+    assert preview["need_money"] > 0
+
+    command, result = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "80", "uid": uid,
+                                       "main": str(main_id), "vice": str(vice_id)})
+    )
+    assert command == 80
+    assert result["index"] == main_id
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE id = ?", (vice_id,)
+        ).fetchone()[0] == 0, "the vice piece is consumed"
+        assert list(connection.execute(
+            "SELECT hp, speed, phy_att, mag_att, phy_def, mag_def FROM inventory WHERE id=?",
+            (main_id,),
+        ).fetchone()) == expected
+        assert connection.execute(
+            "SELECT money FROM players WHERE id = ?", (player_id,)
+        ).fetchone()[0] == 100000 - preview["need_money"]
 
 
 def test_forge_list_detail_and_make_transaction(tmp_path: Path):
@@ -2810,6 +2950,52 @@ def test_arena_and_copy_fights_share_the_hunt_replay_contract(tmp_path: Path):
     assert isinstance(arena["arena_ap"], int)
     assert arena["max_arena_ap"] >= arena["arena_ap"]
     assert isinstance(arena["rage_point"], int)
+
+
+def test_abyss_rewards_scale_with_stage_and_expeditions_can_roll_elites(tmp_path: Path):
+    """深渊奖励按层递增；探险也会滚精英遭遇（同一套 LOCAL_ELITE_* 开关）。"""
+    from pet_hunter_server import app as A
+
+    assert A.LOCAL_COPY_REWARD_MULT[A.LOCAL_COPY_MAPS[0]] == 1.0
+    assert A.LOCAL_COPY_REWARD_MULT[A.LOCAL_COPY_MAPS[-1]] == 3.0
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "AbyssMx")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET point = 0, explore_ap = 20, max_explore_ap = 20 WHERE uid = ?",
+            (uid,),
+        )
+
+    # Stage 1 pays exactly the base reward.
+    first = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "74", "uid": uid,
+                           "hid": str(A.LOCAL_COPY_MAPS[0])},
+    ))[1]
+    if first["is_win"] == 1:
+        assert first["reward_point"] == A.LOCAL_COPY_REWARD
+
+    # An expedition with a forced elite fields the leader plus its pair.
+    original = A.LOCAL_ELITE_CHANCE
+    A.LOCAL_ELITE_CHANCE = 1.0
+    try:
+        _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": "1"},
+        ))
+        explore = _envelope(client.post(
+            "/flash.do", data={"m": "show", "showId": "103", "uid": uid},
+        ))[1]
+    finally:
+        A.LOCAL_ELITE_CHANCE = original
+    battle = explore["battle_result"]
+    assert len(battle["def_list"]) >= 3, "elite expedition fields leader + pair"
+    assert isinstance(battle["is_win"], int)
+    if battle["is_win"] == 1:
+        assert explore["is_finish"] == 1
+    else:
+        assert explore["is_finish"] == 0, "a lost expedition must not report finished"
+        assert battle["reward_point"] == 0
 
 
 def test_copy_list_progresses_and_tracks_clears(tmp_path: Path):

@@ -154,6 +154,10 @@ LOCAL_EXPLORE_BONUS_POINT = 30
 # LOCAL DEFAULT: expedition stamina cap. The original AP table is not recoverable;
 # the HUD prints explore_ap/max_explore_ap directly, so they have to be real.
 LOCAL_DEFAULT_EXPLORE_AP = 20
+# LOCAL DEFAULT: which monster level an expedition map fields. exploreMap.txt's
+# `star` is the only difficulty knob it ships, so the band is derived from it.
+LOCAL_EXPLORE_LEVEL_BASE = 10
+LOCAL_EXPLORE_LEVEL_PER_STAR = 10
 # LOCAL DEFAULT: silver awarded per monster level on a hunt win.
 LOCAL_HUNT_POINT_REWARD = 50
 
@@ -1679,10 +1683,88 @@ def _prop_effect_rules(item_id: int) -> dict[str, int] | None:
     return {"type": kind, "value": amount, "use_type": number("useType")}
 
 
+def _pet_by_star(min_star: int) -> int | None:
+    """A random pet.txt species whose star is at least `min_star`."""
+    table = config_tables._table("pet.txt")
+    pool = []
+    for pet_id, record in table.items():
+        raw = str(record.get("star", "") or "").strip()
+        if raw.isdigit() and int(raw) >= int(min_star):
+            pool.append(int(pet_id))
+    return random.choice(pool) if pool else None
+
+
+def _insert_gift_pet(connection, player, pet_id: int) -> bool:
+    """Put one pet of `pet_id` into the roster; False when the roster is full."""
+    capacity = player["pet_capacity"] if "pet_capacity" in player.keys() else None
+    if capacity is None:
+        capacity = connection.execute(
+            "SELECT pet_capacity FROM players WHERE id=?", (player["id"],)
+        ).fetchone()[0]
+    held = connection.execute(
+        "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
+    ).fetchone()[0]
+    if held >= capacity:
+        return False
+    record = config_tables._table("pet.txt").get(pet_id) or {}
+    icon_raw = str(record.get("iconId", "") or "").strip()
+    star_raw = str(record.get("star", "") or "").strip()
+    skills = str(record.get("skills", "") or "").strip() or "101:5101"
+    connection.execute(
+        """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills,
+                             generation, buffs)
+           VALUES (?, ?, 1, ?, 1, ?, ?, 1, ?)""",
+        (player["id"], pet_id,
+         int(star_raw) if star_raw.isdigit() else 1,
+         int(icon_raw) if icon_raw.isdigit() else pet_id,
+         skills, _buffs_for_pet(pet_id, 1)),
+    )
+    return True
+
+
+# LOCAL DEFAULT box payouts. prop.txt's `value` selects the tier; eggs/wish coins
+# hand out a pet, treasure chests hand out silver.
+LOCAL_BOX_EGG_STAR = {
+    101: 4, 102: 5, 103: 6, 104: 7, 105: 8, 106: 10, 107: 12,
+    1001: 4, 1002: 5,
+}
+LOCAL_BOX_SILVER = {1: 1000, 2: 5000, 3: 20000, 4: 100000, 5: 500000,
+                    6: 1000000, 201: 5000, 202: 5000}
+
+
+def _open_prop_box(connection, player, amount: int) -> dict | None:
+    """Open a type-15 prop (宝箱/许愿硬币/宠物蛋) and pay it out.
+
+    Returns the GameUtil.getBox payload (`box_type` plus its value fields), or None
+    when the reward cannot be delivered (roster full), so the caller can leave the
+    item in the bag instead of silently eating it.
+    """
+    star_need = LOCAL_BOX_EGG_STAR.get(int(amount))
+    if star_need is None and 500 <= int(amount) <= 599:
+        # 波利婴儿车 / 摇篮 / 钢蛋: a random 4-star-and-up creature.
+        star_need = 4
+    if star_need is not None:
+        pet_id = _pet_by_star(int(star_need))
+        if pet_id is None or not _insert_gift_pet(connection, player, pet_id):
+            return None
+        return {"box_type": 2, "id": pet_id, "num": 1, "point": 0, "crystal": 0}
+    silver = LOCAL_BOX_SILVER.get(int(amount), 500)
+    connection.execute(
+        "UPDATE players SET point = point + ? WHERE id = ?", (silver, player["id"])
+    )
+    return {"box_type": 3, "id": 0, "num": 0, "point": silver, "crystal": 0}
+
+
 def _player_use_goods(database_path: Path) -> Response:
     """USE_GOODS (50) from the bag: `index` is the inventory row id, `index1` the
-    selected pet id (0 when no target). Effects are driven by LOCAL_PROP_CATALOG,
-    so only props the local server understands can be used."""
+    selected pet id (0 when no target).
+
+    The effect kind comes from prop.txt's `type` column (7 hunt AP, 5 pet exp,
+    14 bag capacity, 15 box/egg/wish, 16-17 currency bags) and the amount from
+    `value`; `useType` decides the usage context (2 = on a pet, 1 = on the
+    hunter/home) and both directions are enforced below, because the client only
+    enforces it by greying out grid cells.
+    """
     uid = _request_value("uid")
     try:
         item_index = int(_request_value("index", ""))
@@ -1788,6 +1870,14 @@ def _player_use_goods(database_path: Path) -> Response:
                 (amount, player["id"]),
             )
             payload = {"value": amount}
+        elif effect == 15:  # 宝箱 / 许愿硬币 / 宠物蛋
+            box = _open_prop_box(connection, player, amount)
+            if box is None:
+                return _pet_error(300)   # bag or roster full
+            # BagListUI.as:502-540 feeds `param2.value` straight into
+            # GameUtil.getBox, which reads box_type/id/num/point/crystal — so the
+            # value field is an OBJECT here, not the usual delta number.
+            payload = {"value": box}
         else:
             return _pet_error(100)
 
@@ -2974,6 +3064,23 @@ def _explore_map_table() -> dict:
     return config_tables._table("exploreMap.txt")
 
 
+def _explore_reference_level(gid: int) -> int:
+    """LOCAL DEFAULT: how strong an expedition map's monsters are.
+
+    exploreMap.txt's `star` cell is a per-difficulty band string shared by every
+    row ("1500:1000:700:500"), so the only honest progression signal is the map's
+    position inside its own world: first map ~lv10, each later one +10.
+    """
+    table = _explore_map_table()
+    world = _explore_map_world(gid)
+    siblings = sorted(m for m in table if _explore_map_world(m) == world)
+    try:
+        index = siblings.index(gid)
+    except ValueError:
+        index = 0
+    return LOCAL_EXPLORE_LEVEL_BASE + LOCAL_EXPLORE_LEVEL_PER_STAR * index
+
+
 def _explore_map_row(gid: int) -> dict | None:
     table = _explore_map_table()
     record = table.get(gid)
@@ -3115,7 +3222,9 @@ def _explore_start(database_path: Path) -> Response:
         gid=int(gid_value) if gid_value else None
     except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,point,money,cur_explore_map,explore_ap,max_explore_ap FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute(
+            "SELECT id,nick,lv,sex,point,money,cur_explore_map,explore_ap,max_explore_ap"
+            " FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if gid is None:
             gid=p["cur_explore_map"]
@@ -3129,13 +3238,49 @@ def _explore_start(database_path: Path) -> Response:
         if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
         c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=?,explore_ap=? WHERE id=?",
                   (m["cost_point"],m["cost_money"],gid,explore_ap,p["id"]))
-        # LOCAL DEFAULT: an expedition always resolves against the first monsters
-        # in monster.txt, since the per-map spawn table is not recoverable.
+        # exploreMap.txt's `star` column is a per-difficulty band string
+        # ("1500:1000:700:500", identical on every row), so it cannot drive the
+        # spawn level. Use the map's position inside its world, but never throw a
+        # low-level squad at content far above it: an expedition is rubber-banded
+        # to the squad's own level + the hunt band.
+        squad_lv = c.execute(
+            "SELECT COALESCE(MAX(lv), 1) FROM pets"
+            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            (p["id"],),
+        ).fetchone()[0]
+        reference_lv = min(
+            _explore_reference_level(gid),
+            int(squad_lv) + LOCAL_HUNT_LEVEL_BAND,
+        )
+        defenders = _defenders_for_level(1, reference_lv)
+        if defenders and random.random() < LOCAL_ELITE_CHANCE:
+            # 探险也吃精英遭遇：领队 ×1.6，奖励翻倍（与狩猎同一套开关）。
+            leader = dict(defenders[0])
+            leader["elite"] = True
+            defenders = [leader] + defenders
+        elite_fight = any(d.get("elite") for d in defenders)
+        worn = _worn_equipment(c, p["id"])
+        pet_rows = c.execute(
+            'SELECT id AS "index", pet_id AS id, icon, name, lv, pro_hp, pro_speed,'
+            ' pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def FROM pets'
+            ' WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2',
+            (p["id"],)).fetchall()
+        att_list, def_list, combat = _battle_side(
+            hunter_skin=_role_skin_string(worn, p["sex"] or 1),
+            hunter_name=p["nick"] or "猎人",
+            hunter_lv=p["lv"] or 1,
+            hunter_stats=_hunter_combat_stats(p, worn),
+            pet_rows=pet_rows,
+            defenders=defenders,
+        )
+        record = _battle_record(att_list, def_list, combat)
+        is_win = _record_is_win(record)
         # REAL rewards from exploreMap.txt's passReward* columns (the earlier
         # implementation paid a flat LOCAL_EXPLORE_REWARD and no items at all).
-        reward_point = m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT
-        reward_crystal = m["pass_reward_crystal"]
-        parsed_goods = _parse_map_goods(m["pass_reward_goods"])
+        elite_mult = LOCAL_ELITE_REWARD_MULT if elite_fight else 1
+        reward_point = (m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT) * elite_mult if is_win else 0
+        reward_crystal = m["pass_reward_crystal"] * elite_mult if is_win else 0
+        parsed_goods = _parse_map_goods(m["pass_reward_goods"]) if is_win else []
         reward_goods = _grant_goods(
             c, p["id"],
             [(gid, num, icon) for kind, gid, num, icon in parsed_goods if kind == 1],
@@ -3184,11 +3329,14 @@ def _explore_start(database_path: Path) -> Response:
             " WHERE player_id=? AND battle_state=0 AND is_locked=0",
             (p["id"],),
         ).fetchone()[0]
-        _grant_pet_exp(c, explore_pets, _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE))
+        _grant_pet_exp(
+            c, explore_pets,
+            _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE)
+            * (LOCAL_ELITE_REWARD_MULT if elite_fight else 1)
+            if is_win
+            else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
+        )
     horse=_explore_horse(database_path, p["id"])
-    att_list, def_list, record=_fight_payload(
-        database_path,_defenders_from_monsters((1,)))
-    if att_list is None: return _pet_error(103)
     return _protocol_response(103,{
         # ExploreUI.as:100 routes to the battle screen only when event_type == 1;
         # anything else (0 here previously) went to ExploreEventResultUI, which
@@ -3196,7 +3344,7 @@ def _explore_start(database_path: Path) -> Response:
         "value":"ok","event_type":_explore_event_type(gid),
         "world":m["world"],"world_id":m["world"],
         "is_tired":0,
-        "is_finish":1,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
+        "is_finish":1 if is_win else 0,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
         "now_discover_rate":0,"add_discover_rate":0,
         "need_discover_rate":m["need_discover_rate"],
         "energy":_pet_energy(lead_species),"cost_energy":0,"add_energy":0,
@@ -3220,7 +3368,7 @@ def _explore_start(database_path: Path) -> Response:
         ),
         # ExplorePveUI.as:381-510 dereferences every field below without a guard.
         "battle_result":{
-            "is_win":1,"hunt_type":1,"map_id":gid,
+            "is_win":1 if is_win else 0,"hunt_type":1,"map_id":gid,
             "monster_group":len(def_list)+3,
             "att_list":att_list,"def_list":def_list,"record":record,
             "reward_point":reward_point,"reward_crystal":reward_crystal,
@@ -3405,6 +3553,8 @@ def _training_detail(database_path: Path) -> Response:
 LOCAL_TRAIN_SECONDS = 600
 # prop.txt 10505's remark states a single reinforcement tops out around 1000.
 LOCAL_PRO_CAP = 1000
+# LOCAL DESIGN: 技能合成的"追加"概率 —— 副宠独有的技能族按此概率并入主宠。
+LOCAL_SKILL_ADD_CHANCE = 0.5
 # LOCAL DEFAULT gains per training type; the original duration/gain tables are
 # not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
 # ttype -> the two reinforcement columns that run raises (ui.txt 63-68 labels).
@@ -3618,6 +3768,8 @@ LOCAL_COPY_STAGE_LEVEL = {1001: 10, 1002: 40, 1003: 60, 1004: 90}
 # recoverable, so these are flat and are credited to players.point on a win.
 LOCAL_ARENA_REWARD = 20
 LOCAL_COPY_REWARD = 50
+# LOCAL DESIGN: 深渊四层的奖励曲线 —— 越深越值钱（×1 / ×1.5 / ×2 / ×3）。
+LOCAL_COPY_REWARD_MULT = {1001: 1.0, 1002: 1.5, 1003: 2.0, 1004: 3.0}
 LOCAL_EXPLORE_REWARD = 30
 # LOCAL DEFAULT: exp each pet gains from one arena bout / one dungeon clear is a
 # *fraction of a level at the reference level*, not a flat number — with the
@@ -3701,12 +3853,26 @@ def _arena_battle(database_path: Path) -> Response:
     read arena_ap/max_arena_ap/rage_point with no guard and concatenate them into
     text, so all three must be present and numeric.
     """
-    parts = _fight_payload(database_path, _defenders_from_monsters((1,)))
+    uid = _request_value("uid")
+    # LOCAL DEFAULT rival: the old fixed monster 1 (lv1) made every arena bout a
+    # one-sided win. Rubber-band the rival to the challenger's own squad instead,
+    # using the same helper as the hunt/dungeon sides.
+    with _connect_database(database_path) as c:
+        p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
+        if p is None:
+            return _pet_error(103)
+        squad_lv = c.execute(
+            "SELECT COALESCE(MAX(lv), 1) FROM pets"
+            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            (p["id"],),
+        ).fetchone()[0]
+    parts = _fight_payload(
+        database_path, _defenders_for_level(1, max(LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv)))
+    )
     if parts is None:
         return _pet_error(103)
     att_list, def_list, record = parts
     is_win = _record_is_win(record)
-    uid = _request_value("uid")
     with _connect_database(database_path) as c:
         p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
@@ -3805,13 +3971,16 @@ def _copy_battle(database_path: Path) -> Response:
         player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
-        _credit_battle_rewards(c, player["id"], point=LOCAL_COPY_REWARD if is_win else 0, crystal=0)
+        # 深渊奖励随层数递增（×1 / ×1.5 / ×2 / ×3），越深越值得打。
+        copy_mult = LOCAL_COPY_REWARD_MULT.get(hid, 1.0)
+        copy_point = int(LOCAL_COPY_REWARD * copy_mult) if is_win else 0
+        _credit_battle_rewards(c, player["id"], point=copy_point, crystal=0)
         copy_pets=[r[0] for r in c.execute(
             "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
             (player["id"],))]
         # Half a level at the stage's reference level, so clearing stage 1001 does
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
-        copy_exp = _battle_exp(stage_level, LOCAL_COPY_EXP_SHARE)
+        copy_exp = int(_battle_exp(stage_level, LOCAL_COPY_EXP_SHARE) * copy_mult)
         _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
         if is_win:
             # 记通关，73 才能显示完成度并解锁下一层（同层重复通关不重复推进）。
@@ -3825,7 +3994,7 @@ def _copy_battle(database_path: Path) -> Response:
     return _protocol_response(74, {
         "is_win": 1 if is_win else 0, "att_list": att_list, "def_list": def_list,
         "record": record, "pic": [],
-        "reward_point": LOCAL_COPY_REWARD if is_win else 0, "reward_crystal": 0,
+        "reward_point": copy_point, "reward_crystal": 0,
         "reward_goods": [],
         "value": "ok",
     })
@@ -4447,6 +4616,152 @@ def _forge_equip_field(equip_id: int, column: str) -> int | None:
         return None
     raw = str(record.get(column, "") or "").strip()
     return int(raw) if raw.lstrip("-").isdigit() else None
+
+
+# LOCAL DESIGN: the shipped config has no equipment-fusion table (the same is true
+# for pet training/evolution), so both the merge rule and the fee are ours.
+LOCAL_SYNTHESIS_FEE_BASE = 100
+LOCAL_SYNTHESIS_FEE_PER_LEVEL = 50
+_SYNTHESIS_STATS = ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")
+
+
+def _synthesis_fee(level: int) -> int:
+    return LOCAL_SYNTHESIS_FEE_BASE + LOCAL_SYNTHESIS_FEE_PER_LEVEL * max(1, int(level or 1))
+
+
+def _synthesis_merge(rows) -> dict[str, int]:
+    """Per stat: keep the better piece and add a quarter of the weaker one."""
+    merged: dict[str, int] = {}
+    for column in _SYNTHESIS_STATS:
+        values = sorted((int(row[column] or 0) for row in rows), reverse=True)
+        top, second = values[0], (values[1] if len(values) > 1 else 0)
+        merged[column] = top + second // 4
+    return merged
+
+
+def _equipment_row(connection: sqlite3.Connection, player_id: int, index: int):
+    return connection.execute(
+        "SELECT id, item_id, icon, level, star, pro, hp, speed, phy_att, mag_att,"
+        " phy_def, mag_def FROM inventory WHERE id=? AND player_id=? AND team=3",
+        (index, player_id),
+    ).fetchone()
+
+
+def _synthesis_candidates(database_path: Path, exclude: int = 0) -> Response:
+    """77/78 (CHOOSE_MAIN_EQUIP / CHOOSE_VICE_EQUIP).
+
+    Both screens read `list[]` with index/id/icon/loc (IntegrationListUI.as:227-234),
+    and the vice picker sends the chosen `main` so it must not be offered again.
+    """
+    command_id = 77 if exclude == 0 else 78
+    uid = _request_value("uid")
+    try:
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    try:
+        main = int(_request_value("main", "0") or 0)
+    except ValueError:
+        main = 0
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id, sex FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rows = c.execute(
+            "SELECT id AS row_index, item_id, icon, level FROM inventory"
+            " WHERE player_id=? AND team=3 AND id<>? ORDER BY id LIMIT ? OFFSET ?",
+            (player["id"], main or max(0, exclude), size, (page - 1) * size),
+        ).fetchall()
+    equipment = []
+    for row in rows:
+        record = config_tables.equip_record(row["item_id"])
+        if record is not None and not _equip_matches_sex(row["item_id"], player["sex"]):
+            continue
+        equipment.append({
+            "index": row["row_index"], "id": row["item_id"],
+            "icon": row["icon"], "loc": row["level"] or 1,
+        })
+    return _protocol_response(command_id, {"list": equipment, "type": 2, "value": "ok"})
+
+
+def _equip_synthesis_confirm(database_path: Path) -> Response:
+    """79 (EQUIP_SYN_CONFIRM) — the preview page: merged stats plus the fee."""
+    uid = _request_value("uid")
+    try:
+        main = int(_request_value("main", ""))
+        vice = int(_request_value("vice", ""))
+    except ValueError:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        main_row = _equipment_row(c, player["id"], main)
+        vice_row = _equipment_row(c, player["id"], vice)
+        if main_row is None or vice_row is None or main == vice:
+            return _pet_error(400)
+    merged = _synthesis_merge((main_row, vice_row))
+    fee = _synthesis_fee(main_row["level"])
+    return _protocol_response(79, {
+        "id": main_row["item_id"],
+        "icon": main_row["icon"],
+        "star": main_row["star"],
+        "pro": main_row["pro"],
+        "level": main_row["level"],
+        **merged,
+        "skills": [], "buffs": [],
+        "need_money": fee, "own_money": player["money"],
+        "need_point": 0, "own_point": player["point"],
+        "need_crystal": 0, "own_crystal": player["crystal"],
+        "need_goods": [],
+        "value": "ok",
+    })
+
+
+def _equip_synthesis_perform(database_path: Path) -> Response:
+    """80 (SYN_EQUIP) — fuse the vice piece into the main one.
+
+    The vice row is consumed (that is the whole point of the screen), the main row
+    keeps its identity and gains the merged stats.
+    """
+    uid = _request_value("uid")
+    try:
+        main = int(_request_value("main", ""))
+        vice = int(_request_value("vice", ""))
+    except ValueError:
+        return _pet_error(100)
+    if main == vice:
+        return _pet_error(400)
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id,money FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        main_row = _equipment_row(c, player["id"], main)
+        vice_row = _equipment_row(c, player["id"], vice)
+        if main_row is None or vice_row is None:
+            return _pet_error(400)
+        fee = _synthesis_fee(main_row["level"])
+        if player["money"] < fee:
+            return _pet_error(403)
+        merged = _synthesis_merge((main_row, vice_row))
+        c.execute(
+            "UPDATE players SET money = money - ? WHERE id = ? AND money >= ?",
+            (fee, player["id"], fee),
+        )
+        assignments = ", ".join(f"{column} = ?" for column in _SYNTHESIS_STATS)
+        c.execute(
+            f"UPDATE inventory SET {assignments} WHERE id = ?",
+            (*[merged[column] for column in _SYNTHESIS_STATS], main),
+        )
+        c.execute("DELETE FROM inventory WHERE id = ? AND player_id = ?", (vice, player["id"]))
+        current = c.execute("SELECT id, item_id, icon FROM inventory WHERE id = ?", (main,)).fetchone()
+    return _protocol_response(80, {
+        "index": current["id"], "id": current["item_id"], "icon": current["icon"],
+        "pic": [], "value": "ok",
+    })
 
 
 def _forge_list(database_path: Path) -> Response:
@@ -5391,8 +5706,9 @@ def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
     """
     index = _skill_family_index()
     by_id = config_tables._table("skill.txt")
-    levels: dict[str, int] = {}
-    for text in (main_skills, vice_skills):
+
+    def families(text: str) -> dict[str, int]:
+        found: dict[str, int] = {}
         for token in str(text or "").split(":"):
             if not token.isdigit():
                 continue
@@ -5404,7 +5720,16 @@ def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
             if not family:
                 continue
             level = int(str(record.get("level", "1") or 1) or 1)
-            levels[family] = max(levels.get(family, 0), level)
+            found[family] = max(found.get(family, 0), level)
+        return found
+
+    # 替换/升级：两宠共有的族取最高级；追加：副宠独有的族按概率并入。
+    levels = families(main_skills)
+    for family, level in families(vice_skills).items():
+        if family in levels:
+            levels[family] = max(levels[family], level)
+        elif random.random() < LOCAL_SKILL_ADD_CHANCE:
+            levels[family] = level
 
     merged: list[int] = []
     for family, level in sorted(levels.items()):
@@ -5756,6 +6081,14 @@ def create_app(config: dict | None = None) -> Flask:
             return _forge_refine(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "36":
             return _forge_enchant(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "77":
+            return _synthesis_candidates(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "78":
+            return _synthesis_candidates(current_app.config["DATABASE"], exclude=-1)
+        if command == "show" and _request_value("showId") == "79":
+            return _equip_synthesis_confirm(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") == "80":
+            return _equip_synthesis_perform(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "32":
             return _forge_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "33":
