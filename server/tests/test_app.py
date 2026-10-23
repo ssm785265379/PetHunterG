@@ -3848,7 +3848,6 @@ def test_mount_page_lists_only_mounts_even_when_gear_slots_are_full(tmp_path: Pa
             "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1",
             (player_id,),
         )]
-    assert rented_mounts == [mounts[1]]
     assert A._explore_horse(database, player_id) == mounts[1]
 
 
@@ -3880,7 +3879,9 @@ def test_renting_another_mount_switches_the_one_you_ride(tmp_path: Path):
             "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1",
             (player_id,),
         )]
-    assert rented == [mounts[1]], f"only the newest mount may stay rented: {rented}"
+    # 坐骑可以拥有多只；最新租的那只是"在用"的那只（_explore_horse 取 id 最大）。
+    assert set(rented) == {mounts[0], mounts[1]}, rented
+    assert A._explore_horse(database, player_id) == mounts[1]
     assert A._explore_horse(database, player_id) == mounts[1]
 
 

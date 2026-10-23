@@ -3743,15 +3743,11 @@ def _explore_list(database_path: Path) -> Response:
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
     rows=[]
-    # 默认返回**全局链**（跨世界），这样从平原一路推进会自然过渡到草地/雪地/沙漠；
-    # 显式传 gid>1 时才按世界过滤，保留按世界查看的能力。
-    if page_type == 1:
-        chain = _explore_chain_order()
-    else:
-        chain = [gid for gid in _explore_chain_order() if _explore_map_world(gid) == world]
+    # **永远返回全局链**，不按世界过滤。原因：ExploreMapListUI 翻页时会把
+    # `data.world`（上一次响应里的 world）当 gid 回传，一旦玩家探险到世界3的地图，
+    # 后续翻页就被过滤成"世界3"，界面全是雪地、编号又接着全局链，看起来像乱码。
+    chain = _explore_chain_order()
     for chain_position, gid in enumerate(chain, start=1):
-        if page_type != 1 and _explore_map_world(gid) != world:
-            continue
         row=_explore_map_row(gid)
         progress = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
@@ -3783,6 +3779,11 @@ def _explore_list(database_path: Path) -> Response:
         frontier = max(0, len(rows) - 1)
     start_at = frontier + (page - 1) * size
     page_rows = rows[start_at: start_at + size]
+    # world 只用于标题：取本页第一张图所在的世界。
+    if page_rows:
+        first_row = _explore_map_row(int(page_rows[0]["id"]))
+        if first_row:
+            world = first_row["world"]
     return _protocol_response(98,{
         "type": 2,
         "world":world,
@@ -4628,11 +4629,12 @@ def _explore_rent(database_path: Path) -> Response:
                 102, {"value": "full", "need_money": 0, "own_money": 0}
             )
         if ttype == 1:
-            # A hunter rides one mount at a time: replace first, then insert, so a
-            # previously rented mount cannot survive and "switch" actually sticks.
+            # 坐骑改成"拥有多只、一只在用"：不再删掉其它坐骑（原来会把玩家已经
+            # 拥有的坐骑全部删掉，导致切换后只剩一只、其它白买了）。把这一只
+            # 置为最新（_explore_horse 取 id 最大者）就是用它在骑。
             c.execute(
-                "DELETE FROM explore_rented WHERE player_id=? AND slot_type=1",
-                (player["id"],),
+                "DELETE FROM explore_rented WHERE player_id=? AND equip_id=? AND slot_type=1",
+                (player["id"], gid),
             )
         c.execute(
             "INSERT OR IGNORE INTO explore_rented (player_id, equip_id, slot_type)"
