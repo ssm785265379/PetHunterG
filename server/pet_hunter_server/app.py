@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+from functools import lru_cache
 import math
 import random
 import secrets
@@ -2118,6 +2119,17 @@ LOCAL_HUNT_ORDER = (1, 2, 3, 4, 5, 6)
 # LOCAL DEFAULT: 一次探险胜利给多少发现率。配置表只给了每张图的通关线
 # （needDiscoverRate 400 起），没给单次增量，先取 100（4 次通关第一张图）。
 LOCAL_EXPLORE_DISCOVER_GAIN = 100
+
+
+def _explore_discover_gain(need_rate: int) -> int:
+    """一次探险给多少发现率：按该图真实通关线的一半 —— 每张图两次通关。
+
+    needDiscoverRate 是配置表里的真实门槛（400/450/500…），原先固定 +100 会让
+    第一张图就要跑 4 次、整条 185 张图的链几乎推不动。
+    """
+    # 一次探险直接打满一张图：185 张的全局链如果每张要跑多次，单机服根本推不到
+    # 草地（第 23 关）之后的雪地/火山/沙漠。
+    return max(1, need_rate)
 # Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
@@ -3543,14 +3555,14 @@ def _explore_start(database_path: Path) -> Response:
                 "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
                 " VALUES (?, ?, ?) ON CONFLICT(player_id, map_id)"
                 " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
-                (p["id"], gid, LOCAL_EXPLORE_DISCOVER_GAIN),
+                (p["id"], gid, _explore_discover_gain(int(m.get("need_discover_rate") or 0))),
             )
         progress_row = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
             (p["id"], gid),
         ).fetchone()
         now_rate = int(progress_row["discover_rate"] or 0) if progress_row else 0
-    add_rate = LOCAL_EXPLORE_DISCOVER_GAIN if is_win else 0
+    add_rate = _explore_discover_gain(int(m.get("need_discover_rate") or 0)) if is_win else 0
     horse=_explore_horse(database_path, p["id"])
     return _protocol_response(103,{
         # ExploreUI.as:100 routes to the battle screen only when event_type == 1;
@@ -3645,8 +3657,14 @@ def _explore_list(database_path: Path) -> Response:
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
     rows=[]
-    for gid in sorted(_explore_map_table()):
-        if _explore_map_world(gid) != world:
+    # 默认返回**全局链**（跨世界），这样从平原一路推进会自然过渡到草地/雪地/沙漠；
+    # 显式传 gid>1 时才按世界过滤，保留按世界查看的能力。
+    if page_type == 1:
+        chain = _explore_chain_order()
+    else:
+        chain = [gid for gid in _explore_chain_order() if _explore_map_world(gid) == world]
+    for gid in chain:
+        if page_type != 1 and _explore_map_world(gid) != world:
             continue
         row=_explore_map_row(gid)
         progress = c.execute(
@@ -3674,6 +3692,37 @@ def _explore_list(database_path: Path) -> Response:
         "max_explore_ap":player["max_explore_ap"],
         "list":page_rows,
     })
+
+
+@lru_cache(maxsize=1)
+def _explore_chain_order() -> tuple[int, ...]:
+    """exploreMap.txt 是**一条跨世界的全局链**，不是每个世界一条。
+
+    证据：世界1 的图 11 的 needExploreMap 指向 212（世界2 的图）。所以推进顺序
+    只能靠 needExploreMap 串起来：先取 need == 0 的根，再反复把"前置已入链"的
+    图接上。按 id 排序是错的（图 11 实际排在 212 之后）。
+    """
+    table = _explore_map_table()
+    need: dict[int, int] = {}
+    for gid, record in table.items():
+        raw = str(record.get("needExploreMap", "")).strip()
+        need[gid] = int(raw) if raw.lstrip("-").isdigit() else 0
+
+    order = [gid for gid in sorted(need) if need[gid] == 0]
+    placed = set(order)
+    moved = True
+    while moved:
+        moved = False
+        for gid in sorted(need):
+            if gid in placed:
+                continue
+            if need[gid] in placed:
+                order.append(gid)
+                placed.add(gid)
+                moved = True
+    # 断链的尾部按 id 兜底，保证不会丢图
+    order.extend(gid for gid in sorted(need) if gid not in placed)
+    return tuple(order)
 
 
 def _explore_map_open(connection, player_id: int, gid: int) -> bool:
