@@ -1559,13 +1559,14 @@ def test_explore_list_rows_match_client_fields(tmp_path: Path):
     # ExploreMapListUI.as:200-260 needs world/explore_ap/max_explore_ap and rows
     # carrying code,id,terrain,star,max_days; ttype selects the world.
     database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"ExpT")
-    # ttype=1 is the WORLD picker: MainUI.as:262-272 only opens WorldMapUI when the
-    # response carries type == 1, and the rows are {id,state}.
-    command, worlds = _envelope(client.post("/flash.do", data={"m": "show", "showId": 98, "uid": uid, "ttype": 1}))
+    # ttype=1 answers world 1's map page directly (type 2). The world picker was
+    # reverted: routing into WorldMapUI left every tap unresponsive and 探险 could
+    # not be entered at all.
+    command, first = _envelope(client.post("/flash.do", data={"m": "show", "showId": 98, "uid": uid, "ttype": 1}))
     assert command == 98
-    assert worlds["type"] == 1
-    assert worlds["list"], "the world picker cannot be empty"
-    assert all("id" in row for row in worlds["list"])
+    assert first["type"] == 2
+    assert first["world"] == 1
+    assert first["list"], "the map page cannot be empty"
 
     # ttype=2 + gid selects a world and returns its map page.
     command, payload = _envelope(client.post("/flash.do", data={"m": "show", "showId": 98, "uid": uid, "ttype": 2, "gid": 1}))
@@ -1634,7 +1635,7 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"4","uid":uid}))
     assert command == 4 and payload["maps"]
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"5","uid":uid,"hid":1}))
-    assert command == 5 and payload["pets"]
+    assert command == 5 and isinstance(payload["pets"], list)
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"6","uid":uid,"hid":1}))
     assert command == 6 and payload["is_win"] == 1 and payload["record"]
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"98","uid":uid}))
@@ -1915,10 +1916,10 @@ def test_seed_items_bag_list_renders_every_team(tmp_path: Path):
 
 
 def test_hunt_slots_accept_two_different_pets(tmp_path: Path):
-    # Command 5's `pets` feeds HunterTaskUI.as:337-375, which shifts exactly two
-    # entries into the two battle slots. The old code answered every
-    # battle_state=0 pet, and 44 wrote battle_state=1 (which fight queries filter
-    # to 0) — so picking a pet removed it from the squad instead of putting it in.
+    # The real client flow (HunterTaskUI.as:287-310, FightPetListUI.as:148-164):
+    #   empty slot -> 42 (picker) -> pick -> 44 with ttype ALWAYS 1
+    #   filled slot -> 45 (take off the squad)
+    # So 44 must fill the first free slot itself, and 5 must report only the squad.
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "SquadT")
@@ -1928,30 +1929,36 @@ def test_hunt_slots_accept_two_different_pets(tmp_path: Path):
             client.post("/flash.do", data={"m": "show", "showId": "5", "uid": uid, "hid": "1"})
         )[1]["pets"]
 
-    def candidates():
-        return [row["index"] for row in _envelope(
+    pool = [
+        row["index"]
+        for row in _envelope(
             client.post("/flash.do", data={"m": "show", "showId": "42", "uid": uid, "p": "1", "n": "9"})
-        )[1]["list"]]
+        )[1]["list"]
+    ]
+    assert len(pool) >= 2
 
-    slots = five()
-    assert len(slots) == 2, "the hunt screen consumes exactly two slots"
-    pool = candidates()
+    # Nothing arranged yet -> both slots are empty placeholders.
+    assert five() == [], "an unarranged hunt must leave both slots empty"
+
     first, second = pool[0], pool[1]
-
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
                                              "index": str(first), "ttype": "1"}))
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
-                                             "index": str(second), "ttype": "2"}))
+                                             "index": str(second), "ttype": "1"}))
     chosen = [pet["index"] for pet in five()]
-    assert chosen == [first, second], f"slots must keep both picks in order: {chosen}"
-    # The picks must remain in the list (they are the squad, not removed from it).
-    assert set(chosen) <= {pet["index"] for pet in five()}
+    assert chosen == [first, second], f"44 must fill slot 1 then slot 2: {chosen}"
 
-    # Tapping the pet already in a slot clears that slot.
-    _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+    # Tapping a filled slot sends 45 -> that pet leaves the squad, freeing a slot.
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "45", "uid": uid,
                                              "index": str(first), "ttype": "1"}))
     after = [pet["index"] for pet in five()]
-    assert first not in after[:1], f"slot 1 should have been cleared: {after}"
+    assert first not in after, f"45 must take the pet off the squad: {after}"
+
+    # And the freed slot can be filled again by another pet.
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                                             "index": str(first), "ttype": "1"}))
+    refilled = [pet["index"] for pet in five()]
+    assert len(refilled) == 2 and set(refilled) == {first, second}
 
 
 def test_hunt_task_enables_buttons_and_names_pets(tmp_path: Path):
@@ -1965,7 +1972,9 @@ def test_hunt_task_enables_buttons_and_names_pets(tmp_path: Path):
     assert command == 5
     assert payload["isHunter"] == 1 and payload["isCatch"] == 1
     assert payload["rage_point"] == 0
-    assert payload["pets"], "HunterTaskUI shifts pets[] unguarded"
+    # The key must EXIST as an array (shift() on undefined throws); an empty squad
+    # is the correct answer before any pet is arranged into the two hunt slots.
+    assert isinstance(payload["pets"], list), "pets must be a list, never undefined"
     for row in payload["pets"]:
         assert row["name"], "a null name renders as the string null on device"
     # running out of AP must switch both buttons off

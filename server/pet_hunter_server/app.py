@@ -2542,10 +2542,15 @@ def _hunter_task(database_path: Path) -> Response:
         # HunterTaskUI.as:337-375 shifts exactly TWO entries into the two battle
     # slots, so this answers the arranged squad first and fills the rest with the
     # first available pets (otherwise both slots render empty placeholders).
+    # ONLY the arranged squad. Filling empty slots with ordinary pets made the
+    # client believe both slots were occupied: tapping one then sent 45 ("take it
+    # off"), the server cleared a slot that was already 0, and nothing changed —
+    # "狩猎不能切换宠物". An empty slot must render as a placeholder so tapping it
+    # opens the picker (HunterTaskUI.as:299-303).
     pets=c.execute(
         "SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets"
-        " WHERE player_id=? AND battle_state=0 AND is_locked=0"
-        " ORDER BY (squad_slot=0), squad_slot, id LIMIT 2",(p["id"],)).fetchall()
+        " WHERE player_id=? AND squad_slot>0 AND is_locked=0"
+        " ORDER BY squad_slot LIMIT 2",(p["id"],)).fetchall()
     return _protocol_response(5,{
         "id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],
         # HunterTaskUI.as:100-101 disables the hunt/catch buttons when these
@@ -3214,12 +3219,15 @@ def _hunter_catch(database_path: Path) -> Response:
         index=cursor.lastrowid
         # Catching registers the creature in the picture book, which is what the
         # picStep milestones count.
-        _unlock_pic(c, p["id"], [pet_id])
+        newly = set(_unlock_pic(c, p["id"], [pet_id]))
+    # Only a FIRST registration may pop the 获得图鉴 banner. This used to list the
+    # creature unconditionally, so every catch re-announced an entry the player had
+    # registered long ago ("捕捉成功会弹出来获得图鉴呢？我不是已经解锁过图鉴了嘛").
     return _protocol_response(7,{
         "value":"ok","is_success":1,"hid":hid,
         "index":index,"id":pet_id,"icon":int(icon) if icon.isdigit() else pet_id,
         "name":_pet_name(pet_id), "lv":level,
-        "pic":_pic_entries([monster]),
+        "pic":[entry for entry in _pic_entries([monster]) if entry["id"] in newly],
     })
 
 
@@ -3590,21 +3598,12 @@ def _explore_list(database_path: Path) -> Response:
     # the response carries type == 1, otherwise it goes straight to a map list.
     # Without this the player was locked into world 1 forever — and world 1 is
     # almost entirely terrain 1, which is the "探险全是平原" report.
-    if page_type == 1:
-        world_table = config_tables._table("worldMap.txt")
-        worlds = [
-            {"id": int(world_id), "state": 0}
-            for world_id in sorted(int(k) for k in world_table)
-        ]
-        if not worlds:
-            worlds = [{"id": index, "state": 0} for index in range(1, 10)]
-        return _protocol_response(98, {
-            "type": 1,
-            "world": 0,
-            "explore_ap": player["explore_ap"],
-            "max_explore_ap": player["max_explore_ap"],
-            "list": worlds,
-        })
+    # REVERTED: answering ttype=1 with the world picker (type 1) sent the client
+    # into WorldMapUI, where nothing responded to taps — 探险 became unenterable.
+    # MainUI.as:262-272 routes on `type`, and the world screen's own buttons never
+    # fired a request, so the player was stuck. Until that screen is understood we
+    # keep the previously working behaviour: ttype=1 answers world 1's map list
+    # (type 2). World switching still works when `gid` is sent explicitly.
 
     # ExploreMapListUI.as:200-260 reads world/explore_ap/max_explore_ap and list rows
     # with code,id,terrain,star,max_days; the row name/icon are derived client-side.
@@ -3936,26 +3935,21 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
-        # ttype is the SLOT (1 or 2). The old code always wrote 1, so the two hunt
-        # slots could never hold different pets; and it wrote battle_state, which
-        # every fight query filters to 0 — so choosing a pet actually removed it
-        # from the squad instead of putting it in.
-        try:
-            wanted = int(slot or 1)
-        except ValueError:
-            wanted = 1
-        wanted = wanted if wanted in (1, 2) else 1
-        current = c.execute(
-            "SELECT squad_slot FROM pets WHERE id=?", (index,)
-        ).fetchone()
-        if current is not None and int(current["squad_slot"] or 0) == wanted:
-            c.execute("UPDATE pets SET squad_slot=0 WHERE id=?", (index,))
-        else:
-            c.execute(
-                "UPDATE pets SET squad_slot=0 WHERE player_id=? AND squad_slot=? AND id<>?",
-                (player["id"], wanted, index),
+        # FightPetListUI.as:160-164 sends 44 with the pet index; `ttype` there is
+        # the page kind from HunterTaskUI.as:302 and is ALWAYS 1, so it can never
+        # identify the slot. Put the pet in the first free slot instead — that is
+        # what makes "tap an empty slot -> pick a pet" fill slot 1, then slot 2.
+        used = {
+            int(r["squad_slot"])
+            for r in c.execute(
+                "SELECT squad_slot FROM pets WHERE player_id=? AND squad_slot>0",
+                (player["id"],),
             )
-            c.execute("UPDATE pets SET squad_slot=? WHERE id=?", (wanted, index))
+        }
+        target = next((slot_id for slot_id in (1, 2) if slot_id not in used), None)
+        if target is None:
+            return _pet_error(506)  # both slots taken; take one off first
+        c.execute("UPDATE pets SET squad_slot=? WHERE id=?", (target, index))
         pet = _pet_list_entry(row)
     return _protocol_response(44, {"value": "ok", "pet": pet})
 
@@ -3976,6 +3970,10 @@ def _choose_rest_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
+        # HunterTaskUI.as:287-310 sends 45 when the player taps a slot that
+        # ALREADY holds a pet — i.e. "take it off the squad". ttype is hardcoded
+        # 1 there (it is a page kind, not a slot), so the pet simply leaves.
+        c.execute("UPDATE pets SET squad_slot=0 WHERE id=?", (index,))
         pet = _pet_list_entry(row)
     return _protocol_response(45, {"value": "ok", "pet": pet})
 
