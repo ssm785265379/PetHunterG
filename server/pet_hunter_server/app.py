@@ -1215,43 +1215,24 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
         if image_id and image_id in skin and image_id not in gear:
             gear.append(image_id)
 
-    # PETHUNTER_SKIN_MODE picks how equipment combines with the base triple. The
-    # client only stacks layers (ShowItem.as:72-79); it never merges them, so
-    # whether gear should REPLACE the base part at the same depth is a design
-    # question we can only settle by looking at the result:
-    #   overlay        - draw both (the historical behaviour; can look doubled)
-    #   replace        - gear wins at its own z, base parts at that z are dropped
-    #   gear_only      - hide the base triple entirely (debug)
-    # DEFAULT IS replace: the base triple is not "body + head + hair" but a
-    # *complete default outfit* — 100002 (z4) is the body, 100003 (z5) the head and
-    # 100001 (z6) the arms holding a default weapon. Measured sprite sizes confirm
-    # it: 100001 is only 270x135 while the armour is 183x300, and the default arms
-    # sprite is the same shape as a weapon sprite (258x142). Equipment therefore
-    # REPLACES the base layer at its own depth, which is also why switching a
-    # weapon is supposed to change the arms+weapon sprite.
+    # The base triple is a COMPLETE DEFAULT OUTFIT, not "body + head + hair":
+    #   100002 (z4) body, 100003 (z5) head, 100001 (z6) arms holding a default
+    #   weapon.
+    # Measured sprite sizes back this up (100001 is 270x135 like the 258x142 weapon
+    # sprite, while the armour is 183x300). So equipment REPLACES the base layer at
+    # its own depth — which is also why switching a weapon must change the
+    # arms+weapon sprite instead of stacking a second weapon on the character.
+    #
+    # PETHUNTER_SKIN_MODE=overlay restores the old stacking behaviour as an escape
+    # hatch; "replace" is the only supported mode otherwise.
     mode = os.environ.get("PETHUNTER_SKIN_MODE", "replace").strip().lower()
-    if mode == "overlay_no_weapon" and gear:
-        # 基础身体贴图 100001 本身已经握着一把剑（真机确认：裸装时手上仍有武器），
-        # 所以再叠加装备里的武器图层就会看到两把。武器只保留属性、不再画第二把；
-        # 护甲和头盔是覆盖在半身上的，继续叠。
-        weapon_sprites = {
-            config_tables.equip_image_id(record)
-            for record in (
-                config_tables.equip_record(row["item_id"]) for row in worn.values()
-            )
-            if record and str(record.get("type", "")).strip() == "1"
-        }
-        gear = [lid for lid in gear if lid not in weapon_sprites]
-    if mode == "replace" and gear:
+    if gear and mode != "overlay":
         taken = {int(skin.get(lid, {}).get("z", "0") or 0) for lid in gear}
-        layers = [lid for lid in base if int(skin.get(lid, {}).get("z", "0") or 0) not in taken]
+        layers = [
+            lid for lid in base
+            if int(skin.get(lid, {}).get("z", "0") or 0) not in taken
+        ]
         layers.extend(gear)
-    elif mode == "gear_only" and gear:
-        layers = list(gear)
-    elif mode == "base_only":
-        # Debug mode: bare character, no equipment. Lets us see whether the base
-        # sprite already carries a weapon (which would explain a "second sword").
-        layers = list(base)
     else:
         layers = base + [lid for lid in gear if lid not in base]
     # Match the client: highest z first (bottom), lowest z last (top).
