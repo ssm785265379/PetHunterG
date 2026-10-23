@@ -1388,11 +1388,15 @@ def _player_inventory(database_path: Path) -> Response:
         item["icon"] = item["icon"] or 0
         if item["team"] in (1, 2):
             # PropItem.as:328-333 disables the slot when data.on == 0. The response
-            # carried no `on` at all, so props with no effect (prop.txt type 0, e.g.
+            # carried no `on` at all, so non-consumables (prop.txt type 0, e.g.
             # 王国勋章) still looked tappable and just answered -1:100 — the
-            # "不可使用的也展示出来了" report. Mark them disabled instead of lying.
-            rules = _prop_effect_rules(item["id"])
-            item["on"] = 1 if rules else 0
+            # "不可使用的也展示出来了" report.
+            #
+            # Only type 0 is disabled: several really-usable props carry value 0
+            # (扩建证书/遗忘之锤/推磨钱袋) or even a decimal (狩猎秘籍 value=1.5),
+            # so keying off _prop_effect_rules wrongly greyed them out.
+            kind = str((config_tables.prop_record(item["id"]) or {}).get("type", "")).strip()
+            item["on"] = 0 if kind in ("", "0") else 1
         if item["team"] == 3:
             # BagListUI.onMouseUpItem switches on this `type` (row `t`) and its
             # cases 1/2/9/24/25/27 are pet-item actions; equipment must fall to
