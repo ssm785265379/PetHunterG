@@ -1494,6 +1494,25 @@ def test_explore_start_remembers_map_from_detail(tmp_path: Path):
         assert int(layer) in config_tables.skin_table()
 
 
+def test_explore_list_tolerates_a_garbage_gid(tmp_path: Path):
+    # MainUI.as:262-272 answers the world list WITHOUT calling readDatas, so the
+    # map-list screen can still have an empty `data.world` and re-request with
+    # gid=undefined. Answering -1:100 there made 探险 look unenterable.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ExpBad")
+
+    for bad in ("undefined", "", "abc", "0", "-3"):
+        command, payload = _envelope(client.post(
+            "/flash.do",
+            data={"m": "show", "showId": 98, "uid": uid, "ttype": 2,
+                  "gid": bad, "p": "1", "n": "9"},
+        ))
+        assert command == 98, bad
+        assert payload["world"] >= 1, bad
+        assert payload["list"], f"gid={bad!r} must still return a map page"
+
+
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
     # ExploreMapListUI.as:200-260 needs world/explore_ap/max_explore_ap and rows
     # carrying code,id,terrain,star,max_days; ttype selects the world.

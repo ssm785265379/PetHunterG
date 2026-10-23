@@ -3536,16 +3536,27 @@ def _explore_start(database_path: Path) -> Response:
 
 def _explore_list(database_path: Path) -> Response:
     uid=_request_value("uid")
-    try:
-        # ExploreMapListUI.as:177-185 sends {ttype:2, gid:<worldId>, p, n}: the
-        # world id travels in `gid`, while ttype is just the page kind. Reading
-        # ttype as the world made page 2 of world 1 silently switch to world 2 and
-        # replay its first screen forever.
-        page_type = int(_request_value("ttype", "1") or 1)
-        world = int(_request_value("gid", "") or page_type or 1)
-        page = int(_request_value("p", "1"))
-        size = int(_request_value("n", "9"))
-    except ValueError: return _pet_error(100)
+    # ExploreMapListUI.as:177-185 sends {ttype:2, gid:<worldId>, p, n}: the world
+    # id travels in `gid`, while ttype is just the page kind. Reading ttype as the
+    # world made page 2 of world 1 silently switch to world 2 and replay its first
+    # screen forever.
+    #
+    # The request can also arrive with a missing/garbage `gid`: MainUI.as:262-272
+    # answers the world list without calling readDatas, so ExploreMapListUI may
+    # still have an empty `data.world` when it re-requests. Answering -1:100 there
+    # looked like "探险点不进去", so fall back to world 1 instead of failing.
+    def _int_param(name: str, default: int) -> int:
+        raw = str(_request_value(name, "") or "").strip()
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    page_type = _int_param("ttype", 1)
+    world = _int_param("gid", page_type if page_type > 1 else 1)
+    page = _int_param("p", 1)
+    size = _int_param("n", 9)
     if page < 1 or not 1 <= size <= 9: return _pet_error(100)
     with _connect_database(database_path) as c:
         player = c.execute(
