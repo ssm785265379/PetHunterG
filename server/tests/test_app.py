@@ -2454,7 +2454,9 @@ def test_synthesis_consumes_the_vice_pet_and_raises_generation(tmp_path: Path):
     )
     assert command == 65
     assert payload["index"] == indexes[0]
-    assert payload["exd_generation"] == (generation or 1) + 1
+    # `exd_generation` is the DELTA (the result page prints "增加世代: N" and only
+    # renders when > 0), while the row itself must hold the new total.
+    assert payload["exd_generation"] == 1
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM pets WHERE id = ?", (indexes[1],)
@@ -3663,7 +3665,7 @@ def test_pet_synthesis_consumes_vice_and_reinforces_main(tmp_path: Path):
     # pet.txt when it is falsy, so ship the real name rather than "".
     assert payload["name"] == config_tables._table("pet.txt")[payload["id"]]["name"]
     # help.txt id 10: 合成必增世代，且主宠继承副宠 50% 强化值。
-    assert payload["exd_generation"] == 2
+    assert payload["exd_generation"] == 1, "delta, not the new total"
     assert all(payload[f"exd_{k}_tp"] == 50 for k in
                ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"))
     assert payload["type"] == 1

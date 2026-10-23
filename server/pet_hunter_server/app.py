@@ -5883,11 +5883,18 @@ def _pet_synthesis(database_path: Path) -> Response:
         generation = max(main_generation, vice_generation)
         if vice_generation <= main_generation:
             generation += 1
+        # 结果页的文案是「继承生命强化值」并要求 >0 才显示（PetSynthesisResultUI
+        # .as:173-195），所以这里必须记录**实际继承到的增量**，不能报绝对值——
+        # 主宠原有 100、继承 50 时若报 150，玩家会以为一次合成加了 150。
+        inherited: dict[str, int] = {}
         for column in ("pro_hp", "pro_speed", "pro_phy_att",
                        "pro_mag_att", "pro_phy_def", "pro_mag_def"):
+            current = int(main_row[column] or 0)
+            step = min(int(vice_row[column] or 0) // 2, max(0, LOCAL_PRO_CAP - current))
+            inherited[column] = step
             connection.execute(
-                f"UPDATE pets SET {column} = min(?, {column} + ?) WHERE id = ?",
-                (LOCAL_PRO_CAP, int(vice_row[column] or 0) // 2, main_index),
+                f"UPDATE pets SET {column} = ? WHERE id = ?",
+                (current + step, main_index),
             )
         if ttype == 1:
             # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级，
@@ -5927,12 +5934,14 @@ def _pet_synthesis(database_path: Path) -> Response:
         "type": ttype,
         "skills": [{"id": int(s)} for s in skills if s.isdigit()],
         "buffs": [{"id": b} for b in buffs],
-        "exd_hp_tp": updated["pro_hp"],
-        "exd_speed_tp": updated["pro_speed"],
-        "exd_phy_att_tp": updated["pro_phy_att"],
-        "exd_mag_att_tp": updated["pro_mag_att"],
-        "exd_phy_def_tp": updated["pro_phy_def"],
-        "exd_mag_def_tp": updated["pro_mag_def"],
+        # 增量语义：与「继承…强化值」「增加世代」的文案一致。
+        "exd_generation": generation - main_generation,
+        "exd_hp_tp": inherited["pro_hp"],
+        "exd_speed_tp": inherited["pro_speed"],
+        "exd_phy_att_tp": inherited["pro_phy_att"],
+        "exd_mag_att_tp": inherited["pro_mag_att"],
+        "exd_phy_def_tp": inherited["pro_phy_def"],
+        "exd_mag_def_tp": inherited["pro_mag_def"],
     }
     return _protocol_response(65, payload)
 
