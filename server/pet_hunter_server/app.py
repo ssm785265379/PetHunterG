@@ -2310,6 +2310,43 @@ def _guild_battle(database_path: Path) -> Response:
     return _protocol_response(94,{"is_battle_on":0,"battle_turn":0,"isReward":0,"start_time":0,"end_time":0,"total_honor":0,"battle_team":{"turn":{"1":[],"2":[],"3":[]}}})
 
 
+# LOCAL DEFAULT: the original game had a shared friend list. This server holds a
+# single hunter, so the list would always be empty; these NPC hunters keep the
+# friend screen usable and give 52/53 something to open. Their uids are prefixed
+# so 52 can tell them apart from real rows.
+LOCAL_FRIEND_FILLER = (
+    ("npc-1", "风间彻", 12),
+    ("npc-2", "龙崎", 24),
+    ("npc-3", "阿福", 8),
+    ("npc-4", "露娜", 35),
+    ("npc-5", "剑心", 50),
+)
+LOCAL_FRIEND_FILLER_PETS = (1001, 2019, 1003)
+
+
+def _friend_filler_entry(uid: str):
+    for entry in LOCAL_FRIEND_FILLER:
+        if entry[0] == uid:
+            return entry
+    return None
+
+
+def _friend_filler_pets(level: int) -> list[dict]:
+    pets = []
+    table = config_tables.pet_table()
+    for pet_id in LOCAL_FRIEND_FILLER_PETS:
+        record = table.get(pet_id)
+        if record is None:
+            continue
+        icon = str(record.get("iconId", "") or pet_id).strip()
+        pets.append({
+            "index": pet_id, "id": pet_id,
+            "icon": int(icon) if icon.isdigit() else pet_id,
+            "name": record.get("name", ""), "lv": max(1, int(level)),
+        })
+    return pets
+
+
 def _friend_list(database_path: Path) -> Response:
     uid=_request_value("uid")
     try: page,size=int(_request_value("p","1")),int(_request_value("n","9"))
@@ -2318,12 +2355,52 @@ def _friend_list(database_path: Path) -> Response:
         p=c.execute("SELECT id FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None:return _pet_error(103)
         rows=c.execute("SELECT uid,nick,lv,img FROM players WHERE id<>? ORDER BY id",(p["id"],)).fetchall()
-    start=max(0,page-1)*size
-    return _protocol_response(51,{"player_str_id":uid,"friend":[{"id":r["uid"],"state":0,"name":r["nick"],"img":r["img"]} for r in rows[start:start+size]]})
+    friends = [
+        {"id": r["uid"], "state": 0, "name": r["nick"], "img": r["img"]}
+        for r in rows
+    ]
+    friends.extend(
+        {"id": friend_uid, "state": 0, "name": name,
+         "img": "_".join(str(layer) for layer in _base_skin_layers(1))}
+        for friend_uid, name, _level in LOCAL_FRIEND_FILLER
+    )
+    start = max(0, page - 1) * size
+    return _protocol_response(51, {
+        "player_str_id": uid,
+        "friend": friends[start:start + size],
+        "value": "ok",
+    })
+
+
+def _friend_request(database_path: Path) -> Response:
+    """512/513 — add / remove a friend.
+
+    The list is local filler, so there is no friendship table to mutate; the two
+    commands just have to answer `ok` instead of falling through to the generic
+    empty envelope (FriendUI re-reads the list immediately afterwards).
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+    return _protocol_response(int(_request_value("showId", "512")), {"value": "ok"})
 
 
 def _friend_detail(database_path: Path) -> Response:
     target=_request_value("gid"); uid=_request_value("uid")
+    filler = _friend_filler_entry(target)
+    if filler is not None:
+        friend_uid, name, level = filler
+        return _protocol_response(52, {
+            "show_type": 0,
+            "player": {
+                "id": friend_uid, "name": name, "lv": level,
+                "img": "_".join(str(layer) for layer in _base_skin_layers(1)),
+            },
+            "pets": _friend_filler_pets(level),
+            "value": "ok",
+        })
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,uid,nick,lv,img FROM players WHERE uid=?",(target,)).fetchone()
         if p is None:return _pet_error(103)
@@ -6011,6 +6088,8 @@ def create_app(config: dict | None = None) -> Flask:
             return _friend_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "52":
             return _friend_detail(current_app.config["DATABASE"])
+        if command == "show" and _request_value("showId") in ("512", "513"):
+            return _friend_request(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "4":
             return _hunter_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "5":

@@ -4153,6 +4153,41 @@ def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
     assert len(set(totals)) > 1, f"total_gw never moved, still rotating: {totals}"
 
 
+def test_friend_list_has_local_hunters_and_512_513_ack(tmp_path: Path):
+    # A solo server has no other players, so the list must still render: 51 appends
+    # local filler hunters and 52 can open them.
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "Friend1")
+
+    command, listing = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "51", "uid": uid, "p": "1", "n": "9"})
+    )
+    assert command == 51
+    assert listing["player_str_id"] == uid
+    assert listing["friend"], "the friend list must never be empty on a solo server"
+    entry = listing["friend"][0]
+    for field in ("id", "state", "name", "img"):
+        assert field in entry, entry
+    # `img` is a paper-doll layer string, not an icon id.
+    assert "_" in str(entry["img"])
+
+    command, detail = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "52", "uid": uid, "gid": entry["id"]})
+    )
+    assert command == 52
+    assert detail["player"]["name"] == entry["name"]
+    assert detail["player"]["lv"] > 0
+    assert detail["pets"], "a friend card needs a pet roster"
+
+    for show_id in ("512", "513"):
+        command, ack = _envelope(
+            client.post("/flash.do", data={"m": "show", "showId": show_id, "uid": uid, "gid": entry["id"]})
+        )
+        assert command == int(show_id)
+        assert ack["value"] == "ok"
+
+
 def test_guild_lifecycle_create_list_members_rename_quit(tmp_path: Path):
     # 86 only opens the guild page when `position` is truthy (MainUI.as:212-221),
     # so a guildless player must answer position 0 rather than an empty guild.
