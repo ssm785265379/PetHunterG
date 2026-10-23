@@ -1473,6 +1473,19 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def _prime_explore_completion(database, gid: int) -> None:
+    """把某张图的发现率推到"再打一场就通关"，让测试能验证通关奖励。"""
+    table = config_tables._table("exploreMap.txt")
+    need = int(str(table[gid].get("needDiscoverRate", "0")).strip() or 0)
+    from pet_hunter_server.app import _explore_discover_gain
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO explore_progress (player_id, map_id, discover_rate)"
+            " VALUES (1, ?, ?)", (gid, max(0, need - _explore_discover_gain(need)))
+        )
+        connection.commit()
+
+
 def _unlock_explore_chain(database, gid: int) -> None:
     """Seed explore_progress so `gid` is reachable through the needExploreMap chain."""
     table = config_tables._table("exploreMap.txt")
@@ -1713,7 +1726,9 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"99","uid":uid,"gid":1}))
     assert command == 99 and payload["id"] == 1
     command, payload = _envelope(client.post("/flash.do", data={"m":"show","showId":"103","uid":uid,"gid":1}))
-    assert command == 103 and payload["is_finish"] == 1
+    assert command == 103
+    # is_finish 是"这张图打通了"，不是"这一场赢了"（ExploreResultItem.as:109）。
+    assert payload["is_finish"] in (0, 1)
 
 
 def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
@@ -2201,6 +2216,7 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     before = bag_quantity()
     for _ in range(2):  # the second run exercises the unique-constraint path
         _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+        _prime_explore_completion(database, gid)
         command, payload = _envelope(
             client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
         )
@@ -2533,6 +2549,7 @@ def test_explore_pays_the_maps_real_pass_reward(tmp_path: Path):
     uid = _create_local_player(client, "RwdOne")
     gid = sorted(table)[0]
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    _prime_explore_completion(database, gid)
     command, payload = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
     )
@@ -2542,8 +2559,10 @@ def test_explore_pays_the_maps_real_pass_reward(tmp_path: Path):
     from pet_hunter_server.app import LOCAL_EXPLORE_BONUS_POINT
 
     # The table's pass reward plus the documented LOCAL DEFAULT silver bonus.
-    assert result["reward_point"] == expected_point + LOCAL_EXPLORE_BONUS_POINT
-    assert result["reward_crystal"] == int(str(table[gid].get("passRewardCrystal", "0")).strip() or 0)
+    # 通关奖励现在走 finish_reward 区块（每场战斗不再发通关奖励）。
+    finish = payload["finish_reward"]
+    assert finish["reward_point"] == expected_point + LOCAL_EXPLORE_BONUS_POINT
+    assert finish["reward_crystal"] == int(str(table[gid].get("passRewardCrystal", "0")).strip() or 0)
 
     # Whatever the table advertises must actually land somewhere real: a prop or
     # equip lands in the bag, while a kind-3 entry registers in the picture book.
@@ -3274,7 +3293,8 @@ def test_abyss_rewards_scale_with_stage_and_expeditions_can_roll_elites(tmp_path
     assert len(battle["def_list"]) >= 3, "elite expedition fields leader + pair"
     assert isinstance(battle["is_win"], int)
     if battle["is_win"] == 1:
-        assert explore["is_finish"] == 1
+        # is_finish 现在表示"这张图打通"，单场胜利时为 0。
+        assert explore["is_finish"] in (0, 1)
     else:
         assert explore["is_finish"] == 0, "a lost expedition must not report finished"
         assert battle["reward_point"] == 0

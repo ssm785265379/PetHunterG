@@ -752,10 +752,28 @@ def _initialize_database(database_path: Path) -> None:
                 player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
                 map_id INTEGER NOT NULL,
                 discover_rate INTEGER NOT NULL DEFAULT 0,
+                -- 一张图 = 3 场连续战斗；hp_pct 让血条跨场继承。
+                battles INTEGER NOT NULL DEFAULT 0,
+                hp_pct INTEGER NOT NULL DEFAULT 100,
+                -- 历史最佳星级（0-5）与通关奖励是否已领
+                star_best INTEGER NOT NULL DEFAULT 0,
+                pass_claimed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (player_id, map_id)
             )
             """
         )
+        # 老库升级：上表的新增列在已存在的库上不会自动出现。
+        existing = {
+            row[1] for row in connection.execute("PRAGMA table_info(explore_progress)")
+        }
+        for column, ddl in (
+            ("battles", "battles INTEGER NOT NULL DEFAULT 0"),
+            ("hp_pct", "hp_pct INTEGER NOT NULL DEFAULT 100"),
+            ("star_best", "star_best INTEGER NOT NULL DEFAULT 0"),
+            ("pass_claimed", "pass_claimed INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE explore_progress ADD COLUMN {ddl}")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS guilds (
@@ -3492,9 +3510,23 @@ def _explore_start(database_path: Path) -> Response:
         # REAL rewards from exploreMap.txt's passReward* columns (the earlier
         # implementation paid a flat LOCAL_EXPLORE_REWARD and no items at all).
         elite_mult = LOCAL_ELITE_REWARD_MULT if elite_fight else 1
-        reward_point = (m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT) * elite_mult if is_win else 0
-        reward_crystal = m["pass_reward_crystal"] * elite_mult if is_win else 0
-        parsed_goods = _parse_map_goods(m["pass_reward_goods"]) if is_win else []
+        # 配置表里 passReward* 是"打通这张图"的奖励，不是"每场战斗"的奖励。
+        # 原来每赢一场就发一次，导致每次结算都弹通关奖励。
+        need_rate = int(m["need_discover_rate"] or 0)
+        gain = _explore_discover_gain(need_rate)
+        before_row = c.execute(
+            "SELECT discover_rate, star_best, pass_claimed FROM explore_progress"
+            " WHERE player_id=? AND map_id=?", (p["id"], gid)).fetchone()
+        rate_before = int(before_row["discover_rate"] or 0) if before_row else 0
+        star_best = int(before_row["star_best"] or 0) if before_row else 0
+        pass_claimed = int(before_row["pass_claimed"] or 0) if before_row else 0
+        # 这一场是否把发现率打满 = 这张图通关
+        done_now = is_win and (rate_before + gain) >= need_rate
+        pay_pass = done_now and not pass_claimed
+        pay_star = done_now and star_best < 5
+        reward_point = (m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT) * elite_mult if pay_pass else 0
+        reward_crystal = m["pass_reward_crystal"] * elite_mult if pay_pass else 0
+        parsed_goods = _parse_map_goods(m["pass_reward_goods"]) if pay_pass else []
         reward_goods = _grant_goods(
             c, p["id"],
             [(gid, num, icon) for kind, gid, num, icon in parsed_goods if kind == 1],
@@ -3559,6 +3591,10 @@ def _explore_start(database_path: Path) -> Response:
                 " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
                 (p["id"], gid, _explore_discover_gain(int(m.get("need_discover_rate") or 0))),
             )
+        if done_now:
+            c.execute(
+                "UPDATE explore_progress SET pass_claimed=1, star_best=5"
+                " WHERE player_id=? AND map_id=?", (p["id"], gid))
         progress_row = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
             (p["id"], gid),
@@ -3573,7 +3609,9 @@ def _explore_start(database_path: Path) -> Response:
         "value":"ok","event_type":_explore_event_type(gid),
         "world":m["world"],"world_id":m["world"],
         "is_tired":0,
-        "is_finish":1 if is_win else 0,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
+        # ExploreResultItem.as:109 用 is_finish 决定是否显示"结束行程"按钮；
+        # 它是"这张图的行程结束"，不是"这一场赢了"。
+        "is_finish":1 if done_now else 0,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
         "now_discover_rate":now_rate,"add_discover_rate":add_rate,
         "need_discover_rate":m["need_discover_rate"],
         "energy":_pet_energy(lead_species),"cost_energy":0,"add_energy":0,
@@ -3591,16 +3629,20 @@ def _explore_start(database_path: Path) -> Response:
             reward_point, reward_crystal,
             [(entry["id"], entry["num"]) for entry in reward_goods],
         ),
+        # 满星（通关时剩余血量满）奖励：每张图只发一次。
         "max_star_reward":_reward_block(
-            m["max_reward_point"], m["max_reward_crystal"],
-            [(gid, num) for kind, gid, num, _icon in _parse_map_goods(m["max_reward_goods"])],
+            m["max_reward_point"] if pay_star else 0,
+            m["max_reward_crystal"] if pay_star else 0,
+            [(gid, num) for kind, gid, num, _icon in _parse_map_goods(m["max_reward_goods"])]
+            if pay_star else [],
         ),
         # ExplorePveUI.as:381-510 dereferences every field below without a guard.
         "battle_result":{
             "is_win":1 if is_win else 0,"hunt_type":1,"map_id":gid,
             "monster_group":len(def_list)+3,
             "att_list":att_list,"def_list":def_list,"record":record,
-            "reward_point":reward_point,"reward_crystal":reward_crystal,
+            # 每场的即时奖励：只保留经验，银币/水晶归入通关块。
+            "reward_point":0,"reward_crystal":0,
             "reward_goods":reward_goods,"pic":[],
         },
     })
