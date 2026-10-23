@@ -1476,6 +1476,15 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def _fund_player(database, money=10**7, point=10**7, crystal=10**7) -> None:
+    """给测试玩家补足余额：租赁现在会真的扣钱。"""
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET money=?, point=?, crystal=?", (money, point, crystal)
+        )
+        connection.commit()
+
+
 def _prime_explore_completion(database, gid: int) -> None:
     """把某张图的发现率推到"再打一场就通关"，让测试能验证通关奖励。"""
     table = config_tables._table("exploreMap.txt")
@@ -3404,6 +3413,7 @@ def test_explore_rental_chain_round_trips_through_the_shop(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "RentOne")
+    _fund_player(database)
     table = config_tables._table("exploreEquip.txt")
 
     def call(show_id: int, **extra):
@@ -3813,6 +3823,7 @@ def test_mount_page_lists_only_mounts_even_when_gear_slots_are_full(tmp_path: Pa
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "MountF")
+    _fund_player(database)
     table = config_tables._table("exploreEquip.txt")
     mounts = sorted(int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "1")
     gear = sorted(int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "2")
@@ -3860,6 +3871,7 @@ def test_renting_another_mount_switches_the_one_you_ride(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "MountSw")
+    _fund_player(database)
     table = config_tables._table("exploreEquip.txt")
     mounts = sorted(
         int(k) for k, v in table.items() if str(v.get("type", "")).strip() == "1"

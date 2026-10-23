@@ -4617,10 +4617,45 @@ def _explore_rent(database_path: Path) -> Response:
         return _pet_error(100)
     if gid not in config_tables._table("exploreEquip.txt"):
         return _pet_error(400)
+    record = config_tables.equip_record(gid) if False else None
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id, money, point, crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
+        equip = config_tables._table("exploreEquip.txt").get(gid) or {}
+
+        def _num(key: str) -> int:
+            raw = str(equip.get(key, "") or "").strip()
+            return int(raw) if raw.lstrip("-").isdigit() else 0
+
+        need_money, need_point, need_crystal = (
+            _num("needMoney"), _num("needPoint"), _num("needCrystal"),
+        )
+        already = c.execute(
+            "SELECT 1 FROM explore_rented WHERE player_id=? AND equip_id=?",
+            (player["id"], gid),
+        ).fetchone() is not None
+        own_money = int(player["money"] or 0)
+        own_point = int(player["point"] or 0)
+        own_crystal = int(player["crystal"] or 0)
+        if not already and (
+            own_money < need_money
+            or own_point < need_point
+            or own_crystal < need_crystal
+        ):
+            return _protocol_response(102, {
+                "value": "not_enough",
+                "need_money": need_money, "own_money": own_money,
+                "need_point": need_point, "own_point": own_point,
+                "need_crystal": need_crystal, "own_crystal": own_crystal,
+            })
+        if not already:
+            c.execute(
+                "UPDATE players SET money=money-?, point=point-?, crystal=crystal-? WHERE id=?",
+                (need_money, need_point, need_crystal, player["id"]),
+            )
         count = c.execute(
             "SELECT COUNT(*) FROM explore_rented WHERE player_id=? AND slot_type=?",
             (player["id"], ttype),
