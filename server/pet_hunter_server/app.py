@@ -4590,9 +4590,24 @@ def _explore_equip_info(database_path: Path) -> Response:
         if player is None:
             return _pet_error(103)
         rented = _rented_ids(database_path, player["id"], ttype)
+        active_row = None
+        if ttype == 1:
+            active_row = c.execute(
+                "SELECT equip_id FROM explore_rented WHERE player_id=? AND slot_type=1"
+                " ORDER BY id DESC LIMIT 1", (player["id"],)
+            ).fetchone()
+    # 坐骑的 is_rented 表示"是不是当前在骑的那只"，不是"是否拥有"。
+    # 因为 HireShopInfoUI.as:196 用它决定是否显示租赁按钮：
+    #   已拥有 → is_rented=1 → 按钮隐藏 → 玩家永远看不到"切换"入口。
+    # 对坐骑来说，拥有多只就该能来回切，所以只有正在用的那只隐藏按钮。
+    if ttype == 1:
+        # 只有"正在使用"才隐藏按钮
+        is_rented = 1 if (active_row and int(active_row["equip_id"]) == gid) else 0
+    else:
+        is_rented = 1 if gid in rented else 0
     return _protocol_response(101, {
         "type": ttype, "id": gid,
-        "is_rented": 1 if gid in rented else 0,
+        "is_rented": is_rented,
         "need_money": int(record.get("needMoney") or 0),
         "need_point": int(record.get("needPoint") or 0),
         "need_crystal": int(record.get("needCrystal") or 0),
