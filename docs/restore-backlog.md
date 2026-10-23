@@ -39,7 +39,18 @@
   （`HireMountsUI.as:204` 只读 `list[0]`），否则界面永远显示第一只（驴）。
 - **状态**：APK 已安装，待真机确认。
 
-### R-01 遗留：点已租装备没有反馈（未修）
+### R-01 真因（最终定位）：租赁从来没扣过钱，而且账号银币为 0
+
+- `_explore_rent`（102）原实现只 `INSERT OR IGNORE` 一行就回 `ok`，
+  **既不校验余额也不扣款**，所以"租"永远成功、永远不花钱，界面上也看不出任何变化。
+- 同时玩家账号 `money = 0`，而 `exploreEquip.txt` 里装备租金都记在 `needMoney`（银币），
+  所以真正要收费时必然余额不足。
+- 已修：按 `needMoney / needPoint / needCrystal` 扣款；余额不足回
+  `not_enough + need_*/own_*`（`HireShopInfoUI` 会读这些字段）；
+  已拥有的重复租用免费（用于切换）。
+- 线上实测：银币 500000 → 499820（扣 180），`is_rented` 变 1，已租装备 6→7 件。
+
+### R-01 遗留：HireListUI 无法改包（已知限制）
 - `HireListUI.onMouseUpItem` 对已租道具也发 `102`（重租自己），所以"点了没反应"。
 - 第一次尝试改成"打开装备商店"时**把 AS3 写坏了**（FFDec 报
   `Unknown preprocessor instruction: findproperty`），已放弃该次改动。
