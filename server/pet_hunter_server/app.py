@@ -1223,6 +1223,18 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     #   replace        - gear wins at its own z, base parts at that z are dropped
     #   gear_only      - hide the base triple entirely (debug)
     mode = os.environ.get("PETHUNTER_SKIN_MODE", "overlay").strip().lower()
+    if mode == "overlay_no_weapon" and gear:
+        # 基础身体贴图 100001 本身已经握着一把剑（真机确认：裸装时手上仍有武器），
+        # 所以再叠加装备里的武器图层就会看到两把。武器只保留属性、不再画第二把；
+        # 护甲和头盔是覆盖在半身上的，继续叠。
+        weapon_sprites = {
+            config_tables.equip_image_id(record)
+            for record in (
+                config_tables.equip_record(row["item_id"]) for row in worn.values()
+            )
+            if record and str(record.get("type", "")).strip() == "1"
+        }
+        gear = [lid for lid in gear if lid not in weapon_sprites]
     if mode == "replace" and gear:
         taken = {int(skin.get(lid, {}).get("z", "0") or 0) for lid in gear}
         layers = [lid for lid in base if int(skin.get(lid, {}).get("z", "0") or 0) not in taken]
