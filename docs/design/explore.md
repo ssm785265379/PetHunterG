@@ -128,3 +128,31 @@
 
 - 已改：3 场战斗 / 血条继承 / 通关奖励一次性 / 星级奖励一次性
 - 待做：地形影响敌人类型与难度、世界地图入口
+
+
+---
+
+# 客户端改包记录（2026-10-23 晚）
+
+## 已改 1：未解锁地图显示锁
+
+`ExploreMapListUI.as` 里 `"isClick":true` 两处 → `"isClick":_loc5_.is_open != 0`。
+服务端下发 `is_open` 后，锁住的图会画 `clip_lock` 并拒绝进入。
+
+## 已改 2：探险背景音乐重叠
+
+**根因**：`ExploreMapListUI.as` 用 `SoundManager.play("sound_event_2xx", 2147483647)`
+无限循环播放地图 BGM，而切换界面时只 `stop("sound_back")`，上一首会残留并与新音乐叠加。
+
+**改法**：播放地图 BGM 前先 `SoundManager.stopAll()`，保证同一时刻只有一首背景音乐。
+
+**打包链路**（可复用）：
+```
+ffdec -export script <dir> <in.swf>
+（只改需要的 .as，单独丢进一个只含该文件的目录）
+ffdec -importScript <in.swf> <out.swf> <（只含改动文件的目录）>
+adt -package -target apk-captive-runtime -storetype pkcs12 -keystore build/remote.p12 ...
+adb install -r
+```
+注意：`-importScript` 是全量编译，**不能导入全部脚本**——`Navigator.as` 含反编译出的
+`goto`，FFDec 编译器不支持会直接失败；只导入改动文件才成功。
