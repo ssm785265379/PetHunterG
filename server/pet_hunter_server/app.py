@@ -6198,6 +6198,17 @@ def create_app(config: dict | None = None) -> Flask:
             return _guild_battle(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "3":
             return _player_detail_social(current_app.config["DATABASE"])
+        # 41 (SHOW_MORE_INFO) and 107 (ACHIEVEMENT_LIST) are not implemented yet,
+        # but their screens dereference the payload WITHOUT a null guard:
+        #   InfoUI.as:232        var _loc8_:Array = param2.list; _loc8_.length
+        #   ArtifactListUI.as:365 _list = param2.pics; _list.length
+        # The generic {"value":"ok"} fallback therefore threw a TypeError and froze
+        # the page. Answer with correctly-shaped empty payloads instead.
+        if command == "show" and _request_value("showId") == "41":
+            return _protocol_response(41, {"list": [], "value": "ok"})
+        if command == "show" and _request_value("showId") == "107":
+            return _protocol_response(107, {"id": 0, "need_money": 0,
+                                            "pics": [], "list": [], "is_reward": 0})
         if command == "show" and _request_value("showId") == "51":
             return _friend_list(current_app.config["DATABASE"])
         if command == "show" and _request_value("showId") == "52":
