@@ -1494,6 +1494,48 @@ def test_explore_start_remembers_map_from_detail(tmp_path: Path):
         assert int(layer) in config_tables.skin_table()
 
 
+def test_bag_marks_effectless_props_as_disabled(tmp_path: Path):
+    # PropItem.as:328-333 disables a slot when data.on == 0. The response used to
+    # omit `on` entirely, so props with no effect (prop.txt type 0) looked tappable
+    # and answered -1:100 when used.
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "BagOn")
+
+    with sqlite3.connect(database) as connection:
+        # 10506 is a type-0 prop (王国勋章): no effect rule, must be disabled.
+        connection.execute(
+            "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)"
+            " VALUES (1, 10506, 1, 1, 10506, 0, 0)"
+        )
+        connection.commit()
+
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "22", "uid": uid,
+                                       "ttype": "1", "p": "1", "n": "9"})
+    )
+    assert command == 22
+    rows = {row["id"]: row for row in payload["goods_list"]}
+    assert rows[10506]["on"] == 0, "an effect-less prop must be disabled"
+
+    # A real consumable (10007 体力饮料, type 7 / value 20) must stay usable.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type, use_type)"
+            " VALUES (1, 10007, 1, 1, 10007, 7, 1)"
+        )
+        connection.commit()
+    _, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "22", "uid": uid,
+                                       "ttype": "1", "p": "1", "n": "9"})
+    )
+    usable = {row["id"]: row for row in payload["goods_list"]}
+    assert 10007 in usable, "the consumable must be listed"
+    assert usable[10007]["on"] == 1, "a real consumable must stay tappable"
+
+
 def test_explore_list_tolerates_a_garbage_gid(tmp_path: Path):
     # MainUI.as:262-272 answers the world list WITHOUT calling readDatas, so the
     # map-list screen can still have an empty `data.world` and re-request with

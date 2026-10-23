@@ -1386,6 +1386,13 @@ def _player_inventory(database_path: Path) -> Response:
         # So this field must stay a NUMBER. Only IconItem consumers
         # (IconItem.as:79 getDefinition("" + icon)) want the full class name.
         item["icon"] = item["icon"] or 0
+        if item["team"] in (1, 2):
+            # PropItem.as:328-333 disables the slot when data.on == 0. The response
+            # carried no `on` at all, so props with no effect (prop.txt type 0, e.g.
+            # 王国勋章) still looked tappable and just answered -1:100 — the
+            # "不可使用的也展示出来了" report. Mark them disabled instead of lying.
+            rules = _prop_effect_rules(item["id"])
+            item["on"] = 1 if rules else 0
         if item["team"] == 3:
             # BagListUI.onMouseUpItem switches on this `type` (row `t`) and its
             # cases 1/2/9/24/25/27 are pet-item actions; equipment must fall to
