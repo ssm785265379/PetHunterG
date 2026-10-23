@@ -3684,7 +3684,17 @@ def _explore_list(database_path: Path) -> Response:
     # gates the next-page button on "this page came back full"
     # (ExploreMapListUI.as:168-175), so an error would pop up instead of ending
     # the list.
-    page_rows = rows[(page - 1) * size: page * size]
+    # 从"下一张还没通关的图"开始显示：玩家一进探险就看到当前该打哪张，
+    # 不用每次翻到第 3 页。（已通关的图不再占用可见页。）
+    frontier = 0
+    for position, row in enumerate(rows):
+        if row["discover_rate"] < row["need_discover_rate"]:
+            frontier = position
+            break
+    else:
+        frontier = max(0, len(rows) - 1)
+    start_at = frontier + (page - 1) * size
+    page_rows = rows[start_at: start_at + size]
     return _protocol_response(98,{
         "type": 2,
         "world":world,
