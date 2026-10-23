@@ -1473,10 +1473,34 @@ def test_sale_goods_sells_stack_partially(tmp_path: Path):
         ).fetchone()[0] == 80
 
 
+def _unlock_explore_chain(database, gid: int) -> None:
+    """Seed explore_progress so `gid` is reachable through the needExploreMap chain."""
+    table = config_tables._table("exploreMap.txt")
+    chain = []
+    cursor = gid
+    seen = set()
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        record = table.get(cursor) or {}
+        need = str(record.get("needExploreMap", "")).strip()
+        if not need.isdigit() or int(need) == 0:
+            break
+        cursor = int(need)
+        chain.append(cursor)
+    with sqlite3.connect(database) as connection:
+        for map_id in chain:
+            connection.execute(
+                "INSERT OR REPLACE INTO explore_progress (player_id, map_id, discover_rate)"
+                " VALUES (1, ?, 100000)", (map_id,)
+            )
+        connection.commit()
+
+
 def test_explore_start_remembers_map_from_detail(tmp_path: Path):
     # ExploreMapInfoUI.as:204 sends EXPLORE_KEY(103) with no gid, so 99 has to
     # persist the chosen map for the follow-up request.
     database=tmp_path/"game.sqlite3"; client=create_app({"TESTING":True,"DATABASE":database}).test_client(); uid=_create_local_player(client,"ExpStart")
+    _unlock_explore_chain(database, 2)
     command,_=_envelope(client.post("/flash.do",data={"m":"show","showId":99,"uid":uid,"gid":2}))
     assert command==99
     command,payload=_envelope(client.post("/flash.do",data={"m":"show","showId":103,"uid":uid}))
@@ -1553,6 +1577,49 @@ def test_explore_list_tolerates_a_garbage_gid(tmp_path: Path):
         assert command == 98, bad
         assert payload["world"] >= 1, bad
         assert payload["list"], f"gid={bad!r} must still return a map page"
+
+
+def test_explore_maps_unlock_through_the_progress_chain(tmp_path: Path):
+    # exploreMap.txt: needExploreMap points at the previous map and needDiscoverRate
+    # is that map's clear line. Map 1 (need 0) is the only one open until its rate
+    # is reached — "只有一张图能进" is the design, not a bug.
+    table = config_tables._table("exploreMap.txt")
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ChainT")
+
+    def rows(gid_world: int = 1):
+        return _envelope(client.post(
+            "/flash.do",
+            data={"m": "show", "showId": 98, "uid": uid, "ttype": 2,
+                  "gid": str(gid_world), "p": "1", "n": "9"},
+        ))[1]["list"]
+
+    page = rows()
+    assert page, "world 1 must have maps"
+    assert page[0]["is_open"] == 1, "the chain root is always open"
+    assert page[1]["is_open"] == 0, "map 2 needs map 1 cleared first"
+    assert "discover_rate" in page[0] and "need_discover_rate" in page[0]
+
+    # Starting a locked map must be refused rather than silently running.
+    second = page[1]["id"]
+    command, payload = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": 99, "uid": uid, "gid": str(second)}
+    ))
+    assert command == 99
+    started = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    assert started.get_data(as_text=True).startswith("-1:"), "locked map must not run"
+
+    # Clear map 1 by reaching its needDiscoverRate, then map 2 opens.
+    need = int(str(table[int(page[0]["id"])].get("needDiscoverRate", "0")).strip() or 0)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO explore_progress (player_id, map_id, discover_rate)"
+            " VALUES (1, ?, ?)", (int(page[0]["id"]), need)
+        )
+        connection.commit()
+    after = rows()
+    assert after[1]["is_open"] == 1, "clearing the previous map must unlock the next"
 
 
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
@@ -2117,6 +2184,8 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "EqRwd")
+    # 该图在 needExploreMap 链条中段，先把前置图标记完成才能出发。
+    _unlock_explore_chain(database, gid)
 
     def bag_quantity() -> int:
         with sqlite3.connect(database) as connection:

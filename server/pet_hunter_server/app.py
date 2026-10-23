@@ -743,6 +743,18 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # 探险推进：每张图累计的发现率。exploreMap.txt 用 needDiscoverRate
+        # 决定下一张图能否解锁，没有这张表就永远停在第一张图。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS explore_progress (
+                player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                map_id INTEGER NOT NULL,
+                discover_rate INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, map_id)
+            )
+            """
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS guilds (
@@ -2102,6 +2114,10 @@ LOCAL_HUNT_MAPS = {
 # Maps unlock in this order: the first is always open, the rest need the previous
 # one cleared.
 LOCAL_HUNT_ORDER = (1, 2, 3, 4, 5, 6)
+
+# LOCAL DEFAULT: 一次探险胜利给多少发现率。配置表只给了每张图的通关线
+# （needDiscoverRate 400 起），没给单次增量，先取 100（4 次通关第一张图）。
+LOCAL_EXPLORE_DISCOVER_GAIN = 100
 # Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
@@ -3284,6 +3300,8 @@ def _explore_map_row(gid: int) -> dict | None:
         "star": record.get("star", "1500:1000:700:500"),
         "name": record.get("name", ""),
         "need_discover_rate": _int("needDiscoverRate"),
+        # 前置地图：0 表示这条链的起点（永远开放）。
+        "need_explore_map": _int("needExploreMap"),
         "pass_reward_point": _int("passRewardPoint"),
         "pass_reward_crystal": _int("passRewardCrystal"),
         "pass_reward_goods": str(record.get("passRewardGoods", "") or ""),
@@ -3408,6 +3426,10 @@ def _explore_start(database_path: Path) -> Response:
             gid=p["cur_explore_map"]
         m=_explore_map_row(gid)
         if m is None: return _pet_error(400)
+        # 门禁：exploreMap.txt 的 needExploreMap 链条就是解锁顺序，前置图发现率
+        # 没打满时不允许出发，否则玩家可以跳过整条链直接打最后一张图。
+        if not _explore_map_open(c, p["id"], gid):
+            return _pet_error(100)
         # An expedition costs one stamina point; the client renders the value the
         # response reports, so it has to be the post-spend number.
         if (p["explore_ap"] or 0) < 1: return _pet_error(100)
@@ -3514,6 +3536,21 @@ def _explore_start(database_path: Path) -> Response:
             if is_win
             else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
         )
+        # 发现率必须落地：配置表用 needDiscoverRate 决定下一张图能否解锁，
+        # 而这个值原来恒为 0，导致永远停在第一张图。
+        if is_win:
+            c.execute(
+                "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
+                " VALUES (?, ?, ?) ON CONFLICT(player_id, map_id)"
+                " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
+                (p["id"], gid, LOCAL_EXPLORE_DISCOVER_GAIN),
+            )
+        progress_row = c.execute(
+            "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+            (p["id"], gid),
+        ).fetchone()
+        now_rate = int(progress_row["discover_rate"] or 0) if progress_row else 0
+    add_rate = LOCAL_EXPLORE_DISCOVER_GAIN if is_win else 0
     horse=_explore_horse(database_path, p["id"])
     return _protocol_response(103,{
         # ExploreUI.as:100 routes to the battle screen only when event_type == 1;
@@ -3523,7 +3560,7 @@ def _explore_start(database_path: Path) -> Response:
         "world":m["world"],"world_id":m["world"],
         "is_tired":0,
         "is_finish":1 if is_win else 0,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
-        "now_discover_rate":0,"add_discover_rate":0,
+        "now_discover_rate":now_rate,"add_discover_rate":add_rate,
         "need_discover_rate":m["need_discover_rate"],
         "energy":_pet_energy(lead_species),"cost_energy":0,"add_energy":0,
         "supply":0,"cost_supply":0,"add_supply":0,
@@ -3612,9 +3649,19 @@ def _explore_list(database_path: Path) -> Response:
         if _explore_map_world(gid) != world:
             continue
         row=_explore_map_row(gid)
+        progress = c.execute(
+            "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+            (player["id"], gid),
+        ).fetchone()
+        rate = int(progress["discover_rate"] or 0) if progress else 0
         rows.append({"index":gid,"code":gid,"id":gid,"terrain":row["terrain"],
                      "name":row["name"],
-                     "star":row["star"],"max_days":row["max_days"]})
+                     "star":row["star"],"max_days":row["max_days"],
+                     # 客户端把 isClick 硬编码为 true，所以这些字段目前只用于展示；
+                     # 真正的门禁在 103（_explore_start）。
+                     "discover_rate":rate,
+                     "need_discover_rate":row["need_discover_rate"],
+                     "is_open":1 if _explore_map_open(c, player["id"], gid) else 0})
     # An exhausted page must answer an empty list, not an error: the client only
     # gates the next-page button on "this page came back full"
     # (ExploreMapListUI.as:168-175), so an error would pop up instead of ending
@@ -3627,6 +3674,29 @@ def _explore_list(database_path: Path) -> Response:
         "max_explore_ap":player["max_explore_ap"],
         "list":page_rows,
     })
+
+
+def _explore_map_open(connection, player_id: int, gid: int) -> bool:
+    """一张图是否已开放：前置图完成（发现率达到其 needDiscoverRate）才算。
+
+    这是 exploreMap.txt 的原有规则：needExploreMap 指向前置图，
+    needDiscoverRate 是该图的通关线。起点图（needExploreMap = 0）永远开放。
+    """
+    row = _explore_map_row(gid)
+    if row is None:
+        return False
+    need = int(row.get("need_explore_map") or 0)
+    if need <= 0:
+        return True
+    previous = _explore_map_row(need)
+    if previous is None:
+        return True
+    done = connection.execute(
+        "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+        (player_id, need),
+    ).fetchone()
+    rate = int(done["discover_rate"] or 0) if done else 0
+    return rate >= int(previous.get("need_discover_rate") or 0)
 
 
 def _explore_detail(database_path: Path) -> Response:
