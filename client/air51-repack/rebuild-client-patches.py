@@ -133,6 +133,16 @@ def main() -> int:
         raise SystemExit("mount hotspot anchor missing")
     p.write_text(src, encoding="utf-8")
 
+    # 4b) HireMountsUI 也要先清空，否则切换坐骑时上一只的贴图会留着
+    p = ui / "HireMountsUI.as"
+    src = p.read_text(encoding="utf-8")
+    add = re.compile(r"([ \t]*)_pic_img\.addChild\(_loc5_\);")
+    m = add.search(src)
+    if not m:
+        raise SystemExit("mounts pic anchor missing")
+    src = src[: m.start()] + m.group(1) + "_pic_img.removeAll();\n" + src[m.start():]
+    p.write_text(src, encoding="utf-8")
+
     # 5) HireShopInfoUI 先清空再画
     p = ui / "HireShopInfoUI.as"
     src = p.read_text(encoding="utf-8")
