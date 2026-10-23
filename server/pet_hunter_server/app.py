@@ -4139,7 +4139,13 @@ def _explore_hire_list(database_path: Path) -> Response:
         104,
         {
             "type": ttype,
-            "equip_count": rented,
+            # HireListUI.as:269-281 用 equip_count 决定哪一格是"可点开商店"的空格：
+            #   index < equip_count-1 → open=true（可点，发 100 打开商店）
+            #   否则 → open=false（不可点）
+            # 原来 equip_count 直接等于"已租数量"，于是每一格都落在"有数据"分支，
+            # 商店入口彻底消失——装备租赁"从来没有成功过"的真正原因。
+            # 装备页改为上报槽位总数，保证始终有可点的空格。
+            "equip_count": rented if ttype == 1 else max(rented, LOCAL_EXPLORE_HIRE_SLOTS),
             "max_equip_count": LOCAL_EXPLORE_HIRE_SLOTS,
             "list": entries,
             "value": "ok",
