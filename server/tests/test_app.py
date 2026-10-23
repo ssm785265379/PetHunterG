@@ -4,9 +4,24 @@ import json
 import sqlite3
 import xml.etree.ElementTree as ET
 
+import pytest
+
 from pet_hunter_server import create_app
 from pet_hunter_server import config_tables, seed_items
 from pet_hunter_server.app import LOCAL_DEFAULT_BAG_CAPACITY
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_encounters(monkeypatch):
+    """Turn the random elite encounter off unless a test asks for it.
+
+    Elite fights double the payout (LOCAL_ELITE_REWARD_MULT), so a test that checks
+    an exact reward figure would fail roughly one run in seven. Tests that care
+    about elites assign the attribute themselves and restore it afterwards.
+    """
+    from pet_hunter_server import app as _app
+
+    monkeypatch.setattr(_app, "LOCAL_ELITE_CHANCE", 0.0, raising=False)
 
 
 def test_health_check_is_available_to_local_client():

@@ -2926,7 +2926,12 @@ def _hunter_fight(database_path: Path) -> Response:
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
         if is_win:
-            _unlock_pic(c, p["id"], [entry["id"] for entry in _pic_entries(monsters)])
+            # Only the entries unlocked by THIS hunt may pop the 图鉴 banner; the
+            # response used to list every monster in the fight, so an already
+            # registered creature re-popped "获得图鉴" on every single hunt.
+            newly_unlocked = set(_unlock_pic(
+                c, p["id"], [entry["id"] for entry in _pic_entries(monsters)]
+            ))
         # Per-map progress, so the map list's bar actually moves.
         c.execute(
             "INSERT INTO hunt_progress (player_id, map_id, kills, cleared) VALUES (?,?,?,0)"
@@ -2954,7 +2959,10 @@ def _hunter_fight(database_path: Path) -> Response:
         elif rage_gain:
             c.execute("UPDATE players SET rage_point = ? WHERE id = ?", (rage_after, p["id"]))
 
-    pic=_pic_entries(monsters) if is_win else []
+    pic=[
+        entry for entry in _pic_entries(monsters)
+        if is_win and entry["id"] in newly_unlocked
+    ]
     return _protocol_response(6,{
         "is_win":1 if is_win else 0,"hunt_type":1,"map_id":hid,"monster_group":len(def_list)+3,
         "att_list":att_list,"def_list":def_list,"record":record,
