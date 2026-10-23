@@ -2183,7 +2183,16 @@ def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
     original_elite = A.LOCAL_ELITE_CHANCE
     A.LOCAL_ELITE_CHANCE = 0.0
     try:
-        for hid in (1, 2, 3, 101):
+        # Hunts unlock in order now, so mark each earlier map cleared before the
+        # next one opens; a real win does the same thing.
+        for hid in (1, 2, 3):
+            with sqlite3.connect(database) as connection:
+                for earlier in range(1, hid):
+                    connection.execute(
+                        "INSERT OR REPLACE INTO hunt_progress (player_id, map_id, kills, cleared)"
+                        " VALUES (1, ?, ?, 1)", (earlier, 10),
+                    )
+                connection.commit()
             command, _ = _envelope(
                 client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": hid})
             )
@@ -2545,25 +2554,42 @@ def test_develop_page_shows_pets_instead_of_star_wands(tmp_path: Path):
         return payload["list"]
 
     idle = slots()
-    assert idle, "an idle player must still see their pets, not nine wands"
+    # An idle player has NO running run, so every slot is empty on purpose: an
+    # empty slot keeps clip_wand and stays clickable (DevelopItem.as:171 only sets
+    # mouseEnabled=false when a slot carries data), which is how a pet is chosen.
+    # Filling the grid with the roster made all nine slots untappable.
+    assert idle == [], "training slots must be empty until a run starts"
     assert len(idle) <= 9
-    for entry in idle:
+
+    # Starting a run puts that pet into a slot with a live countdown.
+    with sqlite3.connect(database) as connection:
+        pet_id = connection.execute(
+            "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+    command, started = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "10", "uid": uid,
+                                       "index": str(pet_id), "ttype": "1"})
+    )
+    assert command == 10
+    running = slots()
+    assert len(running) == 1
+    for entry in running:
         # DevelopItem.as:140 needs `icon` to resolve as "p"+icon, else it throws.
         assert entry["icon"], "every slot needs an icon or the wand placeholder shows"
         assert entry["name"], "a null name renders as the string null"
-        assert isinstance(entry["train_time"], int)
+        assert isinstance(entry["train_time"], int) and entry["train_time"] > 0
 
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE pets SET train_end=0, train_state=0")
         connection.commit()
 
-    # Starting a run must float that pet to the front with a positive countdown.
-    index = idle[0]["index"]
+    # A second run shows up in the slot list with a positive countdown.
     _envelope(
-        client.post("/flash.do", data={"m": "show", "showId": "10", "uid": uid, "index": index, "ttype": 1})
+        client.post("/flash.do", data={"m": "show", "showId": "10", "uid": uid,
+                                       "index": str(pet_id), "ttype": 1})
     )
     trained = slots()
-    assert trained[0]["index"] == index
+    assert trained[0]["index"] == pet_id
     assert trained[0]["train_time"] > 0
     assert trained[0]["train_state"] == 1
 
@@ -3197,7 +3223,7 @@ def test_hunt_maps_field_distinct_level_appropriate_groups():
     )
 
     table = _monster_table()
-    groups = {hid: _monsters_for_map(hid) for hid in (1, 2, 3, 101)}
+    groups = {hid: _monsters_for_map(hid) for hid in (1, 2, 3, 4, 5, 6)}
     for hid, monsters in groups.items():
         assert monsters, f"map {hid} has no monsters"
         base_id = int(LOCAL_HUNT_MAPS[hid]["monster"])
@@ -3568,9 +3594,8 @@ def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Pa
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "TrnSlot")
     _, idle = _envelope(client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid}))
-    # The roster is always shipped now, otherwise every slot paints clip_wand.
-    assert idle["list"], "an idle player still sees their pets"
-    assert all(entry["train_time"] == 0 for entry in idle["list"])
+    # Empty slots are the clickable "pick a pet" affordance; see the note above.
+    assert idle["list"] == [], "an idle page must leave every slot tappable"
     with sqlite3.connect(database) as connection:
         pet_id = connection.execute("SELECT id FROM pets WHERE player_id=1 ORDER BY id").fetchone()[0]
     command, started = _envelope(
@@ -3578,7 +3603,7 @@ def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Pa
     )
     assert command == 10 and started["train_type"] == 1
     _, slots = _envelope(client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid}))
-    # The training run floats to the front ahead of the idle roster.
+    assert len(slots["list"]) == 1
     slot = slots["list"][0]
     assert slot["index"] == pet_id
     assert str(slot["icon"]).isdigit() and slot["icon"], "a missing icon keeps clip_wand"

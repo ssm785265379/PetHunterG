@@ -2049,12 +2049,20 @@ def _player_sale_goods(database_path: Path) -> Response:
 # Map ids, names, worlds and icon ids come from the shipped client tables
 # `client/air51-repack/src/data/zh-CN/config/exploreMap.txt` and `worldMap.txt`.
 # Hunt/explore cost, AP and reward numbers below are LOCAL DEFAULTS.
+# LOCAL DEFAULT: the original per-map spawn table is not recoverable, so each map
+# names a REAL monster.txt row as its base. Ids 1..6 are used because
+# map_icon.swf ships icon_map_1..27 and the client draws icon_map_<map id>.
 LOCAL_HUNT_MAPS = {
-    1: {"name": "樱花之岛1", "world": 1, "cost": 1, "monster": 1},
-    2: {"name": "樱花之岛2", "world": 1, "cost": 1, "monster": 3},
-    3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 5},
-    101: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 7},
+    1: {"name": "樱花之岛1", "world": 1, "cost": 1, "monster": 1},    # L1
+    2: {"name": "樱花之岛2", "world": 1, "cost": 1, "monster": 3},    # L10
+    3: {"name": "樱花之岛3", "world": 1, "cost": 1, "monster": 4},    # L40
+    4: {"name": "神龙之国1", "world": 2, "cost": 1, "monster": 7},    # L60
+    5: {"name": "神龙之国2", "world": 2, "cost": 1, "monster": 10},   # L80
+    6: {"name": "神龙之国3", "world": 2, "cost": 1, "monster": 12},   # L100
 }
+# Maps unlock in this order: the first is always open, the rest need the previous
+# one cleared.
+LOCAL_HUNT_ORDER = (1, 2, 3, 4, 5, 6)
 # Explore maps are no longer hardcoded: _explore_map_row() reads the shipped
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
@@ -2455,6 +2463,17 @@ def _hunter_list(database_path: Path) -> Response:
                 (p["id"],),
             )
         }
+    # Sequential unlock: the first map is free, later ones need the previous clear.
+    unlocked: set[int] = set()
+    for position, map_id in enumerate(LOCAL_HUNT_ORDER):
+        if position == 0:
+            unlocked.add(map_id)
+            continue
+        previous = LOCAL_HUNT_ORDER[position - 1]
+        if progress.get(previous, (0, 0))[1]:
+            unlocked.add(map_id)
+        else:
+            break
     maps = []
     for map_id, info in LOCAL_HUNT_MAPS.items():
         kills, cleared = progress.get(map_id, (0, 0))
@@ -2463,7 +2482,8 @@ def _hunter_list(database_path: Path) -> Response:
             "name": info["name"], "world": info["world"],
             "rate": min(100, kills * 100 // LOCAL_HUNT_CLEAR_KILLS),
             "pass": 1 if cleared else 0,
-            "star": 0, "days": 0, "is_allown_hunt": 1,
+            "star": 0, "days": 0,
+            "is_allown_hunt": 1 if map_id in unlocked else 0,
         })
     return _protocol_response(4, {
         "player": {"hunt_ap": p["ht_ap"], "max_hunt_ap": p["max_ht_ap"]},
@@ -2840,10 +2860,30 @@ def _credit_battle_rewards(c: sqlite3.Connection, player_id: int, *, point: int,
     )
 
 
+def _hunt_map_unlocked(database_path: Path, uid: str, map_id: int) -> bool:
+    """Sequential gate: the first map is open, each later one needs the previous clear."""
+    if map_id not in LOCAL_HUNT_ORDER:
+        return True
+    position = LOCAL_HUNT_ORDER.index(map_id)
+    if position == 0:
+        return True
+    previous = LOCAL_HUNT_ORDER[position - 1]
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return False
+        row = c.execute(
+            "SELECT cleared FROM hunt_progress WHERE player_id=? AND map_id=?",
+            (player["id"], previous),
+        ).fetchone()
+    return bool(row and row["cleared"])
+
+
 def _hunter_fight(database_path: Path) -> Response:
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
     if hid not in LOCAL_HUNT_MAPS: return _pet_error(400)
+    if not _hunt_map_unlocked(database_path, _request_value("uid"), hid): return _pet_error(400)
     uid=_request_value("uid")
     monsters=_monsters_for_map(hid)
     if not monsters: return _pet_error(400)
@@ -3547,26 +3587,13 @@ def _training_overview(database_path: Path) -> Response:
                ORDER BY train_end LIMIT 9""",
             (player["id"], now),
         ).fetchall()
-        # DevelopUI.as:120-139 renders one DevelopItem per list entry and falls back
-        # to the clip_wand placeholder for every slot with no data, so an empty
-        # response showed nine star wands. Fill the remaining slots with the
-        # player's own pets (train_state 0 => icon + name, no progress bar) so the
-        # page always shows the pet roster.
-        idle = c.execute(
-            """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
-               FROM pets WHERE player_id=? AND (train_end IS NULL OR train_end<=?)
-               ORDER BY lv DESC, id LIMIT 9""",
-            (player["id"], now),
-        ).fetchall()
-    seen: set[int] = set()
-    rows: list = []
-    for row in list(training) + list(idle):
-        if row["index"] in seen:
-            continue
-        seen.add(row["index"])
-        rows.append(row)
-        if len(rows) == 9:
-            break
+    # Only RUNNING runs occupy a slot. Filling the empty slots with the roster
+    # looked nicer but made the page unusable: DevelopItem.as:171 sets
+    # mouseEnabled=false when a slot has data, so with nine pets every slot was
+    # filled and none could be tapped to pick a pet — "宠物无法养成".
+    # An empty slot draws clip_wand (DevelopItem.as:178) and stays clickable,
+    # which is exactly the "choose a pet to train" affordance.
+    rows = list(training)
     return _protocol_response(
         504,
         {
@@ -6238,5 +6265,31 @@ def create_app(config: dict | None = None) -> Flask:
             unimplemented,
         )
         return _protocol_response(fallback_id, {"value": "ok"})
+
+    @app.after_request
+    def _log_protocol_errors(response):
+        """把业务错误写进日志。
+
+        `-1:<errorId>` 是协议层错误，HTTP 状态仍是 200，所以以前只会在客户端
+        弹一句「非法操作」而服务端日志干净得像没发生过——排查时完全看不见。
+        这里统一记录 showId / m / uid 后缀 / 参数名，方便对着真机复现。
+        """
+        if request.path != "/flash.do":
+            return response
+        try:
+            body = response.get_data(as_text=True)
+        except (RuntimeError, AttributeError):
+            return response
+        if not body.startswith("-1:"):
+            return response
+        app.logger.warning(
+            "PROTOCOL_ERROR showId=%s m=%s error=%s uid=...%s fields=%s",
+            request.form.get("showId", ""),
+            request.form.get("m", ""),
+            body.strip()[:12],
+            (request.form.get("uid", "") or "")[-8:],
+            ",".join(sorted(request.form.keys())),
+        )
+        return response
 
     return app
