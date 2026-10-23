@@ -4604,7 +4604,11 @@ def _explore_equip_info(database_path: Path) -> Response:
         # 只有"正在使用"才隐藏按钮
         is_rented = 1 if (active_row and int(active_row["equip_id"]) == gid) else 0
     else:
-        is_rented = 1 if gid in rented else 0
+        # 装备：客户端用 is_rented 隐藏按钮（HireShopInfoUI.as:196）。已经租过的
+        # 装备再点就没有按钮，玩家只会觉得"点了没反应"。这里统一返回 0，让按钮
+        # 始终可见；重复租用是免费的（102 对已拥有的不再扣钱），点了至少会跳到
+        # 租赁列表，有明确反馈。
+        is_rented = 0
     return _protocol_response(101, {
         "type": ttype, "id": gid,
         "is_rented": is_rented,
