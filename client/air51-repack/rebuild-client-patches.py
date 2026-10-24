@@ -161,8 +161,32 @@ def main() -> int:
     src = src[: m.start()] + m.group(1) + "_pic_img.removeAll();\n" + src[m.start():]
     p.write_text(src, encoding="utf-8")
 
+    # 6) BagListUI: 22 号把场景 target 带给服务端（0=人物/家园，宠物 index=宠物）
+    p = ui / "BagListUI.as"
+    src = p.read_text(encoding="utf-8")
+    old = (
+        '            CommandManager.send(CommandManager.BAG_INFO_KEY,{\n'
+        '               "ttype":data.ttype,\n'
+        '               "p":_page,\n'
+        '               "n":_item_num\n'
+        '            });'
+    )
+    new = (
+        '            CommandManager.send(CommandManager.BAG_INFO_KEY,{\n'
+        '               "ttype":data.ttype,\n'
+        '               "p":_page,\n'
+        '               "n":_item_num,\n'
+        '               "target":data.target == null ? 0 : data.target\n'
+        '            });'
+    )
+    if old not in src:
+        raise SystemExit("bag target anchor missing")
+    src = src.replace(old, new)
+    p.write_text(src, encoding="utf-8")
+
     current = BASE
-    for name in ("ExploreMapListUI", "HireShopUI", "HireMountsUI", "HireShopInfoUI"):
+    for name in ("ExploreMapListUI", "HireShopUI", "HireMountsUI",
+                 "HireShopInfoUI", "BagListUI"):
         out = REPO / "build" / "input-explore" / f"step-{name}.swf"
         current = import_class(root, name, current, out)
         print(f"  {name}: {current.stat().st_size} bytes")
