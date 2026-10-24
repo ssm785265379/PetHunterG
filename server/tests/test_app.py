@@ -5111,3 +5111,40 @@ def test_training_pet_is_hidden_from_pickers_and_battles(tmp_path: Path):
     ))
     used = {row.get("index") for row in battle["battle_result"]["att_list"] if row.get("index")}
     assert pet_index not in used
+
+def test_training_starts_benches_the_pet_and_books_both_columns(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "TrainCol")
+    with sqlite3.connect(database) as connection:
+        pet_index = connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE pets SET squad_slot=1, pro_hp=995, pro_speed=998 WHERE id=?",
+            (pet_index,),
+        )
+        connection.commit()
+
+    _, started = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "10", "uid": uid,
+                           "index": pet_index, "ttype": 1}
+    ))
+    assert started["pet"]["id"] > 0
+    with sqlite3.connect(database) as connection:
+        squad_slot, gain1, gain2 = connection.execute(
+            "SELECT squad_slot, train_gain, train_gain2 FROM pets WHERE id=?",
+            (pet_index,),
+        ).fetchone()
+    assert squad_slot == 0, "starting training must bench the pet"
+    assert (gain1, gain2) == (5, 2), "995 只能加 5，998 只能加 2"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE pets SET train_end=1 WHERE id=?", (pet_index,))
+        connection.commit()
+    client.post("/flash.do", data={"m": "show", "showId": "504", "uid": uid})
+    with sqlite3.connect(database) as connection:
+        pro_hp, pro_speed = connection.execute(
+            "SELECT pro_hp, pro_speed FROM pets WHERE id=?", (pet_index,)
+        ).fetchone()
+    assert (pro_hp, pro_speed) == (1000, 1000)

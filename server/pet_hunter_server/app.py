@@ -682,6 +682,7 @@ def _initialize_database(database_path: Path) -> None:
             ("squad_slot", "ALTER TABLE pets ADD COLUMN squad_slot INTEGER NOT NULL DEFAULT 0"),
             # 训练收益先记账、到点再发放（用户要求"时间结束再点才加属性"）。
             ("train_gain", "ALTER TABLE pets ADD COLUMN train_gain INTEGER NOT NULL DEFAULT 0"),
+            ("train_gain2", "ALTER TABLE pets ADD COLUMN train_gain2 INTEGER NOT NULL DEFAULT 0"),
             ("train_state", "ALTER TABLE pets ADD COLUMN train_state INTEGER NOT NULL DEFAULT 0"),
             ("train_type", "ALTER TABLE pets ADD COLUMN train_type INTEGER NOT NULL DEFAULT 0"),
             ("train_end", "ALTER TABLE pets ADD COLUMN train_end INTEGER NOT NULL DEFAULT 0"),
@@ -4231,22 +4232,23 @@ def _training_overview(database_path: Path) -> Response:
         # 然后清空时间与欠账。这样玩家看到的行为是"倒计时走完、下次打开养成页
         # 属性才涨"，与界面预期一致（训练进行中不会提前加）。
         finished = c.execute(
-            "SELECT id, train_type, train_gain, pro_hp, pro_speed, pro_phy_att,"
+            "SELECT id, train_type, train_gain, train_gain2, pro_hp, pro_speed, pro_phy_att,"
             " pro_mag_att, pro_phy_def, pro_mag_def FROM pets"
             " WHERE player_id=? AND train_end>0 AND train_end<=?",
             (player["id"], now),
         ).fetchall()
         for pet in finished:
-            gain = int(pet["train_gain"] or 0)
-            for column in LOCAL_TRAIN_GAIN.get(int(pet["train_type"] or 0), ()):
+            columns = LOCAL_TRAIN_GAIN.get(int(pet["train_type"] or 0), ())
+            gains = (int(pet["train_gain"] or 0), int(pet["train_gain2"] or 0))
+            for column, gain in zip(columns, gains):
                 current = int(pet[column] or 0)
                 step = min(gain, max(0, LOCAL_PRO_CAP - current))
                 if step:
                     c.execute(f"UPDATE pets SET {column} = ? WHERE id = ?",
                               (current + step, pet["id"]))
             c.execute(
-                "UPDATE pets SET train_state=0, train_type=0, train_end=0, train_gain=0"
-                " WHERE id=?", (pet["id"],)
+                "UPDATE pets SET train_state=0, train_type=0, train_end=0,"
+                " train_gain=0, train_gain2=0 WHERE id=?", (pet["id"],)
             )
         training = c.execute(
             """SELECT id AS "index", pet_id AS id, icon, name, lv, train_state, train_end
@@ -4370,10 +4372,12 @@ def _training_action(database_path: Path) -> Response:
             applied[column] = min(per_run, max(0, LOCAL_PRO_CAP - current))
         if not any(applied.values()):
             return _pet_error(100)  # 已到上限，不白占冷却
+        gains = [applied[column] for column in columns]
         c.execute(
-            "UPDATE pets SET train_state=?, train_type=?, train_end=?, train_gain=?"
-            " WHERE id=?",
-            (ttype, ttype, now + LOCAL_TRAIN_SECONDS, applied[columns[0]], idx),
+            "UPDATE pets SET train_state=?, train_type=?, train_end=?, train_gain=?,"
+            " train_gain2=?, squad_slot=0 WHERE id=?",
+            (ttype, ttype, now + LOCAL_TRAIN_SECONDS, gains[0],
+             gains[1] if len(gains) > 1 else 0, idx),
         )
         reward_point = 50 * int(row["lv"] or 1) if ttype == 2 else 0
         reward_exp = 10 * int(row["lv"] or 1) if ttype == 3 else 0
