@@ -13,11 +13,15 @@
 | 本机 WiFi | `10.89.127.154` |
 | 手机 WiFi | `10.89.127.80`，ADB `10.89.127.80:5555`（`adb tcpip 5555` + `adb connect`） |
 | 端口转发 | `adb -s 10.89.127.80:5555 reverse tcp:8080 tcp:8080` |
-| 本地联调包 | `air.com.lv1.hunter.iconless.localusb`，SWF 内 URL = `http://127.0.0.1:8080` |
-| 该 APK SHA-256 | `2DB8343BFD23906DC22019DBC64D72F14A29E1AC857881FB035133289553A127` |
-| 该 SWF SHA-256 | `dafd3f1e9fed018ecf3ea7285b30d5ec99fe605e7ab01d02087ae51f316cda64`（= `build/input-localusb/APetHunter.swf`） |
+| 本地联调包（当前） | `air.com.lv1.hunter.localwifi`，SWF 内 4 个 URL = `http://127.0.0.1:8080` |
+| 该 APK SHA-256 | `6EF969C81317AFD5A32D8E092BA02896BB8A6E721DC75DCF45228EFB9AFAB23D`（`build/out/PetHunterG-LocalWiFi.apk`） |
+| 该 SWF SHA-256 | `065F1BA7A8FDC144B56D1CC8C10774A85F07CC76853540ED7379805D7ABA7ACA`（`build/input-localwifi/APetHunter.swf`） |
+| 新包签名 | `build/localwifi.p12`，密码在 `build/localwifi-signing.txt`（都在忽略的 build/ 里）；证书 SHA-256 `7090d1010bd965904b418598d82434c994eaaa7b39114a10aebd9a0bbb3e96ee` |
+| 旧包（保留） | `air.com.lv1.hunter.iconless.localusb`：签名密码是当时随机生成、**未保存**，无法覆盖升级，所以新包旁装；旧会话仍在旧包里 |
 | 存档 | `server/instance/game.sqlite3`（本地，未上传） |
-| 单测 | **165 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
+| 单测 | **167 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
+
+新包要**重新登录**：账号 `ssm7852`（存档在服务器上，不变）。
 
 远端旧部署（**本轮未动**）：`/opt/pethunter`，systemd `pethunter`，`127.0.0.1:8081`，
 nginx `http://43.173.99.241:8080/`，客户端 `air.com.lv1.hunter.iconless.remote`。
@@ -32,6 +36,13 @@ nginx `http://43.173.99.241:8080/`，客户端 `air.com.lv1.hunter.iconless.remo
   6-13 八种灾害；体力、补给、天数、`is_tired`、好运（精英 ×2）全部按客户端字段下发；
   灾害按世界取具体类型，装备 `effectType` 6-13 提供伤害免疫；星级按天数评价。
   详见 `docs/design/explore.md`。
+- **关卡门禁（2026-10-24 晚）**：前置图通关才解锁下一张；5 星完美通关把本关
+  `is_perfect=1` 关闭（客户端锁住，99/103 都拒绝）；4 星不关闭、可回去补星；
+  98 列表从当前关往前留 4 张，并下发 `best_star`/`is_perfect`/`is_cleared`。
+- **后半程怪物（2026-10-24 晚）**：物种按全局链位置从 monster.txt 选（不再写死波利），
+  出场等级统一用 `reference_lv`（队伍 +15 橡皮筋），同图按进度轮换对手。
+- **BGM**：`ExploreMapListUI` 换世界/翻页前 `stopAll()`（旧 localusb 包没有这个补丁，
+  所以之前会叠加；新 localwifi 包已带）。
 - 租赁：坐骑可拥有多只（最近租的在用）、装备槽位默认 3 上限 9、满员自动替换最旧、
   首次扣费/重复免费、失败写 `RENT_REJECTED`
 - 客户端改包（`client/air51-repack/rebuild-client-patches.py` 一键重建）：
@@ -85,6 +96,11 @@ nginx `http://43.173.99.241:8080/`，客户端 `air.com.lv1.hunter.iconless.remo
    新增的默认物品要放在**建角**流程里，不能放在 `_initialize_database`。
 9. **诊断脚本的 103 调用会改存档**（扣行动值、加发现率、发经验）。要用真实存档做
    采样时先复制到临时库，别直接打本地服。
+10. **签名密码必须落到本地文件**：localusb 的 p12 密码是 `[Guid]::NewGuid()` 现生成、
+    没有保存，结果无法同包覆盖升级，只能新包名旁装 + 重新登录。新包已写
+    `build/localwifi-signing.txt`（build/ 被忽略，不会进 Git）。
+11. **不要写死"基础怪"**：探险曾把 monster 1 写进每一张图，后半程全是一只 lv1 波利。
+    需要变化的内容要按关卡/地形/进度取值。
 
 ## 五、常用命令
 

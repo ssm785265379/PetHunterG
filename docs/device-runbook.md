@@ -151,3 +151,23 @@ APK 里的服务器地址是**编译进 SWF 的**（4 处字符串），改地�
 - 注意：旧实现会在每次启动给"没有坐骑的角色"补发 100001 驴，导致清空后重启又回来；
   已改为只在建角时发（见 `docs/design/rental.md`）。
 - 当前服务端进程在后台运行（监听 127.0.0.1:8080，代码为本次提交版本）。
+
+## 2026-10-24 晚：localwifi 客户端（锁 / 星级 / BGM）
+
+- 旧 `air.com.lv1.hunter.iconless.localusb` 的 SWF 里没有 `isClick`/`stopAll` 补丁，
+  且 p12 密码是随机生成未保存 → 无法覆盖升级。改为用已打补丁的 `input-explore` SWF
+  重打包新包 `air.com.lv1.hunter.localwifi`（旁装，旧包保留）。
+- 构建输入 `build/input-localwifi`：从 `input-explore` 复制后去掉 step/before 等中间
+  SWF，并用 `patch_swf_url.py --replace-all` 把 4 处 `http://43.173.99.241:8080`
+  改成 `http://127.0.0.1:8080`。`ExploreMapListUI` 额外改成
+  `"isClick":_loc5_.is_open != 0 && !_loc5_.is_perfect` 和
+  `"star":_loc5_.best_star`。
+- APK：`build/out/PetHunterG-LocalWiFi.apk`，43,324,302 字节，SHA-256
+  `6EF969C81317AFD5A32D8E092BA02896BB8A6E721DC75DCF45228EFB9AFAB23D`；
+  包名/版本 `air.com.lv1.hunter.localwifi` 2.7.3（versionCode 2007003），
+  `armeabi-v7a`，签名证书 `CN=PetHunterG Local WiFi`（SHA-256 `7090d101...e96ee`）。
+- 安装：`adb install` 弹出系统安装器 → 点“安装” → “安装完成” → “打开”；
+  首次启动弹 32 位兼容警告，点“确定”。前台包名已确认。
+- 新包要重新登录：账号 `ssm7852`，存档在服务器上不变。旧 localusb 包的会话仍在旧包里。
+- 服务端同步：98 下发 `best_star`/`is_perfect`/`is_cleared`；99/103 拒绝未解锁与已完美
+  通关的图；怪物按全局链位置选物种、出场等级用队伍等级橡皮筋。
