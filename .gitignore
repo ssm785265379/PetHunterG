@@ -25,3 +25,6 @@ server/instance/
 
 # Scratch files used during device/protocol inspection.
 .tmp_*
+
+# 后台日志监听产物
+.tmp-serverlog.txt
