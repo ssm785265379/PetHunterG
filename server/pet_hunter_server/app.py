@@ -4594,10 +4594,15 @@ def _explore_equip_list(database_path: Path) -> Response:
     all_ids = sorted(by_type.get(source, []))
     for equip_id in all_ids[(page - 1) * size: page * size]:
         price_type, price = _explore_equip_price(table[equip_id])
+        owned = equip_id in rented
         entries.append({
-            "id": equip_id, "price_type": price_type, "price": price,
+            "id": equip_id,
+            # 已拥有就不再报价：HireShopUI.as:215-228 按 price_type-1 分支决定显示，
+            # 传 4 会落到无匹配分支，价格文本保持空字符串——比显示 "0" 干净。
+            "price_type": 4 if owned else price_type,
+            "price": 0 if owned else price,
             "need_goods_num": 0, "need_goods_id": 0, "type": ttype,
-            "is_rented": 1 if equip_id in rented else 0,
+            "is_rented": 1 if owned else 0,
         })
     return _protocol_response(100, {"type": ttype, "list": entries, "value": "ok"})
 
