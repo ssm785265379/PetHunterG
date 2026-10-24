@@ -1877,8 +1877,10 @@ def _player_use_goods(database_path: Path) -> Response:
     try:
         item_index = int(_request_value("index", ""))
         target = int(_request_value("index1", "0") or 0)
+        num = int(_request_value("num", "1") or 1)
     except ValueError:
         return _pet_error(100)
+    num = max(1, num)
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
@@ -1926,15 +1928,22 @@ def _player_use_goods(database_path: Path) -> Response:
         if target > 0 and use_type == 1:
             return _pet_error(100)
 
-        payload: dict[str, int] = {}
+        num = max(1, min(int(num), int(row["quantity"])))
+        payload: dict[str, object] = {}
+        used = num
+        text = ""
         if effect == 7:  # restore hunt action points
-            if player["ht_ap"] >= player["max_ht_ap"]:
+            room = max(0, int(player["max_ht_ap"]) - int(player["ht_ap"]))
+            used = min(num, room // amount) if amount > 0 else 0
+            if used <= 0:
                 return _pet_error(100)
-            new_ap = min(player["max_ht_ap"], player["ht_ap"] + amount)
+            gained = used * amount
+            new_ap = int(player["ht_ap"]) + gained
             connection.execute(
                 "UPDATE players SET ht_ap = ? WHERE id = ?", (new_ap, player["id"])
             )
-            payload = {"value": new_ap - player["ht_ap"], "ht_ap": new_ap}
+            payload = {"value": gained, "ht_ap": new_ap}
+            text = f"体力 +{gained}"
         elif effect == 5:  # pet exp
             if target <= 0:
                 return _pet_error(506)
@@ -1944,8 +1953,9 @@ def _player_use_goods(database_path: Path) -> Response:
             ).fetchone()
             if pet is None:
                 return _pet_error(506)
-            exp = pet["exp"] + amount
-            lv = pet["lv"]
+            old_lv = int(pet["lv"])
+            exp = int(pet["exp"]) + num * amount
+            lv = old_lv
             while lv < LOCAL_MAX_PET_LEVEL:
                 need = exp_to_next(lv)
                 if exp < need:
@@ -1956,55 +1966,71 @@ def _player_use_goods(database_path: Path) -> Response:
                 "UPDATE pets SET lv = ?, exp = ? WHERE id = ?",
                 (lv, exp, pet["id"]),
             )
-            payload = {"value": amount, "lv": lv, "exp": exp}
+            payload = {"value": num * amount, "lv": lv, "exp": exp}
+            text = f"宠物经验 +{num * amount}"
+            if lv > old_lv:
+                text += f"，升到 {lv} 级"
         elif effect == 14:  # bag capacity
-            if player["bag_capacity"] >= LOCAL_MAX_BAG_CAPACITY:
+            room = max(0, LOCAL_MAX_BAG_CAPACITY - int(player["bag_capacity"]))
+            used = min(num, room // amount) if amount > 0 else 0
+            if used <= 0:
                 return _pet_error(204)
-            new_capacity = min(
-                LOCAL_MAX_BAG_CAPACITY, player["bag_capacity"] + amount
-            )
+            gained = used * amount
+            new_capacity = int(player["bag_capacity"]) + gained
             connection.execute(
                 "UPDATE players SET bag_capacity = ? WHERE id = ?",
                 (new_capacity, player["id"]),
             )
-            payload = {
-                "value": new_capacity - player["bag_capacity"],
-                "max_bag_size": new_capacity,
-            }
+            payload = {"value": gained, "max_bag_size": new_capacity}
+            text = f"背包容量 +{gained}"
         elif effect in (16, 17):  # currency bags
+            total = num * amount
             column = "point" if effect == 16 else "crystal"
             connection.execute(
                 f"UPDATE players SET {column} = {column} + ? WHERE id = ?",
-                (amount, player["id"]),
+                (total, player["id"]),
             )
-            payload = {"value": amount}
-        elif effect == 15:  # 宝箱 / 许愿硬币 / 宠物蛋
-            box = _open_prop_box(connection, player, amount)
-            if box is None:
+            payload = {"value": total}
+            text = f"银币 +{total}" if effect == 16 else f"晶石 +{total}"
+        elif effect == 15:  # 宝箱 / 许愿硬币 / 宠物蛋：一次开 N 个，汇总奖励
+            boxes = []
+            for _ in range(num):
+                box = _open_prop_box(connection, player, amount)
+                if box is None:
+                    break
+                boxes.append(box)
+            used = len(boxes)
+            if used == 0:
                 return _pet_error(300)   # bag or roster full
-            # BagListUI.as:502-540 feeds `param2.value` straight into
-            # GameUtil.getBox, which reads box_type/id/num/point/crystal — so the
-            # value field is an OBJECT here, not the usual delta number.
-            payload = {"value": box}
+            total_point = sum(int(box.get("point") or 0) for box in boxes)
+            pet_ids = [
+                int(box["id"]) for box in boxes
+                if int(box.get("box_type") or 0) == 2
+            ]
+            parts: list[str] = []
+            if total_point:
+                parts.append(f"银币 +{total_point}")
+            if pet_ids:
+                parts.append("获得宠物：" + "、".join(_pet_name(pid) for pid in pet_ids))
+            text = "；".join(parts) or "使用成功"
+            # 旧客户端只认识单个 box 对象，保留第一个；新客户端读 text/boxes。
+            payload = {"value": boxes[0], "boxes": boxes}
         else:
             return _pet_error(100)
 
-        if row["quantity"] > 1:
-            connection.execute(
-                "UPDATE inventory SET quantity = quantity - 1 WHERE id = ? AND quantity > 0",
-                (row["id"],),
-            )
+        if used >= int(row["quantity"]):
+            connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
         else:
             connection.execute(
-                "DELETE FROM inventory WHERE id = ? AND quantity <= 1", (row["id"],)
+                "UPDATE inventory SET quantity = quantity - ? WHERE id = ? AND quantity >= ?",
+                (used, row["id"], used),
             )
         ht_ap = connection.execute(
             "SELECT ht_ap FROM players WHERE id = ?", (player["id"],)
         ).fetchone()["ht_ap"]
-    # BagListUI.as:389-580 switches on param2.type to pick the result popup
-    # (5/7/14/16/17 -> exp/AP/bag/point/crystal). Omitting it meant the item was
-    # consumed and the effect applied, but the player got no feedback at all.
     payload["type"] = effect
+    payload["used"] = used
+    payload["text"] = text
     payload["ht_ap"] = ht_ap
     return _protocol_response(50, payload)
 

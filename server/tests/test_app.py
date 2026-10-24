@@ -1275,17 +1275,18 @@ def test_use_goods_expands_bag_and_converts_currency_bags(tmp_path: Path):
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": str(card), "index1": "0"},
     )
-    assert _envelope(bag_response) == (
-        50,
-        {
-            "value": 3,
-            "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY + 3,
-            "ht_ap": 20,
-            # BagListUI switches on this to choose the result popup; without it the
-            # item was consumed silently.
-            "type": 14,
-        },
-    )
+    code, payload = _envelope(bag_response)
+    assert code == 50
+    for key, expected in {
+        "value": 3,
+        "max_bag_size": LOCAL_DEFAULT_BAG_CAPACITY + 3,
+        "ht_ap": 20,
+        # BagListUI switches on this to choose the result popup; without it the
+        # item was consumed silently.
+        "type": 14,
+    }.items():
+        assert payload[key] == expected
+    assert payload["used"] == 1 and "背包容量" in payload["text"]
 
     silver_bag = _buy(client, uid, 10022, 1, 2)
     with sqlite3.connect(database) as connection:
@@ -5178,3 +5179,49 @@ def test_bag_filters_items_by_scene_target(tmp_path: Path):
 
     legacy, _ = ids(None)
     assert legacy == {10030, 10506, 10011}, "旧客户端不带 target 时保持全量"
+
+def test_use_goods_batch_applies_multiple_and_reports_text(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "UseBatch")
+    with sqlite3.connect(database) as connection:
+        pet_index = connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute("UPDATE players SET ht_ap=980, max_ht_ap=1000 WHERE id=1")
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10007,1,5,10007,7,1), (1,10011,1,3,10011,5,2),"
+            " (1,10016,1,3,10016,15,1)"
+        )
+        ids = {row[0]: row[1] for row in connection.execute(
+            "SELECT item_id, id FROM inventory WHERE player_id=1 AND item_id IN (10007,10011,10016)"
+        )}
+        connection.commit()
+
+    _, ap = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10007], "index1": 0, "num": 9,
+    }))
+    assert ap["used"] == 1 and "体力" in ap["text"]
+    with sqlite3.connect(database) as connection:
+        ht_ap, qty = connection.execute(
+            "SELECT (SELECT ht_ap FROM players WHERE id=1),"
+            " (SELECT quantity FROM inventory WHERE id=?)", (ids[10007],)
+        ).fetchone()
+    assert (ht_ap, qty) == (1000, 4)
+
+    _, exp_result = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10011],
+        "index1": pet_index, "num": 3,
+    }))
+    assert exp_result["used"] == 3 and "宠物经验" in exp_result["text"]
+
+    _, box = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10016], "index1": 0, "num": 3,
+    }))
+    assert box["used"] == 3 and "银币" in box["text"]
+    with sqlite3.connect(database) as connection:
+        left = connection.execute(
+            "SELECT quantity FROM inventory WHERE id=?", (ids[10016],)
+        ).fetchone()
+    assert left is None, "三个箱子应全部消耗"
