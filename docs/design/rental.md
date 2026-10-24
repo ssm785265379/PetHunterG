@@ -33,6 +33,10 @@ id, name, iconId, type, terrain, needMoney, needPoint, needCrystal, effectType, 
 4. **装备槽位**：默认 **3** 个（`LOCAL_EXPLORE_DEFAULT_SLOTS`），上限 9。
    上报值取 `min(9, max(3, 已租+1))`——永远留一个可点空格，否则商店入口消失。
 5. **替换**：槽位满时租新装备，自动替换**最旧**的一件（先进先出）。
+6. **新手坐骑只在创建角色时发**：100001 驴 原来每次启动都会给"没有坐骑的角色"补发，
+   于是"清空坐骑后重启又回来"。现在只在注册/建角时插入；已有角色删掉后重启保持为空。
+   坐骑页对空列表是安全的：`HireMountsUI.as:202` 走 else 分支显示 `clip_wand`，
+   改包后的热区仍然发 100 打开商店。
 
 ## 四、关键坑（都踩过）
 
@@ -48,8 +52,10 @@ id, name, iconId, type, terrain, needMoney, needPoint, needCrystal, effectType, 
 - **装备页 `HireListUI` 不能用 FFDec 重新编译**：原样导出再导入会报
   `Unknown preprocessor instruction: findproperty`，所以那一页改不了。
 
-## 五、待定（需要玩法口径）
+## 五、待定 / 已完成
 
 - 槽位解锁是否要消耗道具（现在只按金额，且槽位基本够用）
 - 是否需要"替换指定装备"（现在是自动替换最旧）
-- 坐骑效果（`effect` 列如 `10:10:10:10:60`）是否要真正作用于探险
+- ~~坐骑效果（`effect` 列如 `10:10:10:10:60`）是否要真正作用于探险~~ **已实现**：
+  坐骑 `effectType=3` 按地形加发现；装备 `effectType` 1/2/3 加体力/补给/发现，
+  6-13 提供对应灾害的伤害免疫。详见 `docs/design/explore.md`。

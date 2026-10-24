@@ -56,14 +56,15 @@
   `Unknown preprocessor instruction: findproperty`），已放弃该次改动。
 - 下一步：用更保守的改法（在函数开头直接 `CommandManager.send(100...)` 并 `return`）。
 
-### R-02 探险：体力 / 补给 / 天数
+### R-02 探险：体力 / 补给 / 天数（已完成 2026-10-24）
 
 - **拆包依据**：`ExploreUI.as` 读 `energy / cost_energy / add_energy`、
   `supply / cost_supply / add_supply`、`discover_days / add_discover_days`、`is_tired`；
   `ExplorePveUI.as:394-408` 在 `is_tired` 时把音乐换成 `sound_event_200`。
-- **现状**：这些字段全部是服务端编的常量（`energy=_pet_energy(...)`，supply 恒 0）。
-- **缺口**：配置表**没有任何**体力/补给消耗规则，属于本地设计，需要定数值。
-- **下一步**：按"每天掉固定体力、休整回血、灾难掉体力、体力为 0 触发 is_tired"实现。
+- **配置表没有**体力/补给消耗规则，属于本地设计；已定数值：基础各 1000，战斗
+  −100/−50，休整 +200/+200，灾难 −300/−300，天数每次 +1。
+- **已实现**：`explore_progress.energy/supply/days` 落库；装备 effectType 1/2 加
+  上限；体能/补给任一为 0 → `is_tired=1`。详见 `docs/design/explore.md`。
 
 ## 待办（按你给的顺序）
 
@@ -81,9 +82,13 @@
 ### R-06 公会首领战 93
 - 拆包：`BossListUI.as:151-156` 读 `refresh_time / boss_ap / max_boss_ap` + 列表。
 
-### R-07 事件池的完整效果
-- 已做：战斗 / 休整（半量发现率）/ 灾难（无进展）。
-- 待做：事件与体力/天数联动，灾难是否直接终止行程。
+### R-07 事件池的完整效果（已完成 2026-10-24）
+- 已做：战斗 / 休整（2 城镇、3 温泉、4 大餐、5 绿洲：回体力补给 + 半量发现率）/
+  灾难（6-13：暴雨/洪水/火山/暴风雪/沙尘暴/龙卷风/台风/疾病，按世界取具体灾害，
+  扣体力补给、无进展）。
+- 已做：事件与体力/补给/天数联动；灾难伤害由匹配的免疫装备减免。
+- 未做：4 号大餐的文案（客户端 `getExploreEvent` 没有 case 4，需改包）。
+- 灾难是否直接终止行程：目前不终止，只扣资源（无证据支持终止）。
 
 ## 已完成（记录用）
 

@@ -128,3 +128,26 @@ APK 里的服务器地址是**编译进 SWF 的**（4 处字符串），改地�
 - 存档是部署时的一份**拷贝**：之后进度只在服务器上增长，本地那份会过期。
   需要回迁时手工把 `/opt/pethunter/instance/game.sqlite3` 拉回来。
 - SSH 用的是 root 密码；建议之后改成密钥登录并更换密码。
+
+## 2026-10-24 本地 WiFi 联调检查点
+
+- 用户要求本轮**只在本地 WiFi 联调**，不推服务器；手机两个包都在，本次用的是
+  `air.com.lv1.hunter.iconless.localusb`（指向 `http://127.0.0.1:8080`）。
+- 连接方式：USB 先 `adb tcpip 5555`，再 `adb connect 10.89.127.80:5555`；
+  设备 `10.89.127.80:5555`（PHB110 / Android 16），电脑 WLAN `10.89.127.154`。
+  之后所有命令都用 `-s 10.89.127.80:5555`，不再依赖 USB。
+- 转发与健康：`adb reverse tcp:8080 tcp:8080` 已建立，`reverse --list` 为
+  `host-16 tcp:8080 tcp:8080`；`GET /health` 返回 `{"mode":"lan-prototype","status":"ok"}`。
+- 包指纹：APK SHA-256 `2DB8343BFD23906DC22019DBC64D72F14A29E1AC857881FB035133289553A127`
+  （= `build/out/PetHunterG-Iconless-LocalUSB.apk`，43,494,575 字节）；
+  包内 `APetHunter.swf` SHA-256 `dafd3f1e9fed018ecf3ea7285b30d5ec99fe605e7ab01d02087ae51f316cda64`
+  （= `build/input-localusb/APetHunter.swf`，URL 常量 `http://127.0.0.1:8080`）。
+- 启动了该包，前台包名确认，服务器列表请求 `GET /data/android/zh-CN/server.xml`
+  HTTP 200（158 字节），界面显示 `LAN Local Test`。之后由用户自己操作测试。
+- 存档操作：先备份 `instance/game.sqlite3.bak-20261024-204054`，然后清空
+  `explore_rented`（1 只坐骑 100003 + 5 件装备），`explore_progress` 为空，
+  `players.point=42790 / crystal=100000 / money=0`。清空后 104 坐骑列表返回空、
+  装备 `equip_count=3`、100 商店仍列 7 只坐骑。
+- 注意：旧实现会在每次启动给"没有坐骑的角色"补发 100001 驴，导致清空后重启又回来；
+  已改为只在建角时发（见 `docs/design/rental.md`）。
+- 当前服务端进程在后台运行（监听 127.0.0.1:8080，代码为本次提交版本）。
