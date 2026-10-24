@@ -4643,12 +4643,18 @@ def _explore_equip_info(database_path: Path) -> Response:
         # 始终可见；重复租用是免费的（102 对已拥有的不再扣钱），点了至少会跳到
         # 租赁列表，有明确反馈。
         is_rented = 0
+    # 已经拥有的一律不再报价：租赁是永久买断（exploreEquip.txt 没有期限字段，
+    # 客户端四个租赁类也没有任何 day/time/expire 字段），重复点击不该再显示价格。
+    owned = gid in rented
+    need_money = 0 if owned else int(record.get("needMoney") or 0)
+    need_point = 0 if owned else int(record.get("needPoint") or 0)
+    need_crystal = 0 if owned else int(record.get("needCrystal") or 0)
     return _protocol_response(101, {
         "type": ttype, "id": gid,
         "is_rented": is_rented,
-        "need_money": int(record.get("needMoney") or 0),
-        "need_point": int(record.get("needPoint") or 0),
-        "need_crystal": int(record.get("needCrystal") or 0),
+        "need_money": need_money,
+        "need_point": need_point,
+        "need_crystal": need_crystal,
         "goods_ext": {"need_goods_id": 0, "own_need_goods_num": 0},
         "value": "ok",
     })
