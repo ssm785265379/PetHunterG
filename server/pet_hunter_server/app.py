@@ -36,6 +36,9 @@ LOCAL_MAX_BAG_CAPACITY = 2000
 # are explicit local defaults, not recovered rules.
 LOCAL_DEFAULT_PET_CAPACITY = 30
 LOCAL_MAX_PET_CAPACITY = 90
+# 训练中的宠物不参与选宠/出战。用 SQLite 自己的 epoch 比较，避免给十几条
+# 宠物查询都加一个 time.time() 绑定参数。
+PET_READY_SQL = "COALESCE(train_end, 0) <= CAST(strftime('%s','now') AS INTEGER)"
 LOCAL_PET_CAPACITY_STEP = 9
 # Local-only starter pack. Icons p1001 and p2019 both exist in the bundled pet
 # SWFs (pet2000.swf / pet4000.swf), so the client can render them without #1065.
@@ -2669,7 +2672,7 @@ def _hunter_task(database_path: Path) -> Response:
     # opens the picker (HunterTaskUI.as:299-303).
     pets=c.execute(
         "SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets"
-        " WHERE player_id=? AND squad_slot>0 AND is_locked=0"
+        f" WHERE player_id=? AND squad_slot>0 AND is_locked=0 AND {PET_READY_SQL}"
         " ORDER BY squad_slot LIMIT 2",(p["id"],)).fetchall()
     return _protocol_response(5,{
         "id":hid,"hid":hid,"ht_ap":p["ht_ap"],"max_ht_ap":p["max_ht_ap"],
@@ -3064,7 +3067,7 @@ def _hunter_fight(database_path: Path) -> Response:
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
-        rows=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+        rows=c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",(p["id"],)).fetchall()
         # Resolve the replay BEFORE paying anything: the outcome decides the payout.
         att_list, def_list, combat = _battle_side(
             hunter_skin=_role_skin_string(worn,p["sex"]),
@@ -3789,7 +3792,7 @@ def _explore_start(database_path: Path) -> Response:
         # 实际出场等级 = min(关卡参考等级, 队伍等级 + 狩猎等级带)。
         squad_lv = c.execute(
             "SELECT COALESCE(MAX(lv), 1) FROM pets"
-            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            f" WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}",
             (p["id"],),
         ).fetchone()[0]
         reference_lv = min(
@@ -3873,7 +3876,7 @@ def _explore_start(database_path: Path) -> Response:
         pet_rows = c.execute(
             'SELECT id AS "index", pet_id AS id, icon, name, lv, pro_hp, pro_speed,'
             ' pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def FROM pets'
-            ' WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2',
+            f' WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2',
             (p["id"],)).fetchall()
         att_list, def_list, combat = _battle_side(
             hunter_skin=_role_skin_string(worn, p["sex"] or 1),
@@ -3903,14 +3906,14 @@ def _explore_start(database_path: Path) -> Response:
         # Expedition battles train the squad too, so exploring is a viable way to
         # level pets for evolution (LOCAL DEFAULT exp amount).
         explore_rows=[r for r in c.execute(
-            "SELECT id, pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            f"SELECT id, pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",
             (p["id"],))]
         explore_pets=[r["id"] for r in explore_rows]
         # A quarter of a level for the squad's own level (the old flat 300,000 was
         # 60 levels at lv1 on the new curve).
         squad_lv = c.execute(
             "SELECT COALESCE(MAX(lv), 1) FROM pets"
-            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            f" WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}",
             (p["id"],),
         ).fetchone()[0]
         _grant_pet_exp(
@@ -4299,7 +4302,7 @@ def _training_list(database_path: Path) -> Response:
     with _connect_database(database_path) as c:
         player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None: return _pet_error(103)
-        rows = c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 ORDER BY id", (player["id"],)).fetchall()
+        rows = c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=? AND battle_state=0 AND {PET_READY_SQL} ORDER BY id", (player["id"],)).fetchall()
     start=max(0,page-1)*size
     return _protocol_response(505, {"list": [_pet_list_entry(r) for r in rows[start:start+size]]})
 
@@ -4496,8 +4499,8 @@ def _choose_pet_list(database_path: Path) -> Response:
         if player is None:
             return _pet_error(103)
         rows = c.execute(
-            """SELECT id AS "index", pet_id AS id, icon, name, lv FROM pets
-               WHERE player_id=? AND is_locked=0 ORDER BY id LIMIT ? OFFSET ?""",
+            f"""SELECT id AS "index", pet_id AS id, icon, name, lv FROM pets
+               WHERE player_id=? AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT ? OFFSET ?""",
             (player["id"], size, (page - 1) * size),
         ).fetchall()
     return _protocol_response(42, {"list": [_pet_list_entry(r) for r in rows]})
@@ -4521,6 +4524,8 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
+        if int(row["train_end"] or 0) > int(time.time()):
+            return _pet_error(100)
         # FightPetListUI.as:160-164 sends 44 with the pet index; `ttype` there is
         # the page kind from HunterTaskUI.as:302 and is ALWAYS 1, so it can never
         # identify the slot. Put the pet in the first free slot instead — that is
@@ -4717,9 +4722,9 @@ def _fight_payload(database_path: Path, defenders):
             return None
         worn = _worn_equipment(c, p["id"])
         rows = c.execute(
-            """SELECT id AS "index", pet_id AS id, icon, name, lv,
+            f"""SELECT id AS "index", pet_id AS id, icon, name, lv,
                       pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
-               FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0
+               FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}
                ORDER BY id LIMIT 2""",
             (p["id"],),
         ).fetchall()
@@ -4751,7 +4756,7 @@ def _arena_battle(database_path: Path) -> Response:
             return _pet_error(103)
         squad_lv = c.execute(
             "SELECT COALESCE(MAX(lv), 1) FROM pets"
-            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            f" WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}",
             (p["id"],),
         ).fetchone()[0]
     parts = _fight_payload(
@@ -4773,11 +4778,11 @@ def _arena_battle(database_path: Path) -> Response:
         # The slice is a fraction of a level for the squad's own level, so an arena
         # is never worth 40 levels at lv1 nor nothing at lv900.
         arena_pets=[r[0] for r in c.execute(
-            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            f"SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",
             (p["id"],))]
         squad_lv = c.execute(
             "SELECT COALESCE(MAX(lv), 1) FROM pets"
-            " WHERE player_id=? AND battle_state=0 AND is_locked=0",
+            f" WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}",
             (p["id"],),
         ).fetchone()[0]
         arena_exp = _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
@@ -4864,7 +4869,7 @@ def _copy_battle(database_path: Path) -> Response:
         copy_point = int(LOCAL_COPY_REWARD * copy_mult) if is_win else 0
         _credit_battle_rewards(c, player["id"], point=copy_point, crystal=0)
         copy_pets=[r[0] for r in c.execute(
-            "SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
+            f"SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",
             (player["id"],))]
         # Half a level at the stage's reference level, so clearing stage 1001 does
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
@@ -5189,8 +5194,8 @@ def _arena_fighter(database_path: Path) -> Response:
         # LOCAL DEFAULT: the rival borrows the player's own roster so the two
         # Pet widgets resolve real `p<icon>` artwork instead of empty slots.
         pets = c.execute(
-            """SELECT id AS "index", pet_id AS id, icon, lv FROM pets
-               WHERE player_id=? AND battle_state=0 ORDER BY id LIMIT 2""",
+            f"""SELECT id AS "index", pet_id AS id, icon, lv FROM pets
+               WHERE player_id=? AND battle_state=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2""",
             (player["id"],),
         ).fetchall()
         rival_pets = [

@@ -5076,3 +5076,38 @@ def test_non_allowed_network_is_rejected_before_routes_run():
     assert response.get_json() == {"error": "source_network_not_allowed"}
 
 
+
+def test_training_pet_is_hidden_from_pickers_and_battles(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "TrainEx")
+    with sqlite3.connect(database) as connection:
+        pet_index = connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE pets SET train_state=1, train_end=9999999999 WHERE id=?", (pet_index,)
+        )
+        connection.commit()
+
+    _, picker = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "505", "uid": uid, "p": 1, "n": 9}
+    ))
+    assert all(row["index"] != pet_index for row in picker["list"])
+
+    _, fight_picker = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "42", "uid": uid, "p": 1, "n": 9}
+    ))
+    assert all(row["index"] != pet_index for row in fight_picker["list"])
+
+    rejected = client.post(
+        "/flash.do", data={"m": "show", "showId": "44", "uid": uid, "index": pet_index}
+    )
+    assert rejected.get_data(as_text=True).startswith("-1:")
+
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": 1}))
+    _, battle = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "103", "uid": uid}
+    ))
+    used = {row.get("index") for row in battle["battle_result"]["att_list"] if row.get("index")}
+    assert pet_index not in used
