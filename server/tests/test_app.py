@@ -5148,3 +5148,33 @@ def test_training_starts_benches_the_pet_and_books_both_columns(tmp_path: Path):
             "SELECT pro_hp, pro_speed FROM pets WHERE id=?", (pet_index,)
         ).fetchone()
     assert (pro_hp, pro_speed) == (1000, 1000)
+
+def test_bag_filters_items_by_scene_target(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "BagCtx")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10030,1,1,10030,15,1),"   # 人物用：每日登录宝箱
+            " (1,10506,1,1,10506,0,0),"          # 通用/特殊：王国勋章
+            " (1,10011,1,1,10011,5,2)"           # 宠物用：宠物饼干
+        )
+        connection.commit()
+
+    def ids(target=None):
+        data = {"m": "show", "showId": "22", "uid": uid, "ttype": 1, "p": 1, "n": 9}
+        if target is not None:
+            data["target"] = target
+        _, payload = _envelope(client.post("/flash.do", data=data))
+        return {row["id"] for row in payload["goods_list"]}, payload["bag_size"]
+
+    hero, hero_size = ids(0)
+    assert hero == {10030, 10506}
+    assert hero_size == 3, "bag_size 仍是该 tab 的总行数"
+
+    pet, _ = ids(1)
+    assert pet == {10011}
+
+    legacy, _ = ids(None)
+    assert legacy == {10030, 10506, 10011}, "旧客户端不带 target 时保持全量"

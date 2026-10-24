@@ -1391,6 +1391,8 @@ def _player_inventory(database_path: Path) -> Response:
         item_type = int(_request_value("ttype", "1"))
         page = int(_request_value("p", "1"))
         page_size = int(_request_value("n", "9"))
+        target_raw = _request_value("target", "").strip()
+        target = int(target_raw) if target_raw else -1
     except ValueError:
         return Response("-1:0", status=400, mimetype="text/plain; charset=utf-8")
     if item_type not in (1, 2, 3) or page < 1 or not 1 <= page_size <= 9:
@@ -1419,14 +1421,23 @@ def _player_inventory(database_path: Path) -> Response:
             start = (page - 1) * page_size
             rows = visible[start:start + page_size]
         else:
+            where = "player_id = ? AND team = ?"
+            params: list[int] = [player["id"], item_type]
+            if item_type == 1 and target >= 0:
+                # 0 = 人物/家园（通用 + 人物用），>0 = 宠物（只用宠物道具）。
+                # 先过滤再分页，第 2 页才不会重复。
+                wanted = (0, 1) if target == 0 else (2,)
+                placeholders = ",".join("?" for _ in wanted)
+                where += f" AND use_type IN ({placeholders})"
+                params.extend(wanted)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id AS "index", item_id AS id, team, quantity AS num, icon,
                        item_type AS type, use_type, level
-                FROM inventory WHERE player_id = ? AND team = ?
+                FROM inventory WHERE {where}
                 ORDER BY id LIMIT ? OFFSET ?
                 """,
-                (player["id"], item_type, page_size, (page - 1) * page_size),
+                (*params, page_size, (page - 1) * page_size),
             ).fetchall()
             count = connection.execute(
                 "SELECT COUNT(*) FROM inventory WHERE player_id = ? AND team = ?",
