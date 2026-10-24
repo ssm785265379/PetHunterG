@@ -3,6 +3,9 @@
 写于 2026-10-24 晚。目的：换一个干净上下文也能立刻接着干，不用靠回忆。
 **只写"已验证的事实"和"明确未完成的项"，不写猜测。**
 
+> **2026-10-25 凌晨的最新快照见 [`docs/handoff-2026-10-25.md`](handoff-2026-10-25.md)**：
+> 道具使用弹窗/批量数量/一次性结果提示、阶段1 完成、阶段2/3 待做，以及构建与踩坑记录。
+
 ## 一、当前部署 / 联调方式
 
 用户要求：**先在本地 WiFi 联调，不推服务器**，等他通知再回到远端。手机上有两个包：
@@ -14,12 +17,12 @@
 | 手机 WiFi | `10.89.127.80`，ADB `10.89.127.80:5555`（`adb tcpip 5555` + `adb connect`） |
 | 端口转发 | `adb -s 10.89.127.80:5555 reverse tcp:8080 tcp:8080` |
 | 本地联调包（当前） | `air.com.lv1.hunter.localwifi`，SWF 内 4 个 URL = `http://127.0.0.1:8080` |
-| 该 APK SHA-256 | `68DAE664B50D413AE16493B0101A2BF1341174904F0AC196C97BCFF35575B9F9`（`build/out/PetHunterG-LocalWiFi.apk`，含 BagListUI target 补丁） |
-| 该 SWF SHA-256 | `C23DD219FFB89DD2729C6EC7FF07407973CD1682C1DD07D7CE0436DA2F12BADF`（`build/input-localwifi/APetHunter.swf`） |
+| 该 APK SHA-256 | `214DE9D2EF50EC13DA548242772E5898B2D20C9A2607223A4E877FE0EBB12E11`（`build/out/PetHunterG-LocalWiFi.apk`，含 BagListUI target + 使用弹窗补丁） |
+| 该 SWF SHA-256 | `1520902761763CC5755BB75BBBDD1D077FC241A34641A43F5F70395731017713`（`build/input-localwifi/APetHunter.swf`） |
 | 新包签名 | `build/localwifi.p12`，密码在 `build/localwifi-signing.txt`（都在忽略的 build/ 里）；证书 SHA-256 `7090d1010bd965904b418598d82434c994eaaa7b39114a10aebd9a0bbb3e96ee` |
 | 旧包（保留） | `air.com.lv1.hunter.iconless.localusb`：签名密码是当时随机生成、**未保存**，无法覆盖升级，所以新包旁装；旧会话仍在旧包里 |
 | 存档 | `server/instance/game.sqlite3`（本地，未上传） |
-| 单测 | **170 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
+| 单测 | **171 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
 
 > 2026-10-25：手机当前走 USB（serial `24086b59`），WiFi `10.89.127.80:5555` 当时连不上；
 > 两种连接都要 `adb reverse tcp:8080 tcp:8080`。
