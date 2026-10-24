@@ -4594,10 +4594,15 @@ def _explore_equip_list(database_path: Path) -> Response:
     all_ids = sorted(by_type.get(source, []))
     for equip_id in all_ids[(page - 1) * size: page * size]:
         price_type, price = _explore_equip_price(table[equip_id])
+        owned = equip_id in rented
         entries.append({
-            "id": equip_id, "price_type": price_type, "price": price,
+            "id": equip_id,
+            # 已拥有的不再显示价格。客户端是 `_loc10_ = "" + price` 直接拼字符串，
+            # 所以传**空字符串**即可让价格文本为空；price_type 必须保持合法值
+            # （1/2/3），传 4 会让 PropItem 拿到未定义 type 而整格空白。
+            "price_type": price_type, "price": "" if owned else price,
             "need_goods_num": 0, "need_goods_id": 0, "type": ttype,
-            "is_rented": 1 if equip_id in rented else 0,
+            "is_rented": 1 if owned else 0,
         })
     return _protocol_response(100, {"type": ttype, "list": entries, "value": "ok"})
 
