@@ -14,12 +14,15 @@
 | 手机 WiFi | `10.89.127.80`，ADB `10.89.127.80:5555`（`adb tcpip 5555` + `adb connect`） |
 | 端口转发 | `adb -s 10.89.127.80:5555 reverse tcp:8080 tcp:8080` |
 | 本地联调包（当前） | `air.com.lv1.hunter.localwifi`，SWF 内 4 个 URL = `http://127.0.0.1:8080` |
-| 该 APK SHA-256 | `6EF969C81317AFD5A32D8E092BA02896BB8A6E721DC75DCF45228EFB9AFAB23D`（`build/out/PetHunterG-LocalWiFi.apk`） |
-| 该 SWF SHA-256 | `065F1BA7A8FDC144B56D1CC8C10774A85F07CC76853540ED7379805D7ABA7ACA`（`build/input-localwifi/APetHunter.swf`） |
+| 该 APK SHA-256 | `68DAE664B50D413AE16493B0101A2BF1341174904F0AC196C97BCFF35575B9F9`（`build/out/PetHunterG-LocalWiFi.apk`，含 BagListUI target 补丁） |
+| 该 SWF SHA-256 | `C23DD219FFB89DD2729C6EC7FF07407973CD1682C1DD07D7CE0436DA2F12BADF`（`build/input-localwifi/APetHunter.swf`） |
 | 新包签名 | `build/localwifi.p12`，密码在 `build/localwifi-signing.txt`（都在忽略的 build/ 里）；证书 SHA-256 `7090d1010bd965904b418598d82434c994eaaa7b39114a10aebd9a0bbb3e96ee` |
 | 旧包（保留） | `air.com.lv1.hunter.iconless.localusb`：签名密码是当时随机生成、**未保存**，无法覆盖升级，所以新包旁装；旧会话仍在旧包里 |
 | 存档 | `server/instance/game.sqlite3`（本地，未上传） |
-| 单测 | **167 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
+| 单测 | **170 passed**（`server/.venv/Scripts/python.exe -m pytest tests -q`） |
+
+> 2026-10-25：手机当前走 USB（serial `24086b59`），WiFi `10.89.127.80:5555` 当时连不上；
+> 两种连接都要 `adb reverse tcp:8080 tcp:8080`。
 
 新包要**重新登录**：账号 `ssm7852`（存档在服务器上，不变）。
 
@@ -27,6 +30,18 @@
 nginx `http://43.173.99.241:8080/`，客户端 `air.com.lv1.hunter.iconless.remote`。
 
 ## 二、已完成并验证的功能
+
+- **道具场景过滤 + 养成流程（2026-10-25 凌晨，阶段1）**：
+  - 22 号请求现在带 `target`（人物/家园 0、宠物 index），服务端在分页前按 `use_type`
+    过滤：人物只回 0/1，宠物只回 2；旧客户端不带 `target` 保持全量。
+  - 训练中的宠物（`train_end > now`）不再出现在 505 选宠、42/5 出战列表、6/24/74/103
+    战斗与 506 对手展示里；44 直接拒绝；开始训练自动 `squad_slot=0`。
+  - 训练收益 `train_gain`/`train_gain2` 两列分别记账，504 结算分别加到两列，接近 1000
+    上限时不会把第二列算多。
+  - 真机验证：人物背包 81 格全是人物/通用道具（无宠物饼干等），宠物背包 80 格全是
+    宠物道具（无星星宝箱/扩建证书等）；烈焰龙开始训练后出现在养成槽位倒计时，
+    再打开选宠页时它已消失。170 passed。
+  - 设计/计划：`docs/superpowers/specs/2026-10-24-...`、`docs/superpowers/plans/2026-10-24-bag-context-and-training.md`
 
 - 狩猎：真实怪物表、关卡按顺序解锁、出战槽 `squad_slot`（44 填第一个空槽、45 下场）
 - 图鉴：只在**首次登记**时弹
