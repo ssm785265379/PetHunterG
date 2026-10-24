@@ -184,6 +184,91 @@ def main() -> int:
     src = src.replace(old, new)
     p.write_text(src, encoding="utf-8")
 
+    # 7) BagListUI: 道具使用弹窗（名称 + remark 说明 + 数量 + 使用/取消）
+    src = p.read_text(encoding="utf-8")
+    snippet = (REPO / "patches" / "BagListUI-use-popup.as3").read_text(encoding="utf-8")
+
+    def patch_once(old_text: str, new_text: str, label: str) -> None:
+        nonlocal src
+        if src.count(old_text) != 1:
+            raise SystemExit(f"bag popup {label} anchor missing")
+        src = src.replace(old_text, new_text)
+
+    patch_once(
+        "   import flash.display.BitmapData;\n   import flash.events.MouseEvent;",
+        "   import flash.display.BitmapData;\n   import flash.display.Shape;\n"
+        "   import flash.events.Event;\n   import flash.events.MouseEvent;",
+        "imports",
+    )
+    patch_once(
+        "      private var _bag_icon:IconItem;",
+        """      private var _bag_icon:IconItem;
+
+      private var _use_popup:GameObject;
+
+      private var _use_num_txt:Text;
+
+      private var _use_count_txt:Text;
+
+      private var _use_count:int;
+
+      private var _use_max:int;
+
+      private var _use_index:int;
+
+      private var _use_target:int;
+
+      private var _use_item_id:int;""",
+        "fields",
+    )
+    patch_once(
+        "         super.release();\n         _items.length = 0;",
+        "         super.release();\n         hideUsePopup();\n         _items.length = 0;",
+        "release",
+    )
+    patch_once(
+        """               else
+               {
+                  CommandManager.send(CommandManager.USE_GOODS_KEY,{
+                     "index":_loc3_.data.index,
+                     "index1":data.target
+                  });
+               }""",
+        """               else
+               {
+                  showUsePopup(_loc3_);
+               }""",
+        "item tap",
+    )
+    patch_once(
+        "      private function onMouseUpPrav(param1:MouseEvent) : void",
+        snippet + "      private function onMouseUpPrav(param1:MouseEvent) : void",
+        "methods",
+    )
+    patch_once(
+        "               if(_loc14_.team == 3)\n"
+        "               {\n"
+        "                  _loc9_.level = _loc14_.level;\n"
+        "               }",
+        "               _loc9_.id = _loc14_.id;\n"
+        "               if(_loc14_.team == 3)\n"
+        "               {\n"
+        "                  _loc9_.level = _loc14_.level;\n"
+        "               }",
+        "item id",
+    )
+    patch_once(
+        "            update();\n         }",
+        "            update();\n"
+        "            if(param2.notice)\n"
+        "            {\n"
+        "               Navigator.getInstance().popUI(AlertUI.show(param2.notice,\"\",1),true);\n"
+        "            }\n"
+        "         }",
+        "notice",
+    )
+    p.write_text(src, encoding="utf-8")
+
     current = BASE
     for name in ("ExploreMapListUI", "HireShopUI", "HireMountsUI",
                  "HireShopInfoUI", "BagListUI"):

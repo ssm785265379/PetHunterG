@@ -500,6 +500,12 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN max_explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
             )
+        if "pending_notice" not in player_columns:
+            # 50 号使用结果：客户端不一定能把 50 的响应路由回背包页，下一次 22
+            # 读背包时把这条一次性提示带回去，读完即清空。
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN pending_notice TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -1400,11 +1406,16 @@ def _player_inventory(database_path: Path) -> Response:
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
-            "SELECT id, bag_capacity, sex FROM players WHERE uid = ?", (uid,)
+            "SELECT id, bag_capacity, sex, pending_notice FROM players WHERE uid = ?", (uid,)
         ).fetchone()
         if player is None:
             return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
         sex = int(player["sex"] or 0)
+        notice = str(player["pending_notice"] or "")
+        if notice:
+            connection.execute(
+                "UPDATE players SET pending_notice = '' WHERE id = ?", (player["id"],)
+            )
         if item_type == 3:
             # Sex filtering has to happen before paging, otherwise page 1 shows
             # 9 rows, page 2 repeats some of them and the count is wrong.
@@ -1473,15 +1484,16 @@ def _player_inventory(database_path: Path) -> Response:
             # server's value for equipment rows is not recoverable.
             item["type"] = 0
         goods.append(item)
-    return _protocol_response(
-        22,
-        {
-            # Local interpretation: report the slots used in the viewed tab.
-            "bag_size": count,
-            "max_bag_size": player["bag_capacity"],
-            "goods_list": goods,
-        },
-    )
+    payload = {
+        # Local interpretation: report the slots used in the viewed tab.
+        "bag_size": count,
+        "max_bag_size": player["bag_capacity"],
+        "goods_list": goods,
+    }
+    if notice:
+        # 只在有一次性使用结果时出现，避免给所有背包请求加一个空字段。
+        payload["notice"] = notice
+    return _protocol_response(22, payload)
 
 
 def _player_equipment_detail(database_path: Path) -> Response:
@@ -2028,6 +2040,10 @@ def _player_use_goods(database_path: Path) -> Response:
         ht_ap = connection.execute(
             "SELECT ht_ap FROM players WHERE id = ?", (player["id"],)
         ).fetchone()["ht_ap"]
+        connection.execute(
+            "UPDATE players SET pending_notice = ? WHERE id = ?",
+            (text, player["id"]),
+        )
     payload["type"] = effect
     payload["used"] = used
     payload["text"] = text

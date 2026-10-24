@@ -5210,6 +5210,16 @@ def test_use_goods_batch_applies_multiple_and_reports_text(tmp_path: Path):
         ).fetchone()
     assert (ht_ap, qty) == (1000, 4)
 
+    # 50 的响应不一定能路由回背包页；22 号用一次性 notice 把结果带回来。
+    _, bag = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "22", "uid": uid, "ttype": 1, "p": 1, "n": 9,
+    }))
+    assert "体力" in bag["notice"]
+    _, bag_again = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "22", "uid": uid, "ttype": 1, "p": 1, "n": 9,
+    }))
+    assert "notice" not in bag_again
+
     _, exp_result = _envelope(client.post("/flash.do", data={
         "m": "show", "showId": "50", "uid": uid, "index": ids[10011],
         "index1": pet_index, "num": 3,
