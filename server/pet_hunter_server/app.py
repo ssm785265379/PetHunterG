@@ -2201,7 +2201,16 @@ LOCAL_EXPLORE_DISASTERS_BY_WORLD = {
 LOCAL_EXPLORE_REST_EVENTS = (2, 3, 4, 5)
 # 星级按天数评价（help.txt:19「完成探险用的时间越少，评价就越高」）。
 # 一次行程从第 1 天开始，每次事件 +1 天；三场战斗通关 = 4 天。
-LOCAL_EXPLORE_STAR_DAYS = ((4, 5), (6, 4), (9, 3), (12, 2))  # (天数上限, 星级)
+# 5 星留一天余量（≤5 天）：57% 战斗 / 43% 休整的事件池下，零休整只有约 18%
+# 概率，太苛刻；多一次休整仍算"快"，两次以上才掉到 4 星。
+LOCAL_EXPLORE_STAR_DAYS = ((5, 5), (8, 4), (11, 3), (15, 2))  # (天数上限, 星级)
+# 探险怪物的"物种等级"：按全局链位置每关 +5，用来从 monster.txt 里挑越往后越
+# 高级的物种；真正的出场等级仍用 reference_lv（队伍等级橡皮筋），见
+# _explore_defenders。
+LOCAL_EXPLORE_SPECIES_STEP = 5
+LOCAL_EXPLORE_SPECIES_WINDOW = 80
+# 98 列表从"当前关"附近开始，但往前留几张，便于回去把 4 星补成 5 星。
+LOCAL_EXPLORE_LIST_LOOKBACK = 4
 
 
 def _explore_discover_gain(need_rate: int) -> int:
@@ -3356,18 +3365,17 @@ def _explore_map_table() -> dict:
 def _explore_reference_level(gid: int) -> int:
     """LOCAL DEFAULT: how strong an expedition map's monsters are.
 
-    exploreMap.txt's `star` cell is a per-difficulty band string shared by every
-    row ("1500:1000:700:500"), so the only honest progression signal is the map's
-    position inside its own world: first map ~lv10, each later one +10.
+    按这张图在**全局链**上的位置递增，跨世界不重置；这样世界 2 之后的图不会又
+    回到 lv10。真正的出场等级还会被 _explore_start 用"队伍等级 + 狩猎等级带"
+    橡皮筋夹住，所以推图不会突然变成必败。exploreMap.txt 的 `star` 是每档奖励
+    额度（1500:1000:700:500），不能拿来当等级。
     """
-    table = _explore_map_table()
-    world = _explore_map_world(gid)
-    siblings = sorted(m for m in table if _explore_map_world(m) == world)
+    chain = _explore_chain_order()
     try:
-        index = siblings.index(gid)
+        position = chain.index(gid)
     except ValueError:
-        index = 0
-    return LOCAL_EXPLORE_LEVEL_BASE + LOCAL_EXPLORE_LEVEL_PER_STAR * index
+        position = 0
+    return LOCAL_EXPLORE_LEVEL_BASE + LOCAL_EXPLORE_LEVEL_PER_STAR * position
 
 
 def _explore_map_row(gid: int) -> dict | None:
@@ -3765,9 +3773,9 @@ def _explore_start(database_path: Path) -> Response:
             gid=p["cur_explore_map"]
         m=_explore_map_row(gid)
         if m is None: return _pet_error(400)
-        # 门禁：exploreMap.txt 的 needExploreMap 链条就是解锁顺序，前置图发现率
-        # 没打满时不允许出发，否则玩家可以跳过整条链直接打最后一张图。
-        if not _explore_map_open(c, p["id"], gid):
+        # 门禁：前置图通关（发现率打满）才解锁下一张；5 星完美通关的图会关闭，
+        # 不能再进（用户口径）。
+        if not _explore_map_open(c, p["id"], gid) or _explore_map_closed(c, p["id"], gid):
             return _pet_error(100)
         # An expedition costs one stamina point; the client renders the value the
         # response reports, so it has to be the post-spend number.
@@ -3777,11 +3785,8 @@ def _explore_start(database_path: Path) -> Response:
         if p["point"] < m["cost_point"] or p["money"] < m["cost_money"]: return _pet_error(403)
         c.execute("UPDATE players SET point=point-?,money=money-?,cur_explore_map=?,explore_ap=? WHERE id=?",
                   (m["cost_point"],m["cost_money"],gid,explore_ap,p["id"]))
-        # exploreMap.txt's `star` column is a per-difficulty band string
-        # ("1500:1000:700:500", identical on every row), so it cannot drive the
-        # spawn level. Use the map's position inside its world, but never throw a
-        # low-level squad at content far above it: an expedition is rubber-banded
-        # to the squad's own level + the hunt band.
+        # 关卡等级按全局链位置递增，但不会把低等级队伍扔进远超自己的内容：
+        # 实际出场等级 = min(关卡参考等级, 队伍等级 + 狩猎等级带)。
         squad_lv = c.execute(
             "SELECT COALESCE(MAX(lv), 1) FROM pets"
             " WHERE player_id=? AND battle_state=0 AND is_locked=0",
@@ -3847,9 +3852,16 @@ def _explore_start(database_path: Path) -> Response:
                 # ExploreEventResultUI 只在 surprise_rate>1 时画好运/厄运。
                 "surprise_rate": 0,
             })
-        defenders = _defenders_for_level(1, reference_lv, terrain=terrain)
+        # 进度用来轮换本场遇到的怪：同一张图连打三场也能换对手，而不是每场
+        # 都是同一只波利。rate_before 是这一场之前的发现率，稳定且单调。
+        progress_row = c.execute(
+            "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+            (p["id"], gid),
+        ).fetchone()
+        rate_before = int(progress_row["discover_rate"] or 0) if progress_row else 0
+        defenders = _explore_defenders(gid, terrain, reference_lv, rotation=rate_before)
         if not defenders:
-            # 该地形在等级带内没有合适属性的怪，回退到不筛地形，避免空战斗。
+            # 理论上不会发生（_explore_defenders 有全表兜底），保留防御。
             defenders = _defenders_for_level(1, reference_lv)
         if defenders and random.random() < LOCAL_ELITE_CHANCE:
             # 探险也吃精英遭遇：领队 ×1.6，奖励翻倍（与狩猎同一套开关）。
@@ -4023,17 +4035,22 @@ def _explore_list(database_path: Path) -> Response:
     for chain_position, gid in enumerate(chain, start=1):
         row=_explore_map_row(gid)
         progress = c.execute(
-            "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
+            "SELECT discover_rate, star_best FROM explore_progress"
+            " WHERE player_id=? AND map_id=?",
             (player["id"], gid),
         ).fetchone()
         rate = int(progress["discover_rate"] or 0) if progress else 0
+        best_star = int(progress["star_best"] or 0) if progress else 0
         # 角标显示链上的序号（1,2,3…），不是地图 id —— 全局链里 id 会跨世界跳动
         # （101、212…），看起来像乱码。id 仍用于 99/103。
         rows.append({"index":gid,"code":chain_position,"id":gid,"terrain":row["terrain"],
                      "name":row["name"],
                      "star":row["star"],"max_days":row["max_days"],
-                     # 客户端把 isClick 硬编码为 true，所以这些字段目前只用于展示；
-                     # 真正的门禁在 103（_explore_start）。
+                     # 客户端改包后用 best_star 画星、用 is_perfect 把已关闭的图锁住；
+                     # 真正的门禁仍在 99/103（_explore_detail / _explore_start）。
+                     "best_star":best_star,
+                     "is_perfect":1 if best_star >= 5 else 0,
+                     "is_cleared":1 if rate >= row["need_discover_rate"] else 0,
                      "discover_rate":rate,
                      "need_discover_rate":row["need_discover_rate"],
                      "is_open":1 if _explore_map_open(c, player["id"], gid) else 0})
@@ -4041,8 +4058,9 @@ def _explore_list(database_path: Path) -> Response:
     # gates the next-page button on "this page came back full"
     # (ExploreMapListUI.as:168-175), so an error would pop up instead of ending
     # the list.
-    # 从"下一张还没通关的图"开始显示：玩家一进探险就看到当前该打哪张，
-    # 不用每次翻到第 3 页。（已通关的图不再占用可见页。）
+    # 从"下一张还没通关的图"附近开始显示：玩家一进探险就看到当前该打哪张，
+    # 不用每次从第 1 页翻起。同时往前留 4 张，让刚打完但还没完美的图（4 星）
+    # 仍然能看到星级并点回去重打——完美通关（5 星）的图会显示为锁住（已关闭）。
     frontier = 0
     for position, row in enumerate(rows):
         if row["discover_rate"] < row["need_discover_rate"]:
@@ -4050,7 +4068,7 @@ def _explore_list(database_path: Path) -> Response:
             break
     else:
         frontier = max(0, len(rows) - 1)
-    start_at = frontier + (page - 1) * size
+    start_at = max(0, frontier - LOCAL_EXPLORE_LIST_LOOKBACK) + (page - 1) * size
     page_rows = rows[start_at: start_at + size]
     # world 只用于标题：取本页第一张图所在的世界。
     if page_rows:
@@ -4154,6 +4172,19 @@ def _explore_map_open(connection, player_id: int, gid: int) -> bool:
     return rate >= int(previous.get("need_discover_rate") or 0)
 
 
+def _explore_map_closed(connection, player_id: int, gid: int) -> bool:
+    """这张图是否已经"完美通关"并关闭（5 星）。
+
+    用户口径：通关（发现率打满）解锁下一关；完美通关（5 星）才把本关关闭，
+    关闭后不能再进。历史最佳星级存在 explore_progress.star_best。
+    """
+    row = connection.execute(
+        "SELECT star_best FROM explore_progress WHERE player_id=? AND map_id=?",
+        (player_id, gid),
+    ).fetchone()
+    return bool(row and int(row["star_best"] or 0) >= 5)
+
+
 def _explore_detail(database_path: Path) -> Response:
     try: gid=int(_request_value("gid",""))
     except ValueError: return _pet_error(100)
@@ -4163,6 +4194,10 @@ def _explore_detail(database_path: Path) -> Response:
     with _connect_database(database_path) as c:
         p=c.execute("SELECT id,point,money FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
+        # 未解锁或已完美通关（关闭）的图不能进详情页；客户端改包后这一层是
+        # 双保险（锁住的格子本来就不发 99）。
+        if not _explore_map_open(c, p["id"], gid) or _explore_map_closed(c, p["id"], gid):
+            return _pet_error(100)
         # Remember the map so the follow-up 103, which carries no gid, can use it.
         c.execute("UPDATE players SET cur_explore_map=? WHERE id=?",(gid,p["id"]))
     return _protocol_response(99,{"id":gid,"world":m["world"],"cost_point":m["cost_point"],"own_point":p["point"],"cost_money":m["cost_money"],"own_money":p["money"],"disaster":m["disaster"],"is_catch":m["is_catch"]})
@@ -4608,6 +4643,67 @@ def _defenders_for_level(
         if monster is not None:
             picked.append(monster)
         if len(picked) >= count:
+            break
+    return picked
+
+
+def _explore_defenders(gid: int, terrain: int, reference_lv: int, rotation: int = 0) -> list[dict]:
+    """Pick the monster group for one expedition battle.
+
+    物种按这张图在全局链上的位置选（越往后越"高级"的怪），但出场等级/数值统一
+    用 reference_lv（队伍等级 + 关卡位置的橡皮筋）——换皮不会把难度带崩。
+    同一张图的领队由 gid 决定、并按进度 rotation 轮换，所以连打三场也能遇到
+    不同对手；战斗结算里的等级与强度仍然一致。
+
+    原来的实现把 base_id=1（原味波利）写死进每一张图，后面 20~30 级的地图在
+    monster.txt 里又没有同等级怪，于是整场探险永远只有一只 lv1 波利。
+    """
+    table = _monster_table()
+    chain = _explore_chain_order()
+    try:
+        position = chain.index(gid)
+    except ValueError:
+        position = 0
+    tier = min(999, 10 + LOCAL_EXPLORE_SPECIES_STEP * position)
+    preferred = {
+        str(value) for value in LOCAL_TERRAIN_PROPERTIES.get(int(terrain or 0), ())
+    }
+    candidates: list[tuple[int, int, int]] = []
+    for monster_id, record in table.items():
+        raw = str(record.get("level", "")).strip()
+        if not raw.isdigit():
+            continue
+        distance = abs(int(raw) - tier)
+        prop = str(record.get("properties", "")).strip()
+        # 0 = 符合地形属性，1 = 不符合（排后面兜底）
+        on_terrain = 0 if (not preferred or prop in preferred) else 1
+        candidates.append((on_terrain, distance, int(monster_id)))
+    candidates.sort()
+    pool = [
+        monster_id
+        for _terrain, distance, monster_id in candidates
+        if distance <= LOCAL_EXPLORE_SPECIES_WINDOW
+    ][:24]
+    if len(pool) < 2:
+        pool = [monster_id for _t, _d, monster_id in candidates[:24]]
+
+    start = (int(gid) * 7 + int(rotation or 0) * 3) % max(1, len(pool))
+    picked: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for offset in range(len(pool)):
+        monster_id = pool[(start + offset) % len(pool)]
+        monster = _pick_monster(monster_id)
+        if monster is None:
+            continue
+        key = (str(monster["name"]), int(monster["icon"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        # 用关卡等级出战：显示与 _monster_stats 用同一套数值，避免同图里的怪
+        # 因为表里写的是 lv950 而变成必败。
+        monster["lv"] = max(1, int(reference_lv))
+        picked.append(monster)
+        if len(picked) >= 2:
             break
     return picked
 

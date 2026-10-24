@@ -1626,12 +1626,12 @@ def test_explore_maps_unlock_through_the_progress_chain(tmp_path: Path):
     assert page[1]["is_open"] == 0, "map 2 needs map 1 cleared first"
     assert "discover_rate" in page[0] and "need_discover_rate" in page[0]
 
-    # Starting a locked map must be refused rather than silently running.
+    # A locked map must be refused at both the detail (99) and the start (103).
     second = page[1]["id"]
-    command, payload = _envelope(client.post(
-        "/flash.do", data={"m": "show", "showId": 99, "uid": uid, "gid": str(second)}
-    ))
-    assert command == 99
+    detail = client.post(
+        "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": str(second)}
+    )
+    assert detail.get_data(as_text=True).startswith("-1:"), "locked map detail must be refused"
     started = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
     assert started.get_data(as_text=True).startswith("-1:"), "locked map must not run"
 
@@ -1643,11 +1643,86 @@ def test_explore_maps_unlock_through_the_progress_chain(tmp_path: Path):
             " VALUES (1, ?, ?)", (int(page[0]["id"]), need)
         )
         connection.commit()
-    # The list now starts at the first not-yet-cleared map, so the unlocked one is
-    # the first entry rather than the second.
+    # The page leads a few rows before the current frontier so a just-cleared map
+    # stays reachable for the 5-star replay; the frontier itself must be on it.
     after = rows()
-    assert after[0]["id"] == second, "the page must lead with the current frontier"
-    assert after[0]["is_open"] == 1, "clearing the previous map must unlock the next"
+    ids = [row["id"] for row in after]
+    assert second in ids, "the current frontier must be on the page"
+    assert page[0]["id"] in ids, "the just-cleared map stays visible for replay"
+    frontier_row = next(row for row in after if row["id"] == second)
+    assert frontier_row["is_open"] == 1, "clearing the previous map must unlock the next"
+
+
+def test_explore_list_exposes_best_star_and_perfect_state(tmp_path: Path):
+    # 98 rows carry best_star / is_perfect so the patched client can draw stars and
+    # lock a map that was closed by a 5-star clear.
+    table = config_tables._table("exploreMap.txt")
+    gid = sorted(int(k) for k in table)[0]
+    need = int(str(table[gid]["needDiscoverRate"]).strip() or 0)
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "StarT")
+
+    def page_rows():
+        return _envelope(client.post(
+            "/flash.do",
+            data={"m": "show", "showId": 98, "uid": uid, "ttype": 2, "gid": 1, "p": 1, "n": 9},
+        ))[1]["list"]
+
+    first = page_rows()[0]
+    assert (first["best_star"], first["is_perfect"], first["is_cleared"]) == (0, 0, 0)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO explore_progress"
+            " (player_id, map_id, discover_rate, star_best, pass_claimed)"
+            " VALUES (1, ?, ?, 4, 1)", (gid, need)
+        )
+        connection.commit()
+    fourth = next(row for row in page_rows() if row["id"] == gid)
+    assert fourth["is_cleared"] == 1 and fourth["best_star"] == 4
+    assert fourth["is_perfect"] == 0, "4 星通关不关闭地图"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE explore_progress SET star_best=5 WHERE player_id=1 AND map_id=?", (gid,)
+        )
+        connection.commit()
+    perfect = next(row for row in page_rows() if row["id"] == gid)
+    assert perfect["is_perfect"] == 1 and perfect["best_star"] == 5
+
+    closed = client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid})
+    assert closed.get_data(as_text=True).startswith("-1:"), "perfect map is closed"
+
+
+def test_explore_monsters_vary_by_map_and_use_the_map_level():
+    # 旧实现把 monster 1（原味波利 lv1）写死进每一张探险图，后面的图只在
+    # 20~30 级找怪又找不到，结果永远是一只波利。新选择器按全局链位置取不同
+    # 物种，并把出场等级统一成 reference_lv（数值与显示一致）。
+    from pet_hunter_server import app as A
+
+    chain = A._explore_chain_order()
+    assert len(chain) > 10
+    groups = {}
+    for gid in chain[:8]:
+        row = A._explore_map_row(gid)
+        group = A._explore_defenders(gid, row["terrain"], 50, rotation=0)
+        assert len(group) == 2, f"map {gid} must field two monsters"
+        for monster in group:
+            assert monster["lv"] == 50, "display level must match the map level"
+        groups[gid] = tuple(sorted((str(m["name"]), int(m["icon"])) for m in group))
+    assert len(set(groups.values())) >= 5, "adjacent maps must not all field the same pair"
+
+    # 同一张图按进度轮换对手（连打三场不会永远同一组）。
+    gid = chain[0]
+    terrain = A._explore_map_row(gid)["terrain"]
+    variants = {
+        tuple(sorted((str(m["name"]), int(m["icon"]))
+                     for m in A._explore_defenders(gid, terrain, 50, rotation=r)))
+        for r in (0, 50, 100, 150)
+    }
+    assert len(variants) >= 2, "the same map must rotate its monsters between battles"
+
 
 
 def test_explore_list_rows_match_client_fields(tmp_path: Path):
@@ -2399,6 +2474,7 @@ def test_explore_rented_gear_immunity_reduces_disaster_damage(tmp_path: Path, mo
 def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: Path, monkeypatch):
     # ExploreResultItem.showFinish() 只在 is_finish_reward / is_max_star_reward
     # 为真时画奖励块，并读 cur_star 画星；这两个标志原来从来没发过。
+    # 同时覆盖：4 星通关不关闭地图（可重打），5 星才关闭且满星奖励只发一次。
     from pet_hunter_server import app as A
 
     table = config_tables._table("exploreMap.txt")
@@ -2408,6 +2484,11 @@ def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: P
     uid = _create_local_player(client, "FinFlag")
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
     _prime_explore_completion(database, gid)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE explore_progress SET days=5 WHERE player_id=1 AND map_id=?", (gid,)
+        )
+        connection.commit()
 
     monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 1)
     monkeypatch.setattr(A, "_record_is_win", lambda record: True)
@@ -2416,9 +2497,33 @@ def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: P
     )
     assert command == 103
     assert payload["is_finish"] == 1
-    assert payload["cur_star"] == 5, "3 场战斗通关 = 4 天，应给 5 星"
+    assert payload["cur_star"] == 4, "6 天通关 = 4 星"
     assert payload["is_finish_reward"] == 1
-    assert payload["is_max_star_reward"] == 1
+    assert payload["is_max_star_reward"] == 0
+
+    # 4 星不关闭：详情页还能进。
+    command, _detail = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}
+    ))
+    assert command == 99
+
+    # 再打一次并拿到 5 星：通关奖励已领过，满星奖励这时才发且只发一次。
+    # _prime_explore_completion 用 INSERT OR REPLACE，会把已领标志重置，这里补回。
+    _prime_explore_completion(database, gid)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE explore_progress SET days=1, pass_claimed=1, star_best=4"
+            " WHERE player_id=1 AND map_id=?",
+            (gid,),
+        )
+        connection.commit()
+    command, again = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert again["is_finish"] == 1
+    assert again["cur_star"] == 5
+    assert again["is_finish_reward"] == 0, "通关奖励不能重复发"
+    assert again["is_max_star_reward"] == 1, "满星奖励第一次拿到 5 星时发"
 
     # 满星奖励的道具也要真的进背包（原来只画在面板上）。
     with sqlite3.connect(database) as connection:
@@ -2437,13 +2542,13 @@ def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: P
     assert (star_best, pass_claimed) == (5, 1)
     assert trip == (0, 0, 0), "行程结束后体力/补给/天数清零，下次重新开始"
 
-    # 再打一次：通关标志仍在，但奖励不能重复发。
-    command, again = _envelope(
-        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    # 5 星完美通关后这张图关闭：99 和 103 都不能再进。
+    closed_detail = client.post(
+        "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}
     )
-    assert again["is_finish"] == 1
-    assert again["is_finish_reward"] == 0
-    assert again["is_max_star_reward"] == 0
+    assert closed_detail.get_data(as_text=True).startswith("-1:")
+    closed_start = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    assert closed_start.get_data(as_text=True).startswith("-1:")
 
 
 def test_explore_rest_event_can_finish_the_map_and_pay(tmp_path: Path, monkeypatch):
@@ -2515,6 +2620,12 @@ def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     for _ in range(2):  # the second run exercises the unique-constraint path
         _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
         _prime_explore_completion(database, gid)
+        # 4 星通关不会关闭地图，才能重复验证同一件装备的堆叠；把行程天数推到 6。
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE explore_progress SET days=5 WHERE player_id=1 AND map_id=?", (gid,)
+            )
+            connection.commit()
         command, payload = _envelope(
             client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
         )

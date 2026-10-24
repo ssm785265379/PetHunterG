@@ -1,11 +1,12 @@
 """从干净的 URL 补丁基线重建全部客户端改动（自包含，不依赖旧脚本）。
 
 应用顺序：
-  1. ExploreMapListUI: "isClick":true -> is_open 判断（未解锁显示锁）
-  2. ExploreMapListUI: 播放地图 BGM 前 stopAll（修音乐重叠）
-  3. HireShopUI: 数据填充后按真实尺寸重排（修九宫格叠放）
-  4. HireMountsUI: 透明热区改为打开坐骑商店（修无法切换）
-  5. HireShopInfoUI: addChild 前 removeAll（修立绘重叠）
+  1. ExploreMapListUI: "isClick":true -> is_open && !is_perfect（未解锁/已完美通关都锁）
+  2. ExploreMapListUI: 播放地图 BGM 前 stopAll（修翻页换世界时多首音乐叠加）
+  3. ExploreMapListUI: 地图格子显示 best_star（历史最佳星级）
+  4. HireShopUI: 数据填充后按真实尺寸重排（修九宫格叠放）
+  5. HireMountsUI: 透明热区改为打开坐骑商店（修无法切换）
+  6. HireShopInfoUI: addChild 前 removeAll（修立绘重叠）
 
 刻意**不**改 HireListUI：它的原始布局是对的，我之前的"重排"把它挤到左上角了。
 """
@@ -54,12 +55,19 @@ def main() -> int:
     export(root)
     ui = root / "scripts" / "cc" / "lv1" / "game" / "ui"
 
-    # 1+2) ExploreMapListUI
+    # 1+2) ExploreMapListUI：未解锁/已完美通关都锁；换世界翻页先 stopAll
     p = ui / "ExploreMapListUI.as"
     src = p.read_text(encoding="utf-8")
     if '"isClick":true' not in src:
         raise SystemExit("isClick anchor missing")
-    src = src.replace('"isClick":true', '"isClick":_loc5_.is_open != 0')
+    src = src.replace(
+        '"isClick":true',
+        '"isClick":_loc5_.is_open != 0 && !_loc5_.is_perfect',
+    )
+    # 地图格子显示历史最佳星级：服务端 98 新增 best_star（0-5）。
+    if '"star":_loc5_.star' not in src:
+        raise SystemExit("row star anchor missing")
+    src = src.replace('"star":_loc5_.star', '"star":_loc5_.best_star')
     bgm = re.compile(
         r'if\(SoundManager\.contains\("sound_back"\)\)\s*\{\s*'
         r'SoundManager\.stop\("sound_back"\);\s*\}\s*'
