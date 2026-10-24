@@ -2257,6 +2257,231 @@ def test_explore_rest_event_advances_without_a_battle(tmp_path: Path, monkeypatc
     assert bad["add_discover_rate"] == 0, "a blocked day must not advance discovery"
 
 
+def test_explore_disasters_cover_every_region_and_client_asset():
+    # exploreMap.txt 只有 6/7 两个灾难槽位，而 map.swf/音效/ui.txt 为 6-13 各备了
+    # 一套（火山/暴风雪/沙尘暴/龙卷风/台风/疾病），exploreEquip 也按同号给免疫装备。
+    from pet_hunter_server import app as A
+
+    for world, (primary, secondary) in A.LOCAL_EXPLORE_DISASTERS_BY_WORLD.items():
+        assert 6 <= primary <= 13 and 6 <= secondary <= 13, world
+        assert A._explore_disaster_for(world, 6) == primary
+        assert A._explore_disaster_for(world, 7) == secondary
+    # 未知地区回落到配置表字面的 暴雨/洪水。
+    assert A._explore_disaster_for(999, 6) == 6
+    assert A._explore_disaster_for(999, 7) == 7
+
+
+def test_explore_trip_resources_follow_battle_rest_and_disaster(tmp_path: Path, monkeypatch):
+    # 客户端 HUD 读 energy/supply/discover_days 与对应的 cost/add 增量
+    # （ExploreUI.as:147-166），事件页读同样的增量（ExploreResultItem.as:196-260）。
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "TripRes")
+    gid = sorted(int(k) for k in config_tables._table("exploreMap.txt"))[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 1)
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+    command, battle = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert battle["cost_energy"] == A.LOCAL_EXPLORE_BATTLE_ENERGY
+    assert battle["cost_supply"] == A.LOCAL_EXPLORE_BATTLE_SUPPLY
+    assert battle["energy"] == A.LOCAL_EXPLORE_BASE_ENERGY - A.LOCAL_EXPLORE_BATTLE_ENERGY
+    assert battle["supply"] == A.LOCAL_EXPLORE_BASE_SUPPLY - A.LOCAL_EXPLORE_BATTLE_SUPPLY
+    assert battle["discover_days"] == 2 and battle["add_discover_days"] == 1
+
+    # 休整：回体力/补给，并把差值报给结算面板。
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 3)
+    command, rest = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103 and rest["event_type"] == 3
+    assert rest["energy"] == A.LOCAL_EXPLORE_BASE_ENERGY
+    assert rest["supply"] == A.LOCAL_EXPLORE_BASE_SUPPLY
+    assert rest["add_energy"] > 0 and rest["add_supply"] > 0
+
+    # 灾难：扣体力/补给，无发现率进展。
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 6)
+    command, bad = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert bad["event_type"] == A.LOCAL_EXPLORE_DISASTERS_BY_WORLD[1][0]
+    assert bad["cost_energy"] == A.LOCAL_EXPLORE_DISASTER_ENERGY
+    assert bad["cost_supply"] == A.LOCAL_EXPLORE_DISASTER_SUPPLY
+    assert bad["energy"] == A.LOCAL_EXPLORE_BASE_ENERGY - A.LOCAL_EXPLORE_DISASTER_ENERGY
+    assert bad["add_discover_rate"] == 0
+
+
+def test_only_new_characters_get_the_free_starter_mount(tmp_path: Path):
+    # 100001 驴 原来在每次启动时给"没有坐骑的角色"补发，导致玩家清空坐骑后
+    # 一重启又回来了。现在只在创建角色时发；删掉后重启必须保持为空。
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    _create_local_player(client, "MountKg")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT equip_id FROM explore_rented WHERE player_id=1 AND slot_type=1"
+        ).fetchall() == [(100001,)]
+        connection.execute("DELETE FROM explore_rented")
+        connection.commit()
+
+    # 再启动一次（create_app 会跑 _initialize_database），不能补发。
+    create_app({"TESTING": True, "DATABASE": database})
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM explore_rented").fetchone()[0] == 0
+
+
+def test_explore_gear_raises_energy_and_discovers_by_terrain(tmp_path: Path, monkeypatch):
+    # exploreEquip effectType: 1 体力(+400) / 3 发现(+30) / 6 暴雨免疫(40%)；
+    # 坐骑的 effect 是 "25:10:10:10:10" 按地形取一档。
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "GearBon")
+    gid = sorted(int(k) for k in config_tables._table("exploreMap.txt"))[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO explore_rented (player_id, equip_id, slot_type) VALUES (1, 110001, 2),"
+            " (1, 110201, 2)"
+        )
+        connection.commit()
+
+    # 110001 咖啡 +400体力；100001 驴在平原(地形1) +25发现；110201 苹果 +30发现。
+    with A._connect_database(database) as connection:
+        assert A._explore_equip_bonus(connection, 1, 1, 1) == 400
+        assert A._explore_equip_bonus(connection, 1, 3, 1) == 55
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 1)
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+    command, battle = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert battle["energy"] == A.LOCAL_EXPLORE_BASE_ENERGY + 400 - A.LOCAL_EXPLORE_BATTLE_ENERGY
+    base_gain = A._explore_discover_gain(
+        int(config_tables._table("exploreMap.txt")[gid]["needDiscoverRate"])
+    )
+    assert battle["add_discover_rate"] == base_gain + 55
+
+
+def test_explore_rented_gear_immunity_reduces_disaster_damage(tmp_path: Path, monkeypatch):
+    # 110301 宙斯的雷霆 = 暴雨伤害免疫 40%。灾难扣 300 → 实扣 180。
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "Immunity")
+    gid = sorted(int(k) for k in config_tables._table("exploreMap.txt"))[0]
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO explore_rented (player_id, equip_id, slot_type) VALUES (1, 110301, 2)"
+        )
+        connection.commit()
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 6)
+    command, bad = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert bad["event_type"] == 6
+    assert bad["cost_energy"] == int(round(A.LOCAL_EXPLORE_DISASTER_ENERGY * 0.6))
+    assert bad["cost_supply"] == int(round(A.LOCAL_EXPLORE_DISASTER_SUPPLY * 0.6))
+
+
+def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: Path, monkeypatch):
+    # ExploreResultItem.showFinish() 只在 is_finish_reward / is_max_star_reward
+    # 为真时画奖励块，并读 cur_star 画星；这两个标志原来从来没发过。
+    from pet_hunter_server import app as A
+
+    table = config_tables._table("exploreMap.txt")
+    gid = sorted(int(k) for k in table)[0]
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "FinFlag")
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    _prime_explore_completion(database, gid)
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 1)
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert payload["is_finish"] == 1
+    assert payload["cur_star"] == 5, "3 场战斗通关 = 4 天，应给 5 星"
+    assert payload["is_finish_reward"] == 1
+    assert payload["is_max_star_reward"] == 1
+
+    # 满星奖励的道具也要真的进背包（原来只画在面板上）。
+    with sqlite3.connect(database) as connection:
+        quantity = connection.execute(
+            "SELECT quantity FROM inventory WHERE player_id=1 AND item_id=10504"
+        ).fetchone()[0]
+        star_best, pass_claimed = connection.execute(
+            "SELECT star_best, pass_claimed FROM explore_progress WHERE player_id=1 AND map_id=?",
+            (gid,),
+        ).fetchone()
+        trip = connection.execute(
+            "SELECT energy, supply, days FROM explore_progress WHERE player_id=1 AND map_id=?",
+            (gid,),
+        ).fetchone()
+    assert quantity >= 3
+    assert (star_best, pass_claimed) == (5, 1)
+    assert trip == (0, 0, 0), "行程结束后体力/补给/天数清零，下次重新开始"
+
+    # 再打一次：通关标志仍在，但奖励不能重复发。
+    command, again = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert again["is_finish"] == 1
+    assert again["is_finish_reward"] == 0
+    assert again["is_max_star_reward"] == 0
+
+
+def test_explore_rest_event_can_finish_the_map_and_pay(tmp_path: Path, monkeypatch):
+    # 休整也给一半发现率，所以"最后一场是城镇/温泉"也可能通关；原实现只把
+    # pass_claimed 置 1，却不发通关奖励，玩家的奖励被永久吞掉。
+    from pet_hunter_server import app as A
+
+    table = config_tables._table("exploreMap.txt")
+    gid = sorted(int(k) for k in table)[0]
+    need = int(table[gid]["needDiscoverRate"])
+    half_gain = max(1, A._explore_discover_gain(need) // 2)
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "RestFin")
+    _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO explore_progress (player_id, map_id, discover_rate)"
+            " VALUES (1, ?, ?)", (gid, need - half_gain)
+        )
+        connection.commit()
+
+    monkeypatch.setattr(A, "_explore_roll_event", lambda map_id: 2)
+    command, payload = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert command == 103
+    assert payload["event_type"] == 2
+    assert payload["is_finish"] == 1
+    assert payload["is_finish_reward"] == 1, "rest event must not swallow the pass reward"
+    with sqlite3.connect(database) as connection:
+        pass_claimed = connection.execute(
+            "SELECT pass_claimed FROM explore_progress WHERE player_id=1 AND map_id=?",
+            (gid,),
+        ).fetchone()[0]
+    assert pass_claimed == 1
+
+
 def test_explore_grants_equipment_rewards_into_the_bag(tmp_path: Path):
     # Map 13's pass reward is equipment 50001, which lives in equip.txt rather than
     # prop.txt. inventory is UNIQUE(player_id, item_id), so a repeat drop has to
@@ -3911,30 +4136,34 @@ def test_explore_hire_list_only_lists_what_is_rented(tmp_path: Path):
     rentable = sorted(i for i in ids if str(table[i].get("type", "")).strip() == "1")
     assert rentable, "exploreEquip needs at least one type=1 mount"
 
-    command, empty = _envelope(
+    command, starter = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid, "ttype": 1, "p": 1, "n": 9})
     )
     assert command == 104
-    assert empty["type"] == 1
-    assert empty["max_equip_count"] >= 1
-    assert empty["list"] == [], "nothing is hired yet, so nothing may be listed"
-    assert empty["equip_count"] == 0
+    assert starter["type"] == 1
+    assert starter["max_equip_count"] >= 1
+    # 新角色只带创建时发的那只免费坐骑；列表必须来自 explore_rented，
+    # 而不是整张 exploreEquip 目录。
+    assert starter["list"] == [{"id": 100001, "type": 1}]
+    assert starter["equip_count"] == 1
 
     with sqlite3.connect(database) as connection:
         player_id = connection.execute(
             "SELECT id FROM players WHERE uid = ?", (uid,)
         ).fetchone()[0]
+        second = next(m for m in rentable if m != 100001)
         connection.execute(
             "INSERT INTO explore_rented (player_id, equip_id, slot_type) VALUES (?,?,1)",
-            (player_id, rentable[0]),
+            (player_id, second),
         )
         connection.commit()
 
     _, hired = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "104", "uid": uid, "ttype": 1, "p": 1, "n": 9})
     )
-    assert hired["list"] == [{"id": rentable[0], "type": 1}]
-    assert hired["equip_count"] == 1
+    # 最新租的排第一：HireMountsUI.as:204 只把 list[0] 当"当前坐骑"。
+    assert hired["list"] == [{"id": second, "type": 1}, {"id": 100001, "type": 1}]
+    assert hired["equip_count"] == 2
 
 
 def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Path):

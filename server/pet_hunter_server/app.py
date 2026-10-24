@@ -755,6 +755,11 @@ def _initialize_database(database_path: Path) -> None:
                 -- 历史最佳星级（0-5）与通关奖励是否已领
                 star_best INTEGER NOT NULL DEFAULT 0,
                 pass_claimed INTEGER NOT NULL DEFAULT 0,
+                -- 一次行程的剩余体力/补给与已过天数；行程结束后清零，下次重新
+                -- 按当前租赁装备的加成初始化（见 _explore_trip）。
+                energy INTEGER NOT NULL DEFAULT 0,
+                supply INTEGER NOT NULL DEFAULT 0,
+                days INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (player_id, map_id)
             )
             """
@@ -774,6 +779,9 @@ def _initialize_database(database_path: Path) -> None:
         for column, ddl in (
             ("star_best", "star_best INTEGER NOT NULL DEFAULT 0"),
             ("pass_claimed", "pass_claimed INTEGER NOT NULL DEFAULT 0"),
+            ("energy", "energy INTEGER NOT NULL DEFAULT 0"),
+            ("supply", "supply INTEGER NOT NULL DEFAULT 0"),
+            ("days", "days INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in existing:
                 connection.execute(f"ALTER TABLE explore_progress ADD COLUMN {ddl}")
@@ -868,23 +876,9 @@ def _initialize_database(database_path: Path) -> None:
                 connection.execute(
                     "UPDATE pets SET buffs=? WHERE id=?", (seeded, pet["id"])
                 )
-        # 坐骑: every character gets one free mount so the expedition page has
-        # something to show and rent. Without a rental row, command 104 answers an
-        # empty list and the mount screen is a dead end (its shop branch is only
-        # reachable with a non-empty list). Renting another mount later switches the
-        # active one — `_explore_horse` prefers the newest rental.
-        if LOCAL_STARTER_MOUNT_ID in config_tables._table("exploreEquip.txt"):
-            for player in connection.execute("SELECT id FROM players").fetchall():
-                has_mount = connection.execute(
-                    "SELECT 1 FROM explore_rented WHERE player_id=? AND slot_type=1",
-                    (player["id"],),
-                ).fetchone()
-                if has_mount is None:
-                    connection.execute(
-                        "INSERT OR IGNORE INTO explore_rented"
-                        " (player_id, equip_id, slot_type) VALUES (?, ?, 1)",
-                        (player["id"], LOCAL_STARTER_MOUNT_ID),
-                    )
+        # 坐骑：只在创建角色时发一只免费的驴（见 _insert_starter_mount）。
+        # 这里**不能**给已有角色补发：玩家要求"清空已拥有坐骑、从零试租赁"时，
+        # 每次重启都补回 100001 会让清空永远失效。
 
 
 def _password_hash(password: str, salt: bytes) -> bytes:
@@ -1050,6 +1044,30 @@ def _insert_starter_equipment(
     return added
 
 
+def _insert_starter_mount(connection: sqlite3.Connection, player_id: int) -> int:
+    """Give a brand-new character the free 驴 mount.
+
+    This used to run for every existing character on each server boot, which made
+    "delete the mounts I own" impossible: the next start re-inserted 100001. The
+    mount page handles an empty rental list (it shows clip_wand and the patched
+    hotspot opens the shop), so only new characters need the freebie.
+    """
+    if LOCAL_STARTER_MOUNT_ID not in config_tables._table("exploreEquip.txt"):
+        return 0
+    existing = connection.execute(
+        "SELECT 1 FROM explore_rented WHERE player_id=? AND slot_type=1",
+        (player_id,),
+    ).fetchone()
+    if existing is not None:
+        return 0
+    cursor = connection.execute(
+        "INSERT OR IGNORE INTO explore_rented (player_id, equip_id, slot_type)"
+        " VALUES (?, ?, 1)",
+        (player_id, LOCAL_STARTER_MOUNT_ID),
+    )
+    return cursor.rowcount
+
+
 def grant_starter_equipment(database_path: Path) -> int:
     """Backfill the local starter equipment for every character that lacks it."""
     _initialize_database(database_path)
@@ -1127,6 +1145,7 @@ def _register_account_player(database_path: Path) -> Response:
             )
             _insert_starter_pets(connection, cursor.lastrowid)
             _insert_starter_equipment(connection, cursor.lastrowid, sex)
+            _insert_starter_mount(connection, cursor.lastrowid)
             player = {"uid": uid}
     return _protocol_response(4098, {"value": player["uid"]})
 
@@ -1155,6 +1174,7 @@ def _auto_register_player(database_path: Path) -> Response:
             )
             _insert_starter_pets(connection, cursor.lastrowid)
             _insert_starter_equipment(connection, cursor.lastrowid, sex)
+            _insert_starter_mount(connection, cursor.lastrowid)
             player = {"uid": uid}
     return _protocol_response(4099, {"value": player["uid"]})
 
@@ -2145,6 +2165,43 @@ LOCAL_EXPLORE_RUNS_PER_MAP = 3
 
 # 装备租赁默认开通的槽位（LOCAL DESIGN）。上限 9 对应客户端 3x3 网格。
 LOCAL_EXPLORE_DEFAULT_SLOTS = 3
+
+# 探险行程资源（LOCAL DESIGN）。exploreEquip 的加成写作 "+400体力 / +200补给"
+# 与 "40% / 20% 伤害免疫"（effect 4000 = 40.00%），都按基础 1000 的百分之一为
+# 单位；所以基础体力/补给取 1000。以下消耗/恢复同样是本地数值，可单独调整。
+LOCAL_EXPLORE_BASE_ENERGY = 1000
+LOCAL_EXPLORE_BASE_SUPPLY = 1000
+LOCAL_EXPLORE_BATTLE_ENERGY = 100
+LOCAL_EXPLORE_BATTLE_SUPPLY = 50
+LOCAL_EXPLORE_REST_ENERGY = 200
+LOCAL_EXPLORE_REST_SUPPLY = 200
+LOCAL_EXPLORE_DISASTER_ENERGY = 300
+LOCAL_EXPLORE_DISASTER_SUPPLY = 300
+
+# exploreMap.txt 的 events 只用 6/7 两个"灾难"槽位，而客户端为 6-13 各备了
+# 一句文案、一张背景和一段音效（GameUtil.getExploreEvent:482），exploreEquip
+# 也按 6-13 成组提供"伤害免疫"装备（effectType 与该类型同号），说明不同地区
+# 遇到的灾害不同（help.txt:19「要根据地图的地形和灾害来租赁坐骑和装备」）。
+# 具体对应关系在配置表里没有存，这里是按地区主题与装备备注推断的 LOCAL DEFAULT：
+# 主灾害 = 6 号槽位，次灾害 = 7 号槽位；只有 6 号槽位的地图不会出现次灾害。
+LOCAL_EXPLORE_DISASTERS_BY_WORLD = {
+    1: (6, 12),    # 樱花之岛：暴雨 / 台风
+    2: (7, 6),     # 神龙之国：洪水 / 暴雨
+    3: (8, 6),     # 神圣之国：火山 / 暴雨
+    4: (10, 13),   # 沙丘之国：沙尘暴 / 疾病
+    5: (11, 13),   # 狂野之国：龙卷风 / 疾病
+    6: (12, 7),    # 棕榈群岛：台风 / 洪水
+    7: (11, 6),    # 星辰之国：龙卷风 / 暴雨
+    8: (13, 8),    # 神鹰之国：疾病 / 火山
+    9: (9, 13),    # 冰川大陆：暴风雪 / 疾病
+}
+# 休整类事件：城镇(2) / 温泉(3) / 大餐(4) / 绿洲(5)。4 号在客户端没有文案
+# （getExploreEvent 没有 case 4），但有专属背景 map_event_4，且画面就是宴席，
+# 因此按"休整"处理，而不是当成灾难把进度吞掉。
+LOCAL_EXPLORE_REST_EVENTS = (2, 3, 4, 5)
+# 星级按天数评价（help.txt:19「完成探险用的时间越少，评价就越高」）。
+# 一次行程从第 1 天开始，每次事件 +1 天；三场战斗通关 = 4 天。
+LOCAL_EXPLORE_STAR_DAYS = ((4, 5), (6, 4), (9, 3), (12, 2))  # (天数上限, 星级)
 
 
 def _explore_discover_gain(need_rate: int) -> int:
@@ -3438,6 +3495,248 @@ def _reward_block(point: int, crystal: int, goods) -> dict:
     }
 
 
+def _explore_equipped(connection, player_id: int) -> list[dict]:
+    """This trip's effective explore gear.
+
+    坐骑（slot_type=1）可以拥有多只，但只有最新租的那只算"在用"（与
+    _explore_horse 同一口径）；探险装备（slot_type=2）全部生效。
+    """
+    rows = connection.execute(
+        "SELECT id, equip_id, slot_type FROM explore_rented WHERE player_id=?"
+        " ORDER BY slot_type, id",
+        (player_id,),
+    ).fetchall()
+    active_mount = None
+    for row in rows:
+        if int(row["slot_type"]) == 1:
+            active_mount = int(row["id"])
+    return [
+        dict(row)
+        for row in rows
+        if int(row["slot_type"]) == 1 and int(row["id"]) == active_mount
+        or int(row["slot_type"]) != 1
+    ]
+
+
+def _explore_equip_bonus(connection, player_id: int, effect_type: int, terrain: int = 0) -> int:
+    """Rented explore gear's summed effect for one effectType.
+
+    exploreEquip.effectType: 1 体力 / 2 补给 / 3 发现 / 6-13 对应灾害的伤害免疫
+    （effect 4000 = 40.00%）。坐骑的 effect 是 "25:10:10:10:10" 这种按地形
+    1-5 各一档的写法，装备则是单值。
+    """
+    table = config_tables._table("exploreEquip.txt")
+    total = 0
+    for row in _explore_equipped(connection, player_id):
+        record = table.get(int(row["equip_id"])) or {}
+        raw_type = str(record.get("effectType", "") or "").strip()
+        if not raw_type.lstrip("-").isdigit() or int(raw_type) != effect_type:
+            continue
+        parts = [part.strip() for part in str(record.get("effect", "") or "").split(":")]
+        if len(parts) == 5 and 1 <= terrain <= 5:
+            parts = [parts[terrain - 1]]
+        if parts and parts[0].lstrip("-").isdigit():
+            total += int(parts[0])
+    return total
+
+
+def _explore_immunity(connection, player_id: int, disaster_type: int) -> float:
+    """该灾害的伤害减免比例（0.40 = 40%）。多件相加，最多 100%。"""
+    percent = _explore_equip_bonus(connection, player_id, disaster_type)
+    return min(1.0, max(0.0, percent / 10000.0))
+
+
+def _explore_disaster_for(world: int, slot_type: int) -> int:
+    """把 events 的 6/7 灾难槽位换成该地区的具体灾害（客户端 6-13 都有素材）。"""
+    primary, secondary = LOCAL_EXPLORE_DISASTERS_BY_WORLD.get(int(world or 1), (6, 7))
+    return primary if int(slot_type) == 6 else secondary
+
+
+def _explore_star_for_days(days: int) -> int:
+    for limit, star in LOCAL_EXPLORE_STAR_DAYS:
+        if days <= limit:
+            return star
+    return 1
+
+
+def _explore_trip(connection, player_id: int, gid: int, terrain: int) -> dict:
+    """Read (and lazily start) the expedition's energy/supply/day state.
+
+    上限 = 基础值 + 当前租赁装备的加成；一次行程从第 1 天开始。行程结束后
+    _explore_complete 会把三列清零，下次进来按最新装备重新初始化。
+    """
+    max_energy = LOCAL_EXPLORE_BASE_ENERGY + _explore_equip_bonus(connection, player_id, 1, terrain)
+    max_supply = LOCAL_EXPLORE_BASE_SUPPLY + _explore_equip_bonus(connection, player_id, 2, terrain)
+    row = connection.execute(
+        "SELECT energy, supply, days FROM explore_progress WHERE player_id=? AND map_id=?",
+        (player_id, gid),
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO explore_progress (player_id, map_id, discover_rate, energy, supply, days)"
+            " VALUES (?, ?, 0, ?, ?, 1)",
+            (player_id, gid, max_energy, max_supply),
+        )
+        return {"energy": max_energy, "supply": max_supply, "days": 1,
+                "max_energy": max_energy, "max_supply": max_supply}
+    if int(row["days"] or 0) <= 0:
+        connection.execute(
+            "UPDATE explore_progress SET energy=?, supply=?, days=1"
+            " WHERE player_id=? AND map_id=?",
+            (max_energy, max_supply, player_id, gid),
+        )
+        return {"energy": max_energy, "supply": max_supply, "days": 1,
+                "max_energy": max_energy, "max_supply": max_supply}
+    return {
+        "energy": min(int(row["energy"] or 0), max_energy),
+        "supply": min(int(row["supply"] or 0), max_supply),
+        "days": int(row["days"] or 0),
+        "max_energy": max_energy,
+        "max_supply": max_supply,
+    }
+
+
+def _explore_apply_trip(connection, player_id: int, gid: int, trip: dict,
+                        kind: str, disaster_type: int = 0) -> dict:
+    """Apply one event's resource change and persist it.
+
+    kind: battle / rest / disaster / none. 客户端的 HUD 用
+    `energy + cost_energy - add_energy`、`days - add_discover_days` 反推事件前的
+    数值，结果面板显示 cost/add 增量，所以这里报事件后的值 + 增量。
+    """
+    energy, supply = int(trip["energy"]), int(trip["supply"])
+    cost_energy = cost_supply = add_energy = add_supply = 0
+    if kind == "battle":
+        cost_energy = min(energy, LOCAL_EXPLORE_BATTLE_ENERGY)
+        cost_supply = min(supply, LOCAL_EXPLORE_BATTLE_SUPPLY)
+        energy -= cost_energy
+        supply -= cost_supply
+    elif kind == "rest":
+        add_energy = min(trip["max_energy"] - energy, LOCAL_EXPLORE_REST_ENERGY)
+        add_supply = min(trip["max_supply"] - supply, LOCAL_EXPLORE_REST_SUPPLY)
+        energy += add_energy
+        supply += add_supply
+    elif kind == "disaster":
+        immunity = _explore_immunity(connection, player_id, disaster_type)
+        cost_energy = min(energy, int(round(LOCAL_EXPLORE_DISASTER_ENERGY * (1 - immunity))))
+        cost_supply = min(supply, int(round(LOCAL_EXPLORE_DISASTER_SUPPLY * (1 - immunity))))
+        energy -= cost_energy
+        supply -= cost_supply
+        # 设备上只看到一张灾害背景图，留一条可 grep 的记录证明服务端确实按地区
+        # 选了 6-13 里的哪一种、以及免疫装备减了多少。
+        current_app.logger.info(
+            "EXPLORE_DISASTER type=%s immunity=%.0f%% cost(energy=%s supply=%s)",
+            disaster_type, immunity * 100, cost_energy, cost_supply,
+        )
+    days = int(trip["days"]) + 1
+    connection.execute(
+        "UPDATE explore_progress SET energy=?, supply=?, days=?"
+        " WHERE player_id=? AND map_id=?",
+        (energy, supply, days, player_id, gid),
+    )
+    return {
+        "energy": energy, "supply": supply, "days": days,
+        "cost_energy": cost_energy, "add_energy": add_energy,
+        "cost_supply": cost_supply, "add_supply": add_supply,
+        "is_tired": 1 if energy <= 0 or supply <= 0 else 0,
+    }
+
+
+def _explore_gain(connection, player_id: int, terrain: int, need_rate: int, half: bool) -> int:
+    """一次事件的发现率增量：基础值 + 坐骑（按地形）/装备的发现加成。"""
+    gain = _explore_discover_gain(need_rate) + _explore_equip_bonus(
+        connection, player_id, 3, terrain
+    )
+    return max(1, gain // 2) if half else max(1, gain)
+
+
+def _explore_grant_rewards(connection, player, goods_string: str) -> list[dict]:
+    """Grant exploreMap reward goods (`kind:id:icon:num`) and return panel rows."""
+    parsed = _parse_map_goods(goods_string)
+    items = [(gid, num, icon) for kind, gid, num, icon in parsed if kind == 1]
+    granted = _grant_goods(connection, player["id"], items) if items else []
+    # kind 3 registers a picture-book entry; kind 2 is a pet reward.
+    pic_gifts = [gid for kind, gid, _num, _icon in parsed if kind == 3]
+    if pic_gifts:
+        _unlock_pic(connection, player["id"], pic_gifts)
+        granted = granted + [{"id": gid, "num": 1} for gid in pic_gifts]
+    pet_gifts = [(gid, num) for kind, gid, num, _icon in parsed if kind == 2]
+    if pet_gifts:
+        capacity = connection.execute(
+            "SELECT pet_capacity FROM players WHERE id=?", (player["id"],)
+        ).fetchone()[0]
+        held = connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
+        ).fetchone()[0]
+        pets_table = config_tables._table("pet.txt")
+        for gid, num in pet_gifts:
+            if gid not in pets_table:
+                continue
+            for _ in range(num):
+                if held >= capacity:
+                    break
+                connection.execute(
+                    """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation)
+                       VALUES (?,?,1,?,1,?,?,1)""",
+                    (player["id"], gid,
+                     int(str(pets_table[gid].get("star", "1") or 1).strip() or 1),
+                     gid, str(pets_table[gid].get("skills", "") or "").strip() or "101:5101"),
+                )
+                held += 1
+        granted = granted + [{"id": gid, "num": num} for gid, num in pet_gifts]
+    return granted
+
+
+def _explore_complete(connection, player, m, gid: int, *, rate_after: int,
+                      gain: int, applied: dict, elite_mult: int = 1) -> dict:
+    """Settle "this event finished the map": pay each reward once, rate, reset trip."""
+    need = int(m["need_discover_rate"] or 0)
+    progress = connection.execute(
+        "SELECT star_best, pass_claimed FROM explore_progress"
+        " WHERE player_id=? AND map_id=?",
+        (player["id"], gid),
+    ).fetchone()
+    star_best = int(progress["star_best"] or 0) if progress else 0
+    pass_claimed = int(progress["pass_claimed"] or 0) if progress else 0
+    done = gain > 0 and rate_after >= need
+    star_now = _explore_star_for_days(int(applied["days"])) if done else 0
+    pay_pass = done and not pass_claimed
+    pay_star = done and star_now == 5 and star_best < 5
+    point = crystal = star_point = star_crystal = 0
+    pass_goods: list[dict] = []
+    max_goods: list[dict] = []
+    if pay_pass:
+        point = (int(m["pass_reward_point"] or 0) + LOCAL_EXPLORE_BONUS_POINT) * elite_mult
+        crystal = int(m["pass_reward_crystal"] or 0) * elite_mult
+        _credit_battle_rewards(connection, player["id"], point=point, crystal=crystal)
+        pass_goods = _explore_grant_rewards(connection, player, m["pass_reward_goods"])
+    if pay_star:
+        star_point = int(m["max_reward_point"] or 0)
+        star_crystal = int(m["max_reward_crystal"] or 0)
+        _credit_battle_rewards(connection, player["id"],
+                               point=star_point, crystal=star_crystal)
+        max_goods = _explore_grant_rewards(connection, player, m["max_reward_goods"])
+    if done:
+        connection.execute(
+            "UPDATE explore_progress SET star_best=?, pass_claimed=?,"
+            " energy=0, supply=0, days=0 WHERE player_id=? AND map_id=?",
+            (max(star_best, star_now), 1 if (pass_claimed or pay_pass) else 0,
+             player["id"], gid),
+        )
+    return {
+        "is_finish": 1 if done else 0,
+        "cur_star": star_now,
+        "is_finish_reward": 1 if pay_pass else 0,
+        "is_max_star_reward": 1 if pay_star else 0,
+        "finish_reward": _reward_block(
+            point, crystal, [(e["id"], e["num"]) for e in pass_goods]
+        ),
+        "max_star_reward": _reward_block(
+            star_point, star_crystal, [(e["id"], e["num"]) for e in max_goods]
+        ),
+    }
+
+
 def _explore_start(database_path: Path) -> Response:
     """103 (EXPLORE_KEY) — the expedition battle.
 
@@ -3450,9 +3749,8 @@ def _explore_start(database_path: Path) -> Response:
     is_win/hunt_type/map_id/monster_group/att_list/def_list/record contract as the
     hunt screen, so the shared battle builder applies.
     """
-    # 非战斗事件（城镇/温泉/绿洲/灾难）不打架，但会让这一天过去：
+    # 非战斗事件（城镇/温泉/大餐/绿洲/灾害）不打架，但会让这一天过去：
     # ExploreEventResultUI 显示文案后会自动再发一次 103（或回地图列表）。
-    non_battle = _request_value("ttype") != "1"
     gid_value=_request_value("gid")
     uid=_request_value("uid")
     try:
@@ -3493,12 +3791,24 @@ def _explore_start(database_path: Path) -> Response:
             _explore_reference_level(gid),
             int(squad_lv) + LOCAL_HUNT_LEVEL_BAND,
         )
+        terrain = int(m["terrain"] or 1)
+        need_rate = int(m["need_discover_rate"] or 0)
+        horse = _explore_horse(database_path, p["id"])
         event_type = _explore_roll_event(gid)
+        trip = _explore_trip(c, p["id"], gid, terrain)
         if event_type != 1:
-            # 休整（2 城镇 / 3 温泉 / 5 绿洲）给一半发现率；灾难（6-12）无进展。
-            rest = event_type in (2, 3, 5)
-            gain = _explore_discover_gain(int(m["need_discover_rate"] or 0))
-            gain = max(1, gain // 2) if rest else 0
+            # 休整（2 城镇 / 3 温泉 / 4 大餐 / 5 绿洲）回体力补给、给一半发现率；
+            # 灾难（6/7 槽位）按地区换成 6-13 的具体灾害，扣体力补给、无进展。
+            disaster = event_type in (6, 7)
+            rest = event_type in LOCAL_EXPLORE_REST_EVENTS
+            if disaster:
+                event_type = _explore_disaster_for(m["world"], event_type)
+            applied = _explore_apply_trip(
+                c, p["id"], gid, trip,
+                "disaster" if disaster else ("rest" if rest else "none"),
+                event_type if disaster else 0,
+            )
+            gain = _explore_gain(c, p["id"], terrain, need_rate, half=True) if rest else 0
             if gain:
                 c.execute(
                     "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
@@ -3506,35 +3816,38 @@ def _explore_start(database_path: Path) -> Response:
                     " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
                     (p["id"], gid, gain),
                 )
-            row = c.execute(
+            progress = c.execute(
                 "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
                 (p["id"], gid),
             ).fetchone()
-            rate_now = int(row["discover_rate"] or 0) if row else 0
-            done = rate_now >= int(m["need_discover_rate"] or 0)
-            if done:
-                c.execute(
-                    "UPDATE explore_progress SET pass_claimed=1, star_best=5"
-                    " WHERE player_id=? AND map_id=?", (p["id"], gid))
+            rate_now = int(progress["discover_rate"] or 0) if progress else 0
+            completion = _explore_complete(
+                c, p, m, gid, rate_after=rate_now, gain=gain, applied=applied
+            )
             return _protocol_response(103, {
                 "value": "ok",
                 "event_type": event_type,
                 "world": m["world"], "world_id": m["world"],
-                "is_tired": 0,
-                "is_finish": 1 if done else 0,
+                "is_tired": applied["is_tired"],
+                "is_finish": completion["is_finish"],
                 "explore_ap": explore_ap, "max_explore_ap": max_explore_ap,
                 "now_discover_rate": rate_now, "add_discover_rate": gain,
                 "need_discover_rate": m["need_discover_rate"],
-                "energy": _pet_energy(_explore_lead_species(c, p["id"])),
-                "cost_energy": 0, "add_energy": 0,
-                "supply": 0, "cost_supply": 0, "add_supply": 0,
-                "discover_days": 1, "add_discover_days": 1 if rest else 0,
-                "terrain": m["terrain"],
-                "horse": _explore_horse(database_path, p["id"]),
-                "finish_reward": _reward_block(0, 0, []),
-                "max_star_reward": _reward_block(0, 0, []),
+                "energy": applied["energy"],
+                "cost_energy": applied["cost_energy"], "add_energy": applied["add_energy"],
+                "supply": applied["supply"],
+                "cost_supply": applied["cost_supply"], "add_supply": applied["add_supply"],
+                "discover_days": applied["days"], "add_discover_days": 1,
+                "terrain": terrain, "horse": horse,
+                "cur_star": completion["cur_star"],
+                "is_finish_reward": completion["is_finish_reward"],
+                "is_max_star_reward": completion["is_max_star_reward"],
+                "finish_reward": completion["finish_reward"],
+                "max_star_reward": completion["max_star_reward"],
+                # ExploreEventResultUI 只在 surprise_rate>1 时画好运/厄运。
+                "surprise_rate": 0,
             })
-        defenders = _defenders_for_level(1, reference_lv, terrain=m["terrain"])
+        defenders = _defenders_for_level(1, reference_lv, terrain=terrain)
         if not defenders:
             # 该地形在等级带内没有合适属性的怪，回退到不筛地形，避免空战斗。
             defenders = _defenders_for_level(1, reference_lv)
@@ -3560,67 +3873,27 @@ def _explore_start(database_path: Path) -> Response:
         )
         record = _battle_record(att_list, def_list, combat)
         is_win = _record_is_win(record)
+        applied = _explore_apply_trip(c, p["id"], gid, trip, "battle")
         # REAL rewards from exploreMap.txt's passReward* columns (the earlier
         # implementation paid a flat LOCAL_EXPLORE_REWARD and no items at all).
         elite_mult = LOCAL_ELITE_REWARD_MULT if elite_fight else 1
         # 配置表里 passReward* 是"打通这张图"的奖励，不是"每场战斗"的奖励。
-        # 原来每赢一场就发一次，导致每次结算都弹通关奖励。
-        need_rate = int(m["need_discover_rate"] or 0)
-        gain = _explore_discover_gain(need_rate)
-        before_row = c.execute(
-            "SELECT discover_rate, star_best, pass_claimed FROM explore_progress"
-            " WHERE player_id=? AND map_id=?", (p["id"], gid)).fetchone()
-        rate_before = int(before_row["discover_rate"] or 0) if before_row else 0
-        star_best = int(before_row["star_best"] or 0) if before_row else 0
-        pass_claimed = int(before_row["pass_claimed"] or 0) if before_row else 0
-        # 这一场是否把发现率打满 = 这张图通关
-        done_now = is_win and (rate_before + gain) >= need_rate
-        pay_pass = done_now and not pass_claimed
-        pay_star = done_now and star_best < 5
-        reward_point = (m["pass_reward_point"] + LOCAL_EXPLORE_BONUS_POINT) * elite_mult if pay_pass else 0
-        reward_crystal = m["pass_reward_crystal"] * elite_mult if pay_pass else 0
-        parsed_goods = _parse_map_goods(m["pass_reward_goods"]) if pay_pass else []
-        reward_goods = _grant_goods(
-            c, p["id"],
-            [(gid, num, icon) for kind, gid, num, icon in parsed_goods if kind == 1],
-        )
-        # kind 2 is a pet reward; kind 3 registers a picture-book entry (no item row).
-        pic_gifts = [gid for kind, gid, _num, _icon in parsed_goods if kind == 3]
-        if pic_gifts:
-            _unlock_pic(c, p["id"], pic_gifts)
-            reward_goods = reward_goods + [{"id": gid, "num": 1} for gid in pic_gifts]
-        gifted_pets = [(gid, num) for kind, gid, num, _icon in parsed_goods if kind == 2]
-        if gifted_pets:
-            capacity = c.execute(
-                "SELECT pet_capacity FROM players WHERE id=?", (p["id"],)
-            ).fetchone()[0]
-            held = c.execute(
-                "SELECT COUNT(*) FROM pets WHERE player_id=?", (p["id"],)
-            ).fetchone()[0]
-            pets_table = config_tables._table("pet.txt")
-            for gid, num in gifted_pets:
-                if gid not in pets_table:
-                    continue
-                for _ in range(num):
-                    if held >= capacity:
-                        break
-                    c.execute(
-                        """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills, generation)
-                           VALUES (?,?,1,?,1,?,?,1)""",
-                        (p["id"], gid, int(str(pets_table[gid].get("star", "1") or 1).strip() or 1),
-                         gid, str(pets_table[gid].get("skills", "") or "").strip() or "101:5101"),
-                    )
-                    held += 1
-            reward_goods = reward_goods + [{"id": gid, "num": num} for gid, num in gifted_pets]
-        _credit_battle_rewards(c, p["id"], point=reward_point, crystal=reward_crystal)
+        gain = _explore_gain(c, p["id"], terrain, need_rate, half=False) if is_win else 0
+        # 发现率必须落地：配置表用 needDiscoverRate 决定下一张图能否解锁，
+        # 而这个值原来恒为 0，导致永远停在第一张图。
+        if gain:
+            c.execute(
+                "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
+                " VALUES (?, ?, ?) ON CONFLICT(player_id, map_id)"
+                " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
+                (p["id"], gid, gain),
+            )
         # Expedition battles train the squad too, so exploring is a viable way to
         # level pets for evolution (LOCAL DEFAULT exp amount).
         explore_rows=[r for r in c.execute(
             "SELECT id, pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 ORDER BY id LIMIT 2",
             (p["id"],))]
         explore_pets=[r["id"] for r in explore_rows]
-        # _pet_energy takes the pet.txt SPECIES id, not the pets.id row id.
-        lead_species=int(explore_rows[0]["pet_id"]) if explore_rows else 0
         # A quarter of a level for the squad's own level (the old flat 300,000 was
         # 60 levels at lv1 on the new curve).
         squad_lv = c.execute(
@@ -3635,60 +3908,49 @@ def _explore_start(database_path: Path) -> Response:
             if is_win
             else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
         )
-        # 发现率必须落地：配置表用 needDiscoverRate 决定下一张图能否解锁，
-        # 而这个值原来恒为 0，导致永远停在第一张图。
-        if is_win:
-            c.execute(
-                "INSERT INTO explore_progress (player_id, map_id, discover_rate)"
-                " VALUES (?, ?, ?) ON CONFLICT(player_id, map_id)"
-                " DO UPDATE SET discover_rate = discover_rate + excluded.discover_rate",
-                (p["id"], gid, _explore_discover_gain(int(m.get("need_discover_rate") or 0))),
-            )
-        if done_now:
-            c.execute(
-                "UPDATE explore_progress SET pass_claimed=1, star_best=5"
-                " WHERE player_id=? AND map_id=?", (p["id"], gid))
-        progress_row = c.execute(
+        progress = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
             (p["id"], gid),
         ).fetchone()
-        now_rate = int(progress_row["discover_rate"] or 0) if progress_row else 0
-    add_rate = _explore_discover_gain(int(m.get("need_discover_rate") or 0)) if is_win else 0
-    horse=_explore_horse(database_path, p["id"])
+        now_rate = int(progress["discover_rate"] or 0) if progress else 0
+        completion = _explore_complete(
+            c, p, m, gid, rate_after=now_rate, gain=gain,
+            applied=applied, elite_mult=elite_mult,
+        )
+        # 通关奖励的商品也要进背包/图鉴（原来只画在结算面板上）。
+        reward_goods = completion["finish_reward"]["reward_goods"]
     return _protocol_response(103,{
         # ExploreUI.as:100 routes to the battle screen only when event_type == 1;
         # anything else (0 here previously) went to ExploreEventResultUI, which
         # never renders a fight, so the expedition silently produced a black page.
-        "value":"ok","event_type":_explore_event_type(gid),
+        "value":"ok","event_type":1,
         "world":m["world"],"world_id":m["world"],
-        "is_tired":0,
+        "is_tired":applied["is_tired"],
         # ExploreResultItem.as:109 用 is_finish 决定是否显示"结束行程"按钮；
         # 它是"这张图的行程结束"，不是"这一场赢了"。
-        "is_finish":1 if done_now else 0,"explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
-        "now_discover_rate":now_rate,"add_discover_rate":add_rate,
+        "is_finish":completion["is_finish"],
+        "explore_ap":explore_ap,"max_explore_ap":max_explore_ap,
+        "now_discover_rate":now_rate,"add_discover_rate":gain,
         "need_discover_rate":m["need_discover_rate"],
-        "energy":_pet_energy(lead_species),"cost_energy":0,"add_energy":0,
-        "supply":0,"cost_supply":0,"add_supply":0,
-        "discover_days":1,"add_discover_days":0,
+        "energy":applied["energy"],
+        "cost_energy":applied["cost_energy"],"add_energy":applied["add_energy"],
+        "supply":applied["supply"],
+        "cost_supply":applied["cost_supply"],"add_supply":applied["add_supply"],
+        "discover_days":applied["days"],"add_discover_days":1,
         # ExploreUI.as:167-168 does getDefinition("map_terrain_" + terrain) with no
         # guard, and map.swf only ships map_terrain_1 / map_terrain_2. A zero here
         # throws and leaves the page on a black background with just the HUD icons.
-        "terrain":m["terrain"],
+        "terrain":terrain,
         # ExploreUI.as:182-190 looks up getDefinition("m" + horse); omitting the
         # field produced "mundefined" and threw right after the terrain lookup.
         "horse":horse,
-        # ExploreResultItem.as:447-540 renders these two boxes on the WIN panel.
-        "finish_reward":_reward_block(
-            reward_point, reward_crystal,
-            [(entry["id"], entry["num"]) for entry in reward_goods],
-        ),
-        # 满星（通关时剩余血量满）奖励：每张图只发一次。
-        "max_star_reward":_reward_block(
-            m["max_reward_point"] if pay_star else 0,
-            m["max_reward_crystal"] if pay_star else 0,
-            [(gid, num) for kind, gid, num, _icon in _parse_map_goods(m["max_reward_goods"])]
-            if pay_star else [],
-        ),
+        # 精英遭遇 = 客户端的"好运降临，本次探险的奖励加倍"（奖励确实 ×2）。
+        "surprise_rate":2 if elite_fight else 0,
+        "cur_star":completion["cur_star"],
+        "is_finish_reward":completion["is_finish_reward"],
+        "is_max_star_reward":completion["is_max_star_reward"],
+        "finish_reward":completion["finish_reward"],
+        "max_star_reward":completion["max_star_reward"],
         # ExplorePveUI.as:381-510 dereferences every field below without a guard.
         "battle_result":{
             "is_win":1 if is_win else 0,"hunt_type":1,"map_id":gid,
