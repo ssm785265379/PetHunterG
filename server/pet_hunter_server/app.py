@@ -2770,7 +2770,8 @@ def _explore_discover_gain(need_rate: int) -> int:
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
 
-LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
+# 图鉴目录以前是写死的 3 条（LOCAL_PICS），页面上只有 3 个格子。现在改由
+# pic.txt 全量驱动（见 _pic_catalogue），这里不再留常量。
 
 
 def _job_goods(raw: str) -> list[dict[str, int]]:
@@ -2895,26 +2896,115 @@ def _job_change(database_path: Path) -> Response:
     return _protocol_response(72, {"value": "ok", "job": job, "lv": new_lv})
 
 
+PIC_MAX_PAGE_SIZE = 60
+
+
+def _pic_catalogue(ttype: int) -> list[tuple[int, int]]:
+    """One 图鉴分页的 (pic_id, icon_id) 列表，按 pic.txt 的 sort 排。
+
+    pic.txt 才是图鉴的真目录（type 1 宠物 342 条 / 2 装备 936 / 3 道具 97 /
+    4 发现 42；另外 54 条 type=5 是坐骑，客户端没有对应分页，直接不列）。
+    上一版把图鉴写死成 3 条（LOCAL_PICS），页面上只有 3 个格子，所以用户看到
+    「图鉴没有了」。
+    """
+    rows: list[tuple[int, int, int]] = []
+    for raw_id, record in config_tables._table("pic.txt").items():
+        if int(str(record.get("type", "0") or 0).strip() or 0) != ttype:
+            continue
+        sort = int(str(record.get("sort", "0") or 0).strip() or 0)
+        raw_icon = str(record.get("iconId", "") or "").strip()
+        icon = int(raw_icon) if raw_icon.lstrip("-").isdigit() and int(raw_icon) > 0 else int(raw_id)
+        rows.append((sort, int(raw_id), icon))
+    rows.sort()
+    return [(pic_id, icon) for _sort, pic_id, icon in rows]
+
+
+def _pic_unlocked_ids(connection: sqlite3.Connection, player_id: int) -> set[int]:
+    return {
+        int(row[0])
+        for row in connection.execute(
+            "SELECT pic_id FROM pic_unlocked WHERE player_id=?", (player_id,)
+        )
+    }
+
+
 def _pic_list(database_path: Path) -> Response:
-    try: ttype=int(_request_value("ttype","1")); page=int(_request_value("p","1")); size=int(_request_value("n","9"))
-    except ValueError:return _pet_error(100)
-    if not 1<=ttype<=4 or page<1:return _pet_error(100)
-    ids=list(LOCAL_PICS); start=(page-1)*size
-    pics=[[i,LOCAL_PICS[i]["icon"],LOCAL_PICS[i]["reward"]] for i in ids[start:start+size]]
-    return _protocol_response(25,{"finish_rate":0,"pics":[{"index":x[0],"id":x[0],"icon":x[1],"is_reward":x[2]} for x in pics]})
+    """25 (PIC_LIST_INFO_KEY)：图鉴列表的一页。
+
+    IllustrationListUI.as:208-243 读 pics[].{id,icon,is_reward}，PicItem.as:120-128
+    在 `on`(=is_reward) 为 0 时把格子画灰并设 mouseEnabled=false，所以这里
+    is_reward 承载的是「是否已登记」；标题上的「完成度 n%」来自 finish_rate。
+    """
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if not 1 <= ttype <= 4 or page < 1:
+        return _pet_error(100)
+    size = max(1, min(size, PIC_MAX_PAGE_SIZE))
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        unlocked = _pic_unlocked_ids(c, player["id"])
+    catalogue = _pic_catalogue(ttype)
+    start = (page - 1) * size
+    pics = [
+        {
+            "index": start + offset,
+            "id": pic_id,
+            "icon": icon,
+            "is_reward": 1 if pic_id in unlocked else 0,
+        }
+        for offset, (pic_id, icon) in enumerate(catalogue[start : start + size])
+    ]
+    total = len(catalogue)
+    owned = sum(1 for pic_id, _icon in catalogue if pic_id in unlocked)
+    if not total:
+        finish_rate = 0
+    elif owned:
+        # 342 条里解锁 1 条 = 0.29%，四舍五入会显示 0%，看起来像"没生效"。
+        finish_rate = max(1, int(round(owned * 100 / total)))
+    else:
+        finish_rate = 0
+    return _protocol_response(25, {"finish_rate": finish_rate, "pics": pics})
 
 
 def _pic_info(database_path: Path) -> Response:
-    try: gid=int(_request_value("gid",""))
-    except ValueError:return _pet_error(100)
-    if gid not in LOCAL_PICS:return _pet_error(506)
-    # IllustrationInfoUI.as:162 does getDefinition("p" + param2.icon) itself, so
-    # this must be a bare number; without it the detail page silently rendered no
-    # artwork (the failure is swallowed by a catch block).
-    record = config_tables._table("pic.txt").get(gid) or {}
+    """26 (PIC_INFO_KEY)：单条图鉴详情。
+
+    IllustrationInfoUI.as:162 does getDefinition("p" + param2.icon) itself, so
+    `icon` must be a bare number; without it the detail page silently rendered no
+    artwork (the failure is swallowed by a catch block). It also switches on
+    param2.type, which the 3-entry stub never sent.
+    """
+    try:
+        gid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    record = config_tables._table("pic.txt").get(gid)
+    if record is None:
+        return _pet_error(506)
     raw_icon = str(record.get("iconId", "") or "").strip()
     icon = int(raw_icon) if raw_icon.lstrip("-").isdigit() and int(raw_icon) > 0 else gid
-    return _protocol_response(26,{"id":gid,"icon":icon,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"icon":icon,"is_reward":LOCAL_PICS[gid]["reward"]}]})
+    try:
+        pic_type = int(str(record.get("type", "0") or 0).strip() or 0)
+    except ValueError:
+        pic_type = 0
+    uid = _request_value("uid")
+    unlocked = 0
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is not None:
+            unlocked = 1 if gid in _pic_unlocked_ids(c, player["id"]) else 0
+    entry = {"id": gid, "icon": icon, "type": pic_type, "is_reward": unlocked}
+    return _protocol_response(
+        26, {"id": gid, "icon": icon, "type": pic_type, "need_money": 0,
+             "is_reward": unlocked, "pics": [entry]}
+    )
 
 
 def _achievement_list(database_path: Path) -> Response:
