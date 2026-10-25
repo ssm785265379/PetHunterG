@@ -249,6 +249,34 @@ def all_props() -> list[dict[str, str]]:
     return list(prop_table().values())
 
 
+@lru_cache(maxsize=1)
+def up_role_table() -> dict[int, dict[str, str]]:
+    """The 120 hunter titles from upRole.txt, keyed by `job` (not `id`).
+
+    upRole.txt has no `id` column: its primary key is `job`, and the row also
+    carries `needLevel` (the level required to promote), `rewardGoods`
+    ("id:num,...") and `lowerLevel` (how many levels the promotion costs).
+    """
+    root = _config_root()
+    if root is None:
+        return {}
+    path = root / "zh-CN" / "config" / "upRole.txt"
+    if not path.is_file():
+        return {}
+    rows: dict[int, dict[str, str]] = {}
+    with path.open("r", encoding="utf-8-sig") as handle:
+        header = handle.readline().rstrip("\r\n").split("\t")
+        for line in handle:
+            line = line.rstrip("\r\n")
+            if not line:
+                continue
+            record = dict(zip(header, line.split("\t")))
+            raw = record.get("job", "").strip()
+            if raw.isdigit():
+                rows[int(raw)] = record
+    return rows
+
+
 def clear_caches() -> None:
-    for fn in (_equip_table, _prop_table, _skin_table, _table):
+    for fn in (_equip_table, _prop_table, _skin_table, up_role_table, _table):
         fn.cache_clear()
