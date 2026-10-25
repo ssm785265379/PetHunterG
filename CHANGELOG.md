@@ -4,6 +4,7 @@
 
 ## 2026-10-25
 
+- `6cdcdfc` 10-25 17:06 — merge: 擂台防守快照（`feat/squad-pets` `34d7895`）——新增 `player_loadouts`（`kind='arena_defense'`，只存 `inventory.id` / `pets.id`，不碰 `equipped` / `squad_slot`）；新增本地命令 **515 读防守配置 / 516 保存**（无快照回退 PvE 并标 `is_default=1`）；**37 扩展 `action=off&slot=1/2/3`**（旧语义不变）；快照项被卖/放生时该槽读空；506/24 暂不接快照（本地无真实 PvP，避免把"对手"显示成"自己"）；214 → **219 passed**
 - `954b4c6` 10-25 16:34 — merge: 铁匠 32/33/34 表驱动（`feat/blacksmith` `a356868`）——删掉手写配方表，改从 `equip.txt` 派生 6 件可打造装备（焚天/超级焚天 的武器·铠甲·头盔），产物属性/技能全读配置；费用 `ceil(money×10%)`（360/960），材料按档位取 `prop.txt` 11001–11009；32 加 `total` 并按槽位排序、33 补齐 `skills/buffs/need_goods[].own_num`、34 事务扣料扣钱入包并用 `ON CONFLICT` 累加；错误码 400/403/404/405/300；201 → **214 passed**
 - `566efb5` 10-25 16:22 — merge: PvE 出战宠统一（`feat/squad-pets` `28ffce0`）——6 狩猎 / 74 副本 / 103 探险统一按 `squad_slot` 选出战宠，无槽回退 id 最小两只；**24 擂台与 506 对手展示保持原样**（异步 PvP 的防守阵容不能被 PvE 换宠影响）；新增 3 条测试，198 → **201 passed**
 - `e497889` 10-25 16:10 — merge: 技能语义定稿（`docs/pet-combat-skill-semantics`）——技能=定长槽位**随机替换/重组**（满槽也替换，等级随条目走）、特性=集合**累加合并**；新增 §4.2.6「技能等级由星级决定，`level ≤ star` 405 只零越界，`skill.txt` 的 L13–15 宠物侧不可达」；新增 §2.6 原文可信度总表（help 8/10/11/13/14/17 逐条）
