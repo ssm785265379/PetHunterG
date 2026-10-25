@@ -581,13 +581,13 @@ R1..R20 每回合
 
 ### 4.6 技能栏 / 特性栏上限（v2 上调）
 
-| 项 | 公式 | 来源 | 3★gen1 | 3★gen196 | 12★gen196 |
+| 项 | 公式 | 来源 | 3★gen1 | 3★gen1500 | 12★gen1500 |
 |---|---|---|---|---|---|
 | 技能栏 | `3 + star//2 + gen//2`，cap 12 | 【码】`_skill_cap` | 4 | 12 | 12 |
 | 特性栏 | `min(30, isqrt(gen)+1)`，等级 cap **25** | 【表】`help` 10 + `skill.txt` | 2 | **30** | 25 |
 
 - 技能栏的 `star//2` 是【码】现有做法（`help` 只说"技能随机组合"，没给上限）。
-- 特性栏从 4 提到 15 是 v2 的主要改动（§3.6 的 196 就是从这里反推的）。
+- 特性栏从 4 提到 30 是 v3 的主要改动（§3.6：1500 代 = 30 条 × 等级 25；13 号面板每页 15 条）。
 
 ### 4.7 62/63/65 合成链
 
@@ -817,8 +817,8 @@ rating：Elo，K=16，新号 1000，上限 3000
 | 42/44/45 | 选宠/出战 | `_choose_pet_list`、`_choose_battle_pet` | 可加 `power`（客户端不读也无害） | P1 |
 | 5/505/9/10 | 编队/选宠/养成/训练 | `_hunter_task`、`_training_list`、`_training_detail`、`_training_action` | 训练仍加 `pro` 点数；9 号同时报"当前强化合计/上限 1009" | P1 |
 | 19/20/21 | 洗成长/洗性格/遗忘技能 | `_pet_flush_grow`、`_pet_flush_nature`、`_pet_forget_skill` | 19 号洗出的 `gw` 从此有战力；21 号禁止删到 0 条 | P1/P2 |
-| 62/63/65 | 合成 | `_pet_synthesis_pick`、`_pet_synthesis`、`_merge_skills`、`_skill_cap` | ① **同品种**校验；② 500/300/−200（可关）；③ 特性等级重抽；④ 世代上限 196；⑤ 技能降序 | P2 |
-| 84/85/114 | 增世代/遗忘特性/转移强化 | `_pet_add_generation`、`_pet_forget_buff`、`_pet_divide_pro` | 84 上限 9 → 196；85 候选数随 15 条变化；114 上限 1009 | P2 |
+| 62/63/65 | 合成 | `_pet_synthesis_pick`、`_pet_synthesis`、`_merge_skills`、`_skill_cap` | ① **同品种**校验；② 500/300/−200（可关）；③ 特性等级重抽；④ 世代上限 1500（继承副宠 100%）；⑤ 技能降序 | P2 |
+| 84/85/114 | 增世代/遗忘特性/转移强化 | `_pet_add_generation`、`_pet_forget_buff`、`_pet_divide_pro` | 84 上限 9 → 1500；85 候选数随 30 条变化；114 上限 1009 | P2 |
 | — | 新函数 | `_pet_stats`、`_pet_power`、`_combat_engine`、`_element_multiplier`、`_trait_multiplier`、`_arena_*` | 全新增 | — |
 
 **不动**：`_role_stats` / `_hero_stat_multiplier` / `_hunter_combat_stats`（T04 地盘）、道具/商店/背包/任务、
@@ -842,7 +842,7 @@ rating：Elo，K=16，新号 1000，上限 3000
 ### P2：技能与特性（1~1.5 lane / 2 天）
 
 - 回合引擎按 §4.4 时序；特性语义按 §4.3 原文表；`ext_skill`/`buffs` 只用 §4.5 白名单。
-- 62/63/65：同品种 + 门槛 + 世代 196 + 特性等级重抽 + 技能降序。
+- 62/63/65：同品种 + 门槛 + 世代 1500（继承副宠世代）+ 特性等级重抽 + 技能降序。
 - **回滚**：`PETHUNTER_COMBAT_SKILLS=0` → 回放退回固定 `skill.id=101`，数值仍走 P1。
 - **验收**：§9.1 的 11~21 号 + 技能/暴击/治疗截图。
 
@@ -884,7 +884,7 @@ rating：Elo，K=16，新号 1000，上限 3000
 | 15 | `test_replay_miss_uses_zero_damage` | 高回避场景该步 `dm==0` 且无 `type=2/7` |
 | 16 | `test_crit_number_scaled_1_5` | 暴击步 `dm ≈ ×1.5` 且带 `type=3` |
 | 17 | `test_battle_rewards_are_actually_credited`（既有） | 新增 `reward_crystal` 也真实入账 |
-| 18 | `test_feature_cap_is_15_at_gen_196` | `isqrt(196)+1 = 15`；gen 197 被截断；特性等级 ≤ 15 |
+| 18 | `test_feature_cap_is_30_at_gen_1500` | `min(30, isqrt(1500)+1) = 30`；gen 1501 被截断到 1500；特性等级 ≤ 25 |
 | 19 | `test_synthesis_same_species_required` | 不同 `pet_id` 副宠 `-1:100`；开关关掉后可合 |
 | 20 | `test_synthesis_level_gate_and_cost` | <500 主宠 `-1:505`；成功后 `lv -= 200` |
 | 21 | `test_synthesis_inherits_half_pro_and_generation` | 世代 +1、`pro` 继承 50%（点数） |
@@ -1003,9 +1003,9 @@ $env:JAVA_HOME='D:\Configure\jdk17'; $env:PATH="$env:JAVA_HOME\bin;$env:PATH"
 | 1 | 原服六维公式的具体系数 | 结构按表（加区点数/等级乘区），系数标【本地】 |
 | 2 | ~~元素相克矩阵~~ | **已取证**（`help` 8 原文），移除 |
 | 3 | ~~特性语义~~ | **已取证**（`help` 11 原文），移除 |
-| 4 | 相克倍率的具体数值 | `help` 8 只说"提高/减少" → §10 A 待定 |
+| 4 | 相克倍率的具体数值 | `help` 8 只说"提高/减少" → §10 A 已定 1.30/0.77（可调常量） |
 | 5 | "同品种才能合成" | 表内**没有**，来自你的口述 → 【用户口径】，可关 |
-| 6 | 成长如何兑现为数值 | `help` 14 只给上限 → §10 C 待定 |
+| 6 | 成长如何兑现为数值 | `help` 14 只给上限 → §10 C 已定 `floor(gw*lv/100)` |
 | 7 | `percent`/`damage` 的单位（读作 1/100） | 【本地】，只影响量级 |
 | 8 | PvP 匹配算法 | 全标【本地】；赛制（周三六 13:00、前 100、四档）来自 `help` 13 |
 | 9 | `monster.txt` 的 `mapRate`/`reward`/`dropPoint` | 本期不接 |
