@@ -342,26 +342,156 @@ def main() -> int:
     src = src.replace(old, "               this.mouseEnabled = true;")
     p.write_text(src, encoding="utf-8")
 
+    # 9) GetPicItem：修「获得图鉴」弹窗空壳 + 奖励行距 192
+    #    根因一：open() 里 new _loc2_() 在 p<icon> 符号不存在时抛 TypeError，整段中断，
+    #    立绘/名字/奖励全不画，只剩标题与【图鉴奖励】（用户截图就是这个形态）。
+    #    根因二：奖励图标 y = i * 192，第 2 条就落到 552，顶出面板。
+    p = root / "scripts" / "cc" / "lv1" / "game" / "item" / "GetPicItem.as"
+    src = p.read_text(encoding="utf-8")
+
+    getpic_steps = (
+        (
+            "portrait",
+            """         try
+         {
+            _loc2_ = ApplicationDomain.currentDomain.getDefinition("p" + _loc6_.icon) as Class;
+         }
+         catch(e:Error)
+         {
+         }
+         var _loc4_:MovieClip = new _loc2_();
+         if(_pic_img)
+         {
+            _pic_img.removeAll();
+         }
+         _loc4_.scaleX = _loc4_.scaleY = _loc4_.width > _loc4_.height ? 160 / _loc4_.width : 160 / _loc4_.height;
+         _pic_img.addChild(_loc4_);
+         _pic_img.x = this.width - _loc4_.width >> 1;
+         _pic_img.y = 310 - _loc4_.height;""",
+            """         try
+         {
+            _loc2_ = ApplicationDomain.currentDomain.getDefinition("p" + _loc6_.icon) as Class;
+         }
+         catch(e:Error)
+         {
+            _loc2_ = null;
+         }
+         if(_pic_img)
+         {
+            _pic_img.removeAll();
+            _pic_img.visible = _loc2_ != null;
+            if(_loc2_ != null)
+            {
+               var _loc4_:MovieClip = new _loc2_();
+               _loc4_.scaleX = _loc4_.scaleY = _loc4_.width > _loc4_.height ? 160 / _loc4_.width : 160 / _loc4_.height;
+               _pic_img.addChild(_loc4_);
+               _pic_img.x = this.width - _loc4_.width >> 1;
+               _pic_img.y = 310 - _loc4_.height;
+            }
+         }""",
+        ),
+        (
+            "name",
+            '         _name_txt.text = "【" + _loc5_.get("name") + "】";',
+            '         _name_txt.text = _loc5_ != null ? "【" + _loc5_.get("name") + "】" : "";',
+        ),
+        (
+            "reward",
+            """         while(_loc10_ < _loc3_)
+         {
+            _loc9_ = IconItem(_loc1_[_loc10_]);
+            _loc9_.x = this.width - _loc9_.width >> 1;
+            _loc9_.y = _loc10_ * 192;
+            _loc10_++;
+         }
+      }""",
+            """         var _per_row:int = 4;
+         var _step:Number = 72;
+         while(_loc10_ < _loc3_)
+         {
+            _loc9_ = IconItem(_loc1_[_loc10_]);
+            var _row:int = _loc10_ / _per_row | 0;
+            var _in_row:int = Math.min(_per_row, _loc3_ - _row * _per_row);
+            var _slot:Number = _loc10_ - _row * _per_row - (_in_row - 1) / 2;
+            _loc9_.x = (this.width >> 1) + _slot * _step - (_loc9_.width >> 1);
+            _loc9_.y = 360 + _row * 64;
+            _loc10_++;
+         }
+         if(_reward_title)
+         {
+            _reward_title.visible = _loc1_.length > 0;
+         }
+      }""",
+        ),
+        (
+            "field",
+            "      private var _name_txt:Text;",
+            "      private var _name_txt:Text;\n\n      private var _reward_title:Text;",
+        ),
+        (
+            "title",
+            """         _loc1_.x = this.width - _loc1_.width >> 1;
+         _loc1_.y = 320;
+      }""",
+            """         _loc1_.x = this.width - _loc1_.width >> 1;
+         _loc1_.y = 320;
+         _reward_title = _loc1_;
+      }""",
+        ),
+        (
+            "release",
+            """         super.release();
+         _name_txt = null;""",
+            """         super.release();
+         _reward_title = null;
+         _name_txt = null;""",
+        ),
+    )
+    for label, old_text, new_text in getpic_steps:
+        if src.count(old_text) != 1:
+            raise SystemExit(f"getpic {label} anchor missing")
+        src = src.replace(old_text, new_text)
+    p.write_text(src, encoding="utf-8")
+
+    # 10) GameUI：主界面第三个图标（书）指向图鉴总览
+    #     原来发 48（PICSTEP_INFO_KEY）落到 IllustrationTaskUI —— 单条里程碑页，
+    #     没有列表/没有翻页，所以用户点开只看到"图鉴奖励"。
+    p = ui / "GameUI.as"
+    src = p.read_text(encoding="utf-8")
+    old = """      private function onMouseUpIllTask(param1:MouseEvent) : void
+      {
+         CommandManager.send(CommandManager.PICSTEP_INFO_KEY);
+      }"""
+    new = """      private function onMouseUpIllTask(param1:MouseEvent) : void
+      {
+         Navigator.getInstance().flow(Navigator.CITY_UNION_ILLUSTRATION);
+      }"""
+    if src.count(old) != 1:
+        raise SystemExit("gameui ill task anchor missing")
+    src = src.replace(old, new)
+    p.write_text(src, encoding="utf-8")
+
     current = BASE
     for name in ("ExploreMapListUI", "HireShopUI", "HireMountsUI",
-                 "HireShopInfoUI", "BagListUI"):
+                 "HireShopInfoUI", "BagListUI", "GameUI"):
         out = REPO / "build" / "input-explore" / f"step-{name}.swf"
         current = import_class(root, name, current, out)
         print(f"  {name}: {current.stat().st_size} bytes")
-    # PropItem 在 item 包下，import_class 只认 ui 目录，单独走一次。
-    only = Path(tempfile.mkdtemp())
-    dst = only / "scripts" / "cc" / "lv1" / "game" / "item"
-    dst.mkdir(parents=True)
-    shutil.copy2(root / "scripts" / "cc" / "lv1" / "game" / "item" / "PropItem.as",
-                 dst / "PropItem.as")
-    out = REPO / "build" / "input-explore" / "step-PropItem.swf"
-    result = subprocess.run([str(JAVA), "-jar", str(FFDEC), "-importScript",
-                             str(current), str(out), str(only)],
-                            capture_output=True, text=True)
-    if not out.exists():
-        raise SystemExit(f"import failed: PropItem\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
-    current = out
-    print(f"  PropItem: {current.stat().st_size} bytes")
+    # item 包下的类 import_class 不认（它只拼 ui 目录），单独走。
+    for name in ("PropItem", "GetPicItem"):
+        only = Path(tempfile.mkdtemp())
+        dst = only / "scripts" / "cc" / "lv1" / "game" / "item"
+        dst.mkdir(parents=True)
+        shutil.copy2(root / "scripts" / "cc" / "lv1" / "game" / "item" / f"{name}.as",
+                     dst / f"{name}.as")
+        out = REPO / "build" / "input-explore" / f"step-{name}.swf"
+        result = subprocess.run([str(JAVA), "-jar", str(FFDEC), "-importScript",
+                                 str(current), str(out), str(only)],
+                                capture_output=True, text=True)
+        if not out.exists():
+            raise SystemExit(f"import failed: {name}\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
+        current = out
+        print(f"  {name}: {current.stat().st_size} bytes")
     shutil.copy2(current, FINAL)
     print("final:", FINAL.stat().st_size, "bytes")
     return 0
