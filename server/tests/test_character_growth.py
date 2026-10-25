@@ -6,11 +6,12 @@ app.py 里用 LOCAL DEFAULT 标注。
 """
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from pet_hunter_server import config_tables
+from pet_hunter_server import config_tables, create_app
 from support import create_local_player, envelope
 
 
@@ -34,3 +35,27 @@ def test_clear_caches_also_drops_the_up_role_table():
     config_tables.clear_caches()
 
     assert config_tables.up_role_table.cache_info().currsize == 0
+
+
+def test_510_profile_carries_real_job_and_exp(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroJob")
+
+    _, fresh = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+    assert (fresh["lv"], fresh["job"], fresh["exp"]) == (1, 1, 0)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET lv=7, job=3, exp=123 WHERE uid=?", (uid,)
+        )
+        connection.commit()
+    _, profile = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+
+    assert profile["lv"] == 7
+    assert profile["job"] == 3
+    assert profile["exp"] == 123

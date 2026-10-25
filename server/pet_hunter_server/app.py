@@ -512,6 +512,16 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN max_explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
             )
+        # 人物成长（阶段 2）：lv 靠战斗经验自动升，job 是 1-120 的称号/转生。
+        # exp 存当前等级内的余量；老存档保留 lv，默认 job=1 / exp=0。
+        if "exp" not in player_columns:
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"
+            )
+        if "job" not in player_columns:
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN job INTEGER NOT NULL DEFAULT 1"
+            )
         if "pending_notice" not in player_columns:
             # 50 号使用结果：客户端不一定能把 50 的响应路由回背包页，下一次 22
             # 读背包时把这条一次性提示带回去，读完即清空。
@@ -1389,13 +1399,14 @@ def _player_payload(connection: sqlite3.Connection, player: sqlite3.Row) -> dict
     payload["buffs"] = []
     payload.update(_equipped_slot_fields(worn))
     # Local starting state; guild and arena systems are not restored yet.
-    # HomeUI resolves job through the bundled upRole configuration.
-    payload.update(job=1, guild_name="", guild_position=0, arena_rank=_local_arena_rank())
+    # job/exp now come from the players row (dict(player) above): the old hardcoded
+    # job=1 made every promoted hunter look like a 1级猎人 in the panel.
+    payload.update(guild_name="", guild_position=0, arena_rank=_local_arena_rank())
     return payload
 
 
 _PLAYER_ROW_SQL = """
-    SELECT id, nick AS name, lv, sex, img, money, point, crystal,
+    SELECT id, nick AS name, lv, job, exp, sex, img, money, point, crystal,
            ht_ap, max_ht_ap, arena_ap, max_arena_ap
     FROM players WHERE uid = ?
 """
