@@ -154,3 +154,68 @@ def test_arena_defense_ignores_a_sold_snapshot_item(tmp_path: Path):
     _, snapshot = _read_defense(client, uid)
     assert snapshot["is_default"] == 0
     assert snapshot["weapon"] == 0
+
+
+def test_bag_equipment_tab_can_filter_by_slot(tmp_path: Path):
+    database, client, uid = _setup(tmp_path, "ArBag")
+    _equip(database, 20001)
+    _add_equip(database, 20002, 2)
+
+    def ids(slot=None):
+        data = {"m": "show", "showId": "22", "uid": uid, "ttype": 3, "p": 1, "n": 9}
+        if slot:
+            data["slot"] = slot
+        _, payload = envelope(client.post("/flash.do", data=data))
+        return {row["id"] for row in payload["goods_list"]}, payload["bag_size"]
+
+    assert ids() == ({20001, 20002}, 2)
+    assert ids(1) == ({20001}, 1)
+    assert ids(2) == ({20002}, 1)
+
+
+def test_arena_defense_pets_use_44_45_with_ttype3(tmp_path: Path):
+    database, client, uid = _setup(tmp_path, "ArPet")
+    with sqlite3.connect(database) as connection:
+        first, second = [row[0] for row in connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id"
+        )]
+    _set_squad(database, first, second)
+
+    assert client.post(
+        "/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                           "index": second, "ttype": 3}
+    ).get_data(as_text=True).startswith("44\t")
+    assert client.post(
+        "/flash.do", data={"m": "show", "showId": "44", "uid": uid,
+                           "index": first, "ttype": 3}
+    ).get_data(as_text=True).startswith("44\t")
+    _, snapshot = _read_defense(client, uid)
+    assert [pet["index"] for pet in snapshot["pets"]] == [second, first]
+
+    # PvE 出战槽不能被 44/45 改动。
+    with sqlite3.connect(database) as connection:
+        assert dict(connection.execute(
+            "SELECT id, squad_slot FROM pets WHERE player_id=1"
+        )) == {first: 1, second: 2}
+
+    assert client.post(
+        "/flash.do", data={"m": "show", "showId": "45", "uid": uid,
+                           "index": second, "ttype": 3}
+    ).get_data(as_text=True).startswith("45\t")
+    _, snapshot = _read_defense(client, uid)
+    assert [pet["index"] for pet in snapshot["pets"]] == [first]
+
+
+def test_515_returns_a_renderable_defense_profile(tmp_path: Path):
+    database, client, uid = _setup(tmp_path, "ArProf")
+    _equip(database, 20001)
+    weapon = _inv_id(database, 20001)
+    _save_defense(client, uid, weapon=weapon, pet1=2, pet2=1)
+
+    _, profile = _read_defense(client, uid)
+    assert profile["name"] and profile["img"]
+    assert profile["lv"] == 1 and profile["job"] == 1
+    assert profile["weapon"] == 20001 and profile["weapon_level"] == 1
+    assert profile["hp"] >= 100 and profile["phy_att"] > 10
+    assert [pet["index"] for pet in profile["pets"]] == [2, 1]
+    assert isinstance(profile["skills"], list)

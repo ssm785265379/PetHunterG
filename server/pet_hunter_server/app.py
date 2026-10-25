@@ -1732,9 +1732,16 @@ def _player_inventory(database_path: Path) -> Response:
         page_size = int(_request_value("n", "9"))
         target_raw = _request_value("target", "").strip()
         target = int(target_raw) if target_raw else -1
+        slot_raw = _request_value("slot", "").strip()
+        slot = int(slot_raw) if slot_raw else 0
     except ValueError:
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
-    if item_type not in (1, 2, 3) or page < 1 or not 1 <= page_size <= 9:
+    if (
+        item_type not in (1, 2, 3)
+        or slot not in (0, 1, 2, 3)
+        or page < 1
+        or not 1 <= page_size <= 9
+    ):
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
 
     with _connect_database(database_path) as connection:
@@ -1770,7 +1777,18 @@ def _player_inventory(database_path: Path) -> Response:
                 """,
                 (player["id"],),
             ).fetchall()
-            visible = [r for r in every_row if _equip_matches_sex(r["id"], sex)]
+            def _visible_equip(row) -> bool:
+                if not _equip_matches_sex(row["id"], sex):
+                    return False
+                if not slot:
+                    return True
+                record = config_tables.equip_record(row["id"])
+                item_slot = (
+                    config_tables.equip_slot(record) if record else row["type"]
+                )
+                return item_slot == slot
+
+            visible = [r for r in every_row if _visible_equip(r)]
             count = len(visible)
             start = (page - 1) * page_size
             rows = visible[start:start + page_size]
@@ -5463,6 +5481,8 @@ LOCAL_TRAIN_SECONDS = 600
 # prop.txt 10505's remark states a single reinforcement tops out around 1000.
 LOCAL_PRO_CAP = 1000
 # LOCAL DESIGN: 技能合成的"追加"概率 —— 副宠独有的技能族按此概率并入主宠。
+LOCAL_TRAIT_LEVEL_CAP = 25   # §4.7：skill.txt team=2 的数据上限（help 10 说的 30 不存在）
+LOCAL_TRAIT_UPGRADE_CHANCE = 0.30  # §4.7 R1：合成时特性有 30% 概率 +1 级（LOCAL）
 LOCAL_SKILL_ADD_CHANCE = 0.5
 # LOCAL DEFAULT gains per training type; the original duration/gain tables are
 # not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
@@ -5646,6 +5666,64 @@ def _choose_pet_list(database_path: Path) -> Response:
     return _protocol_response(42, {"list": [_pet_list_entry(r) for r in rows]})
 
 
+def _ensure_arena_defense_row(
+    connection: sqlite3.Connection, player_id: int
+):
+    """防守快照不存在时，用当前 PvE 装备建一行；宠物槽留空等玩家选择。"""
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is not None:
+        return row
+    worn = _worn_equipment(connection, player_id)
+    weapon = worn.get(1)["id"] if worn.get(1) else 0
+    clothes = worn.get(2)["id"] if worn.get(2) else 0
+    hat = worn.get(3)["id"] if worn.get(3) else 0
+    connection.execute(
+        "INSERT INTO player_loadouts (player_id, kind, weapon_inv_id,"
+        " clothes_inv_id, hat_inv_id, pet1_id, pet2_id, updated_at)"
+        " VALUES (?, 'arena_defense', ?, ?, ?, 0, 0, ?)",
+        (
+            player_id,
+            weapon,
+            clothes,
+            hat,
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    return _loadout_row(connection, player_id, "arena_defense")
+
+
+def _arena_defense_add_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> bool:
+    row = _ensure_arena_defense_row(connection, player_id)
+    if pet_id in (int(row["pet1_id"] or 0), int(row["pet2_id"] or 0)):
+        return True
+    for column in ("pet1_id", "pet2_id"):
+        if not int(row[column] or 0):
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=?, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (pet_id, time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+            return True
+    return False
+
+
+def _arena_defense_remove_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> None:
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is None:
+        return
+    for column in ("pet1_id", "pet2_id"):
+        if int(row[column] or 0) == pet_id:
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=0, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+
+
 def _choose_battle_pet(database_path: Path) -> Response:
     """44 (CHOOSE_BATTLE_PET_KEY): park the picked pet in a hunt slot.
 
@@ -5666,6 +5744,12 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(506)
         if int(row["train_end"] or 0) > int(time.time()):
             return _pet_error(100)
+        if slot == "3":
+            # 擂台防守页：写 player_loadouts，不动 pets.squad_slot。
+            if not _arena_defense_add_pet(c, player["id"], index):
+                return _pet_error(506)
+            pet = _pet_list_entry(row)
+            return _protocol_response(44, {"value": "ok", "pet": pet})
         # FightPetListUI.as:160-164 sends 44 with the pet index; `ttype` there is
         # the page kind from HunterTaskUI.as:302 and is ALWAYS 1, so it can never
         # identify the slot. Put the pet in the first free slot instead — that is
@@ -5701,6 +5785,11 @@ def _choose_rest_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
+        if _request_value("ttype", "1") == "3":
+            # 擂台防守页：从防守快照移除，不动 PvE 出战槽。
+            _arena_defense_remove_pet(c, player["id"], index)
+            pet = _pet_list_entry(row)
+            return _protocol_response(45, {"value": "ok", "pet": pet})
         # HunterTaskUI.as:287-310 sends 45 when the player taps a slot that
         # ALREADY holds a pet — i.e. "take it off the squad". ttype is hardcoded
         # 1 there (it is a page kind, not a slot), so the pet simply leaves.
@@ -6338,21 +6427,39 @@ def _arena_loadout_info(database_path: Path) -> Response:
     """515 — 读擂台防守快照；没有快照时回退当前 PvE 并标 is_default。"""
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id, nick, lv, job, sex FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         row = _loadout_row(c, player["id"], "arena_defense")
         worn = _loadout_equipment(c, player["id"], "arena_defense")
         pets = _loadout_pets(c, player["id"], "arena_defense")
+        pic_num = c.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
+        ).fetchone()[0]
     payload: dict[str, object] = {
+        "id": player["id"],
+        "name": player["nick"],
+        "lv": player["lv"],
+        "job": player["job"],
+        "sex": player["sex"],
+        "img": _role_skin_string(worn, player["sex"]),
+        "pic_num": pic_num,
+        "skills": _equipment_skills(worn),
+        "buffs": [],
+        "guild_name": "",
+        "guild_position": 0,
+        "arena_rank": _local_arena_rank(),
         "kind": "arena_defense",
         "is_default": 0 if row else 1,
         "updated_at": str(row["updated_at"] or "") if row else "",
         "pets": [dict(pet) for pet in pets],
     }
+    payload.update(_role_stats(worn, player["lv"], player["job"]))
+    payload.update(_equipped_slot_fields(worn))
     for slot, field in EQUIP_SLOT_FIELD.items():
         item = worn.get(slot)
-        payload[field] = item["item_id"] if item else 0
         payload[f"{field}_index"] = item["id"] if item else 0
     return _protocol_response(515, payload)
 
@@ -8048,59 +8155,83 @@ def _skill_cap(star: int, generation: int) -> int:
     return max(1, min(12, 3 + star // 2 + generation // 2))
 
 
-def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
-    """Skill synthesis (command 65 with ttype=1).
+def _trait_family_level(entry: int) -> tuple[int, int]:
+    """trait id 的编码：family*100 + level（skill.txt team=2，如 10003 = 原系抗性 L3）。"""
+    entry = int(entry)
+    return entry // 100, max(1, entry % 100)
 
-    LOCAL DESIGN — the client ships no rule text for this, only help.txt's one line
-    about "skills being recombined". The rule implemented here:
-      * the pool is the union of both pets' skills,
-      * one skill per family (highest level wins, so breeding never downgrades),
-      * each surviving family has a chance to gain one level,
-      * the cap comes from the pet's rarity (`_skill_cap`), not a flat four.
+
+def _merge_traits(
+    main_buffs: str, vice_buffs: str, cap_count: int, cap_level: int
+) -> str:
+    """特性合成（ttype=2）：**累加 + 同族取高等级**（规格 §4.7 的 R1）。
+
+    特性是**集合**，不是替换：
+      * 副宠有、主宠没有的族 → 追加（一直累加到 cap_count 为止）；
+      * 同族 → 等级取 max（只升不降），再给 30% 概率 +1 级（LOCAL，封顶 cap_level）；
+      * 等级编码在 id 里，所以合并就是把 id 换成同族更高等级的 id。
+
+    数量上限 = min(30, isqrt(世代)+1)；等级上限 = min(25, isqrt(世代)+1)，
+    25 是 `skill.txt` team=2 的数据上限。
     """
-    index = _skill_family_index()
-    by_id = config_tables._table("skill.txt")
-
-    def families(text: str) -> dict[str, int]:
-        found: dict[str, int] = {}
+    levels: dict[int, int] = {}
+    for text in (main_buffs, vice_buffs):
         for token in str(text or "").split(":"):
             if not token.isdigit():
                 continue
-            record = by_id.get(int(token))
-            if record is None:
-                continue
-            name = str(record.get("name", "") or "")
-            family = name.split("级", 1)[-1].strip() if "级" in name else name
-            if not family:
-                continue
-            level = int(str(record.get("level", "1") or 1) or 1)
-            found[family] = max(found.get(family, 0), level)
-        return found
+            family, level = _trait_family_level(int(token))
+            levels[family] = max(levels.get(family, 0), level)
 
-    # 替换/升级：两宠共有的族取最高级；追加：副宠独有的族按概率并入。
-    levels = families(main_skills)
-    for family, level in families(vice_skills).items():
-        if family in levels:
-            levels[family] = max(levels[family], level)
-        elif random.random() < LOCAL_SKILL_ADD_CHANCE:
-            levels[family] = level
+    limit = max(1, min(int(cap_count or 1), 30))
+    ceiling = max(1, min(int(cap_level or 1), LOCAL_TRAIT_LEVEL_CAP))
+    entries: list[tuple[int, int]] = []
+    for family, level in levels.items():
+        if random.random() < LOCAL_TRAIT_UPGRADE_CHANCE:
+            level += 1
+        entries.append((family, min(ceiling, level)))
+    # 数量封顶：先留高等级特性（同等级按族号，保证可复现）
+    entries.sort(key=lambda item: (-item[1], item[0]))
+    entries = entries[:limit]
+    entries.sort(key=lambda item: item[0])
+    return ":".join(str(family * 100 + level) for family, level in entries)
 
-    merged: list[int] = []
-    for family, level in sorted(levels.items()):
-        available = index.get(family, {})
-        if not available:
-            continue
-        # LOCAL DESIGN: 30% chance to inherit one level higher, capped by the family.
-        if random.random() < 0.30:
-            level = min(max(available), level + 1)
-        level = max(min(available), min(max(available), level))
-        merged.append(available[level])
-    merged.sort(key=lambda sid: (
-        int(str(by_id.get(sid, {}).get("level", "0") or 0)),
-        int(str(by_id.get(sid, {}).get("damage", "0") or 0)),
-    ), reverse=True)
-    keep = max(1, min(12, int(cap or 4), len(merged)))
-    return ":".join(str(sid) for sid in merged[:keep])
+
+def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
+    """技能合成（ttype=1）：**随机替换 / 重组**（规格 §4.2.5）。
+
+    池 = 双方技能条目（同族只留等级最高的那条，**等级随条目原样保留**）；
+    `|池| ≤ cap` → 全保留；`|池| > cap` → **随机**保留 cap 条（不按等级/威力排序）。
+
+    不做 30% 升级、不重算等级：技能等级由宠物星级决定（§4.2.6），合成只换条目。
+    所以"弱宠变强"的唯一路径是拿高星副宠当素材，赌它那条高阶技能被抽中并留下。
+    """
+    table = config_tables._table("skill.txt")
+
+    def level_of(skill_id: int) -> int:
+        raw = str(table.get(skill_id, {}).get("level", "0") or 0).strip()
+        return int(raw) if raw.isdigit() else 0
+
+    pool: dict[str, int] = {}
+    for text in (main_skills, vice_skills):
+        for token in str(text or "").replace(";", ":").split(":"):
+            token = token.strip()
+            if not token.isdigit():
+                continue
+            skill_id = int(token)
+            record = table.get(skill_id)
+            if not record or str(record.get("team", "")).strip() != "1":
+                continue
+            family = _skill_family_name(record)
+            current = pool.get(family)
+            if current is None or level_of(skill_id) > level_of(current):
+                pool[family] = skill_id
+
+    entries = list(pool.values())
+    limit = max(1, min(12, int(cap or 4)))
+    if len(entries) > limit:
+        entries = random.sample(entries, limit)
+    entries.sort(key=lambda sid: (-level_of(sid), sid))
+    return ":".join(str(sid) for sid in entries)
 
 
 def _pet_synthesis(database_path: Path) -> Response:
@@ -8174,8 +8305,8 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (current + step, main_index),
             )
         if ttype == 1:
-            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级，
-            # 槽位上限按"星级 + 世代"给（稀有宠带得更多）。
+            # 技能合成（ttype=1）：**随机替换 / 重组**（§4.2.5）——池 = 双方技能条目，
+            # 超出槽位就随机保留，等级随条目走、不升级；槽位上限按"星级 + 世代"给。
             main_skill_count = len([t for t in str(main_row["skills"] or "").split(":") if t.isdigit()])
             skill_cap = max(main_skill_count, _skill_cap(main_row["star"], generation))
             connection.execute(
@@ -8183,13 +8314,16 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (_merge_skills(main_row["skills"], vice_row["skills"], skill_cap), main_index),
             )
         if ttype == 2:
-            # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。
-            cap = min(30, math.isqrt(generation) + 1)
-            merged = [token for token in str(main_row["buffs"] or "").split(":") if token.isdigit()]
-            for token in str(vice_row["buffs"] or "").split(":"):
-                if token.isdigit() and token not in merged and len(merged) < cap:
-                    merged.append(token)
-            connection.execute("UPDATE pets SET buffs=? WHERE id=?", (":".join(merged), main_index))
+            # 特性合成（§4.7 R1）：累加 + 同族取高等级 + 30% 升一级；
+            # 数量上限 min(30, isqrt(gen)+1)、等级上限 min(25, isqrt(gen)+1)。
+            cap_count = min(30, math.isqrt(generation) + 1)
+            cap_level = min(25, math.isqrt(generation) + 1)
+            merged_buffs = _merge_traits(
+                main_row["buffs"], vice_row["buffs"], cap_count, cap_level
+            )
+            connection.execute(
+                "UPDATE pets SET buffs=? WHERE id=?", (merged_buffs, main_index)
+            )
         connection.execute("UPDATE pets SET generation=? WHERE id=?", (generation, main_index))
         connection.execute("DELETE FROM pets WHERE id=?", (vice_index,))
         updated = connection.execute(

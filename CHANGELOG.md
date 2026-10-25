@@ -4,6 +4,13 @@
 
 ## 2026-10-25
 
+- `8085035` 10-25 17:58 — merge: 515 返回可渲染的防守资料（`feat/loadout-profile` `ff7957f`）——`name/lv/job/sex/img/pic_num/skills/buffs` + 六维 + `weapon/clothes/hat`（含 `*_level`/`*_index`）+ 防守宠物列表 + `is_default/updated_at`；无快照回退 PvE；客户端防守页可只靠 515 渲染，不必先发 510；234 → **235 passed**
+- `724cae5` 10-25 17:50 — merge: 擂台防守页服务端（`feat/loadout-server` `af06548`）——`22` 装备 tab 支持 `slot=1/2/3`（按 `equip.txt type` 过滤后分页，`bag_size` 同口径）；`44/45` 新增 `ttype=3` 只写 `player_loadouts(kind='arena_defense')`，**不改** `pets.squad_slot`；`ttype=1/2` 保持 PvE 语义；232 → **234 passed**
+- `9311f07` 10-25 17:45 — merge: 合成口径纠正（`fix/pet-synthesis-semantics` `53dc50d`）——技能与特性被搞反：技能应为**随机替换/重组（不升级）**、特性应为**累加 + 同族取高等级 + 30% 升级**；新增 `_merge_traits`，利用 trait id 自带等级（`族×100+等级`）无需加列；231 → **232 passed**
+- `53dc50d` 10-25 17:38 — fix(合成): **特性和技能的合成口径对调纠正** —— 技能 = 定长槽位**随机替换/重组**（`_merge_skills` 取消族并集累加、取消 30% 升 1 级，等级随条目原样保留，`|池| > 槽位` 时随机保留）；特性 = **集合累加** + 同族取高等级 + 30% 概率 +1 级（新 `_merge_traits`，等级编码 = 族×100+等级，数量上限 `min(30, isqrt(gen)+1)`、等级上限 `min(25, isqrt(gen)+1)`）；规格 §4.7 的 R1 与两行口径同步改写；231 → **232 passed**
+- `250b029` 10-25 17:15 — merge: 阶段 3 P1 战斗数值（`feat/pet-combat-stats` `f22d323`）——219 → **231 passed**
+- `7a6763d` 10-25 17:14 — merge: UI 评审 439 行完整版（`design/ui-review` `68da252`）——40 条清单、P0 7 条（人物页行距 18px<字号 20、单行溢出 59px、内容超面板 31px、图鉴入口指到里程碑页、获得图鉴弹窗因 `GetPicItem` 空符号崩溃、奖励行距 192 顶出、25 号只回 3 条写死）、铁匠/神器线框、20 项待补截图
+- `167c354` 10-25 17:19 — merge: 点击换装/卸下与擂台防守页客户端补丁计划（`feat/loadout-ui-plan` `4233587`）——纠正 `RingUI` 是"试炼对手"不是玩家队伍；建议只加「防守阵容」按钮进新 `ArenaDefenseUI`，PvE 页面用 RoleInfoUI 叠装备热区
 - `6cdcdfc` 10-25 17:06 — merge: 擂台防守快照（`feat/squad-pets` `34d7895`）——新增 `player_loadouts`（`kind='arena_defense'`，只存 `inventory.id` / `pets.id`，不碰 `equipped` / `squad_slot`）；新增本地命令 **515 读防守配置 / 516 保存**（无快照回退 PvE 并标 `is_default=1`）；**37 扩展 `action=off&slot=1/2/3`**（旧语义不变）；快照项被卖/放生时该槽读空；506/24 暂不接快照（本地无真实 PvP，避免把"对手"显示成"自己"）；214 → **219 passed**
 - `f22d323` 10-25 17:05 — feat(战斗): **P1 宠物六维唯一口径** —— `base×lvf + pro + floor(gw×lv/100)` 再过性格乘区（`_pet_stats`，lv1 无投入 == 旧值）、属性相克按 help 8 的 6×6（克制 1.30 / 被克 0.77）、`skill_mult = 1+damage/100×0.5` 进伤害、选技按期望伤害取最大（同分取族名最小，不随机）、`K` 0.6→**0.28**、回合 12→20 / 步数 30→100；12/13 面板与战斗同源（`hp + hp_tp` = 战斗值，13 号 `skills` 按 AI 优先级下发）；怪物真实六维**默认关**（`PETHUNTER_COMBAT_MONSTERS`，实测 lv1 队伍 24 场 0 胜，见规格 §3.11.1）；回滚 `PETHUNTER_COMBAT_V2=0`；201 → **213 passed**（新增 12 条在 `server/tests/test_pet_combat.py`，含开关两侧）
 - `954b4c6` 10-25 16:34 — merge: 铁匠 32/33/34 表驱动（`feat/blacksmith` `a356868`）——删掉手写配方表，改从 `equip.txt` 派生 6 件可打造装备（焚天/超级焚天 的武器·铠甲·头盔），产物属性/技能全读配置；费用 `ceil(money×10%)`（360/960），材料按档位取 `prop.txt` 11001–11009；32 加 `total` 并按槽位排序、33 补齐 `skills/buffs/need_goods[].own_num`、34 事务扣料扣钱入包并用 `ON CONFLICT` 累加；错误码 400/403/404/405/300；201 → **214 passed**
