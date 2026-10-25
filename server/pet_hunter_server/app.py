@@ -6337,21 +6337,39 @@ def _arena_loadout_info(database_path: Path) -> Response:
     """515 — 读擂台防守快照；没有快照时回退当前 PvE 并标 is_default。"""
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id, nick, lv, job, sex FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         row = _loadout_row(c, player["id"], "arena_defense")
         worn = _loadout_equipment(c, player["id"], "arena_defense")
         pets = _loadout_pets(c, player["id"], "arena_defense")
+        pic_num = c.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
+        ).fetchone()[0]
     payload: dict[str, object] = {
+        "id": player["id"],
+        "name": player["nick"],
+        "lv": player["lv"],
+        "job": player["job"],
+        "sex": player["sex"],
+        "img": _role_skin_string(worn, player["sex"]),
+        "pic_num": pic_num,
+        "skills": _equipment_skills(worn),
+        "buffs": [],
+        "guild_name": "",
+        "guild_position": 0,
+        "arena_rank": _local_arena_rank(),
         "kind": "arena_defense",
         "is_default": 0 if row else 1,
         "updated_at": str(row["updated_at"] or "") if row else "",
         "pets": [dict(pet) for pet in pets],
     }
+    payload.update(_role_stats(worn, player["lv"], player["job"]))
+    payload.update(_equipped_slot_fields(worn))
     for slot, field in EQUIP_SLOT_FIELD.items():
         item = worn.get(slot)
-        payload[field] = item["item_id"] if item else 0
         payload[f"{field}_index"] = item["id"] if item else 0
     return _protocol_response(515, payload)
 
