@@ -209,3 +209,38 @@ def test_lost_arena_battle_grants_a_tenth_of_the_hero_exp(
     )
     profile = _profile(client, uid)
     assert (profile["lv"], profile["exp"]) == (1, expected)
+
+
+def test_hero_stats_grow_with_level_and_job_and_match_combat(tmp_path: Path):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroSt")
+    base = _profile(client, uid)
+    assert (base["lv"], base["job"]) == (1, 1)
+    # 1 级 1 称号 = 原始基准值，老存档不会被这次改动改数值。
+    for key, value in A.ROLE_BASE_STATS.items():
+        assert base[key] == value, key
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET lv=50, job=10 WHERE uid=?", (uid,))
+        connection.commit()
+    grown = _profile(client, uid)
+    for key in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"):
+        assert grown[key] > base[key], key
+
+    with A._connect_database(database) as connection:
+        row = connection.execute(
+            "SELECT id,nick,lv,job,sex FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        worn = A._worn_equipment(connection, row["id"])
+        combat = A._hunter_combat_stats(row, worn)
+    assert combat == (grown["hp"], grown["phy_att"], grown["phy_def"])
+
+    # 3 号（RoleInfoUI / 好友详情）和 510 必须用同一份六维。
+    _, role = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "3", "uid": uid})
+    )
+    assert role["job"] == 10
+    assert role["hp"] == grown["hp"]

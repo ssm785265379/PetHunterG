@@ -1291,6 +1291,18 @@ ROLE_BASE_STATS = {
     "phy_def": 10,
     "mag_def": 10,
 }
+# LOCAL DEFAULT 人物成长系数：六维共用，1 级 1 称号时乘数恰为 1（老存档不变）。
+LOCAL_HERO_LEVEL_STAT_STEP = 0.006
+LOCAL_HERO_JOB_STAT_STEP = 0.02
+
+
+def _hero_stat_multiplier(lv: int, job: int) -> float:
+    """1 + 0.6%/级 + 2%/称号；面板与战斗共用。"""
+    return (
+        1
+        + LOCAL_HERO_LEVEL_STAT_STEP * (max(1, int(lv)) - 1)
+        + LOCAL_HERO_JOB_STAT_STEP * (max(1, int(job)) - 1)
+    )
 # The bare character is THREE layers, not one. CreateUI.as:366-378 builds the
 # default skin as "100001_100002_100003" (male) / "100001_100004_100005" (female):
 # body + head + hair. Sending only 100001 drew a headless hunter, because no other
@@ -1396,9 +1408,16 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     return "_".join(str(lid) for lid in layers)
 
 
-def _role_stats(worn: dict[int, sqlite3.Row]) -> dict[str, int]:
-    """Base stats plus the summed bonuses of every worn equipment."""
-    totals = dict(ROLE_BASE_STATS)
+def _role_stats(
+    worn: dict[int, sqlite3.Row], lv: int = 1, job: int = 1
+) -> dict[str, int]:
+    """Base × (等级 + 称号) + 装备；面板与战斗共用这一份。
+
+    LOCAL DEFAULT: 原服的人物成长系数不可恢复。1 级 1 称号时乘数为 1，所以老
+    存档的数值不变；等级/称号越高越强，且 510/2/3/37 与战斗读的是同一个函数。
+    """
+    mult = _hero_stat_multiplier(lv, job)
+    totals = {key: round(value * mult) for key, value in ROLE_BASE_STATS.items()}
     for row in worn.values():
         for key in totals:
             totals[key] += row[key] or 0
@@ -1440,7 +1459,7 @@ def _player_payload(connection: sqlite3.Connection, player: sqlite3.Row) -> dict
     # stats, the three equipment slots and `img` (the paper-doll layer string) were
     # all missing, which is why the panel printed `undefined` and why worn gear
     # never showed up on the character.
-    payload.update(_role_stats(worn))
+    payload.update(_role_stats(worn, player["lv"], player["job"]))
     payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
     payload["pic_num"] = pic_num
     payload["skills"] = []
@@ -2861,7 +2880,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # slots that RoleInfoUI.as:150-172 prints without any null guards.
     target=_request_value("gid") or _request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,uid,nick,lv,sex FROM players WHERE uid=?",(target,)).fetchone()
+        p=c.execute("SELECT id,uid,nick,lv,job,sex FROM players WHERE uid=?",(target,)).fetchone()
         if p is None:return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=?",(p["id"],)).fetchall()
         worn=_worn_equipment(c,p["id"])
@@ -2873,9 +2892,9 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # so both shapes are shipped.
     player_fields={"id":p["uid"],"name":p["nick"],"lv":p["lv"],
                    "img":_role_skin_string(worn,p["sex"]),
-                   "job":1,"guild_name":"0","guild_position":0,
+                   "job":p["job"],"guild_name":"0","guild_position":0,
                    "arena_rank":_local_arena_rank(),"pic_num":pic_num,
-                   **_role_stats(worn), **slots,
+                   **_role_stats(worn,p["lv"],p["job"]), **slots,
                    "skills":[],"buffs":[]}
     payload={**player_fields,
              "show_type":0,"player":player_fields,
@@ -3083,17 +3102,18 @@ def _combat_stats(pet_row) -> tuple[int, int, int]:
 
 
 def _hunter_combat_stats(player_row, worn) -> tuple[int, int, int]:
-    """猎人的战斗数值：ROLE_BASE_STATS 随等级成长 + 装备加成。
+    """猎人的战斗数值：与 510/2/3/37 面板共用 `_role_stats` 的唯一口径。
 
-    基础值必须成长，否则 1000 级猎人仍然是 lv1 的 att10，"参战"没有意义。
+    等级/称号乘数已包含在 `_role_stats` 里，这里不能再叠一次等级系数，否则
+    面板一个数、打起来另一个数。
     """
-    stats = _role_stats(worn)
-    lv = max(1, int(player_row["lv"] or 1))
-    lf = 1 + 0.006 * (lv - 1)
-    hp = round(ROLE_BASE_STATS["hp"] * lf) + (stats["hp"] - ROLE_BASE_STATS["hp"])
-    att = round(ROLE_BASE_STATS["phy_att"] * lf) + (stats["phy_att"] - ROLE_BASE_STATS["phy_att"])
-    defence = round(ROLE_BASE_STATS["phy_def"] * lf) + (stats["phy_def"] - ROLE_BASE_STATS["phy_def"])
-    return hp, att, defence
+    keys = player_row.keys()
+    stats = _role_stats(
+        worn,
+        int(player_row["lv"] or 1),
+        int(player_row["job"] or 1) if "job" in keys else 1,
+    )
+    return stats["hp"], stats["phy_att"], stats["phy_def"]
 
 
 def _monster_stats(level: int) -> tuple[int, int, int]:
@@ -3343,7 +3363,7 @@ def _hunter_fight(database_path: Path) -> Response:
     monsters=_monsters_for_map(hid)
     if not monsters: return _pet_error(400)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,nick,lv,sex,ht_ap,max_ht_ap,rage_point FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,nick,lv,job,sex,ht_ap,max_ht_ap,rage_point FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
@@ -4062,7 +4082,7 @@ def _explore_start(database_path: Path) -> Response:
     except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
         p=c.execute(
-            "SELECT id,nick,lv,sex,point,money,cur_explore_map,explore_ap,max_explore_ap"
+            "SELECT id,nick,lv,job,sex,point,money,cur_explore_map,explore_ap,max_explore_ap"
             " FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if gid is None:
@@ -5016,7 +5036,7 @@ def _fight_payload(database_path: Path, defenders):
     """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record)."""
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        p = c.execute("SELECT id,nick,lv,sex FROM players WHERE uid=?", (uid,)).fetchone()
+        p = c.execute("SELECT id,nick,lv,job,sex FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
             return None
         worn = _worn_equipment(c, p["id"])
