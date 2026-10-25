@@ -1,0 +1,1354 @@
+[
+  {
+    "from": 0.14,
+    "to": 2.54,
+    "sid": 1,
+    "location": 2,
+    "content": "这游戏停服六年了",
+    "music": 0
+  },
+  {
+    "from": 2.59,
+    "to": 4.19,
+    "sid": 2,
+    "location": 2,
+    "content": "现在打开",
+    "music": 0
+  },
+  {
+    "from": 4.24,
+    "to": 6.44,
+    "sid": 3,
+    "location": 2,
+    "content": "就停在连接超时",
+    "music": 0
+  },
+  {
+    "from": 6.49,
+    "to": 8.49,
+    "sid": 4,
+    "location": 2,
+    "content": "今天把它救活",
+    "music": 0
+  },
+  {
+    "from": 8.54,
+    "to": 10.14,
+    "sid": 5,
+    "location": 2,
+    "content": "三步",
+    "music": 0
+  },
+  {
+    "from": 10.19,
+    "to": 12.79,
+    "sid": 6,
+    "location": 2,
+    "content": "能进、能玩、能存档",
+    "music": 0
+  },
+  {
+    "from": 12.84,
+    "to": 14.84,
+    "sid": 7,
+    "location": 2,
+    "content": "全程用 AI",
+    "music": 0
+  },
+  {
+    "from": 14.89,
+    "to": 16.49,
+    "sid": 8,
+    "location": 2,
+    "content": "我一个人",
+    "music": 0
+  },
+  {
+    "from": 16.54,
+    "to": 18.14,
+    "sid": 9,
+    "location": 2,
+    "content": "大概两天",
+    "music": 0
+  },
+  {
+    "from": 18.19,
+    "to": 19.79,
+    "sid": 10,
+    "location": 2,
+    "content": "先说清楚",
+    "music": 0
+  },
+  {
+    "from": 19.84,
+    "to": 22.24,
+    "sid": 11,
+    "location": 2,
+    "content": "只救自己有的游戏",
+    "music": 0
+  },
+  {
+    "from": 22.29,
+    "to": 24.49,
+    "sid": 12,
+    "location": 2,
+    "content": "停服的、单机的",
+    "music": 0
+  },
+  {
+    "from": 24.54,
+    "to": 26.74,
+    "sid": 13,
+    "location": 2,
+    "content": "不上传、不传播",
+    "music": 0
+  },
+  {
+    "from": 26.79,
+    "to": 28.99,
+    "sid": 14,
+    "location": 2,
+    "content": "也不靠这个赚钱",
+    "music": 0
+  },
+  {
+    "from": 29.04,
+    "to": 31.24,
+    "sid": 15,
+    "location": 2,
+    "content": "你需要两样东西",
+    "music": 0
+  },
+  {
+    "from": 31.29,
+    "to": 33.09,
+    "sid": 16,
+    "location": 2,
+    "content": "游戏客户端",
+    "music": 0
+  },
+  {
+    "from": 33.14,
+    "to": 36.14,
+    "sid": 17,
+    "location": 2,
+    "content": "和一点 token 钱",
+    "music": 0
+  },
+  {
+    "from": 36.19,
+    "to": 38.79,
+    "sid": 18,
+    "location": 2,
+    "content": "客户端就是游戏文件",
+    "music": 0
+  },
+  {
+    "from": 38.84,
+    "to": 40.44,
+    "sid": 19,
+    "location": 2,
+    "content": "右键图标",
+    "music": 0
+  },
+  {
+    "from": 40.49,
+    "to": 42.89,
+    "sid": 20,
+    "location": 2,
+    "content": "打开文件所在位置",
+    "music": 0
+  },
+  {
+    "from": 42.94,
+    "to": 45.14,
+    "sid": 21,
+    "location": 2,
+    "content": "先整个压缩备份",
+    "music": 0
+  },
+  {
+    "from": 45.19,
+    "to": 46.99,
+    "sid": 22,
+    "location": 2,
+    "content": "别问为什么",
+    "music": 0
+  },
+  {
+    "from": 47.04,
+    "to": 49.24,
+    "sid": 23,
+    "location": 2,
+    "content": "改坏了你就知道",
+    "music": 0
+  },
+  {
+    "from": 49.29,
+    "to": 52.89,
+    "sid": 24,
+    "location": 2,
+    "content": "然后装一个 AI agent",
+    "music": 0
+  },
+  {
+    "from": 52.94,
+    "to": 57.44,
+    "sid": 25,
+    "location": 2,
+    "content": "我用的是 deepseek harness",
+    "music": 0
+  },
+  {
+    "from": 57.49,
+    "to": 59.29,
+    "sid": 26,
+    "location": 2,
+    "content": "老游戏够用",
+    "music": 0
+  },
+  {
+    "from": 59.34,
+    "to": 60.94,
+    "sid": 27,
+    "location": 2,
+    "content": "还便宜",
+    "music": 0
+  },
+  {
+    "from": 60.99,
+    "to": 63.99,
+    "sid": 28,
+    "location": 2,
+    "content": "新游戏建议上更强的模型",
+    "music": 0
+  },
+  {
+    "from": 64.04,
+    "to": 65.64,
+    "sid": 29,
+    "location": 2,
+    "content": "选错模型",
+    "music": 0
+  },
+  {
+    "from": 65.69,
+    "to": 67.49,
+    "sid": 30,
+    "location": 2,
+    "content": "能白烧两天",
+    "music": 0
+  },
+  {
+    "from": 67.54,
+    "to": 69.14,
+    "sid": 31,
+    "location": 2,
+    "content": "我烧过",
+    "music": 0
+  },
+  {
+    "from": 69.19,
+    "to": 70.99,
+    "sid": 32,
+    "location": 2,
+    "content": "先让它能装",
+    "music": 0
+  },
+  {
+    "from": 71.04,
+    "to": 74.24,
+    "sid": 33,
+    "location": 2,
+    "content": "装不上就看 logcat",
+    "music": 0
+  },
+  {
+    "from": 74.29,
+    "to": 76.69,
+    "sid": 34,
+    "location": 2,
+    "content": "多半是运行库没了",
+    "music": 0
+  },
+  {
+    "from": 76.74,
+    "to": 79.54,
+    "sid": 35,
+    "location": 2,
+    "content": "这个包是 AIR 的",
+    "music": 0
+  },
+  {
+    "from": 79.59,
+    "to": 84.09,
+    "sid": 36,
+    "location": 2,
+    "content": "Android 16 已经没有它的私有库",
+    "music": 0
+  },
+  {
+    "from": 84.14,
+    "to": 85.94,
+    "sid": 37,
+    "location": 2,
+    "content": "不用改代码",
+    "music": 0
+  },
+  {
+    "from": 85.99,
+    "to": 88.39,
+    "sid": 38,
+    "location": 2,
+    "content": "换新运行库重打包",
+    "music": 0
+  },
+  {
+    "from": 88.44,
+    "to": 91.24,
+    "sid": 39,
+    "location": 2,
+    "content": "AIR SDK 51",
+    "music": 0
+  },
+  {
+    "from": 91.29,
+    "to": 93.69,
+    "sid": 40,
+    "location": 2,
+    "content": "JDK 用 17",
+    "music": 0
+  },
+  {
+    "from": 93.74,
+    "to": 96.14,
+    "sid": 41,
+    "location": 2,
+    "content": "25 会当场报错",
+    "music": 0
+  },
+  {
+    "from": 96.19,
+    "to": 98.19,
+    "sid": 42,
+    "location": 2,
+    "content": "包名先别覆盖",
+    "music": 0
+  },
+  {
+    "from": 98.24,
+    "to": 100.24,
+    "sid": 43,
+    "location": 2,
+    "content": "旁装一个新包",
+    "music": 0
+  },
+  {
+    "from": 100.29,
+    "to": 102.09,
+    "sid": 44,
+    "location": 2,
+    "content": "装完点打开",
+    "music": 0
+  },
+  {
+    "from": 102.14,
+    "to": 104.14,
+    "sid": 45,
+    "location": 2,
+    "content": "看到连接超时",
+    "music": 0
+  },
+  {
+    "from": 104.19,
+    "to": 105.79,
+    "sid": 46,
+    "location": 2,
+    "content": "恭喜",
+    "music": 0
+  },
+  {
+    "from": 105.84,
+    "to": 107.64,
+    "sid": 47,
+    "location": 2,
+    "content": "第一步成了",
+    "music": 0
+  },
+  {
+    "from": 107.69,
+    "to": 110.49,
+    "sid": 48,
+    "location": 2,
+    "content": "接下来要改几十次界面",
+    "music": 0
+  },
+  {
+    "from": 110.54,
+    "to": 112.54,
+    "sid": 49,
+    "location": 2,
+    "content": "别每次都打包",
+    "music": 0
+  },
+  {
+    "from": 112.59,
+    "to": 114.19,
+    "sid": 50,
+    "location": 2,
+    "content": "43 兆",
+    "music": 0
+  },
+  {
+    "from": 114.24,
+    "to": 116.24,
+    "sid": 51,
+    "location": 2,
+    "content": "装一次两分钟",
+    "music": 0
+  },
+  {
+    "from": 116.29,
+    "to": 118.49,
+    "sid": 52,
+    "location": 2,
+    "content": "一天啥也干不了",
+    "music": 0
+  },
+  {
+    "from": 118.54,
+    "to": 120.34,
+    "sid": 53,
+    "location": 2,
+    "content": "用 ADL",
+    "music": 0
+  },
+  {
+    "from": 120.39,
+    "to": 122.99,
+    "sid": 54,
+    "location": 2,
+    "content": "桌面直接跑 SWF",
+    "music": 0
+  },
+  {
+    "from": 123.04,
+    "to": 124.84,
+    "sid": 55,
+    "location": 2,
+    "content": "两秒出画面",
+    "music": 0
+  },
+  {
+    "from": 124.89,
+    "to": 128.49,
+    "sid": 56,
+    "location": 2,
+    "content": "窗口必须 640 乘 960",
+    "music": 0
+  },
+  {
+    "from": 128.54,
+    "to": 130.54,
+    "sid": 57,
+    "location": 2,
+    "content": "这是原生舞台",
+    "music": 0
+  },
+  {
+    "from": 130.59,
+    "to": 132.19,
+    "sid": 58,
+    "location": 2,
+    "content": "换个尺寸",
+    "music": 0
+  },
+  {
+    "from": 132.24,
+    "to": 133.84,
+    "sid": 59,
+    "location": 2,
+    "content": "按钮全歪",
+    "music": 0
+  },
+  {
+    "from": 133.89,
+    "to": 136.49,
+    "sid": 60,
+    "location": 2,
+    "content": "服务器地址改成本机",
+    "music": 0
+  },
+  {
+    "from": 136.54,
+    "to": 138.14,
+    "sid": 61,
+    "location": 2,
+    "content": "搞定",
+    "music": 0
+  },
+  {
+    "from": 138.19,
+    "to": 140.19,
+    "sid": 62,
+    "location": 2,
+    "content": "现在找它连哪",
+    "music": 0
+  },
+  {
+    "from": 140.24,
+    "to": 141.84,
+    "sid": 63,
+    "location": 2,
+    "content": "开抓包",
+    "music": 0
+  },
+  {
+    "from": 141.89,
+    "to": 144.09,
+    "sid": 64,
+    "location": 2,
+    "content": "明文 HTTP",
+    "music": 0
+  },
+  {
+    "from": 144.14,
+    "to": 148.34,
+    "sid": 65,
+    "location": 2,
+    "content": "所有请求打到一个 flash.do",
+    "music": 0
+  },
+  {
+    "from": 148.39,
+    "to": 150.19,
+    "sid": 66,
+    "location": 2,
+    "content": "参数就三个",
+    "music": 0
+  },
+  {
+    "from": 150.24,
+    "to": 152.84,
+    "sid": 67,
+    "location": 2,
+    "content": "m 等于 show",
+    "music": 0
+  },
+  {
+    "from": 152.89,
+    "to": 156.09,
+    "sid": 68,
+    "location": 2,
+    "content": "showId 等于功能号",
+    "music": 0
+  },
+  {
+    "from": 156.14,
+    "to": 158.54,
+    "sid": 69,
+    "location": 2,
+    "content": "uid 等于角色",
+    "music": 0
+  },
+  {
+    "from": 158.59,
+    "to": 160.19,
+    "sid": 70,
+    "location": 2,
+    "content": "响应很怪",
+    "music": 0
+  },
+  {
+    "from": 160.24,
+    "to": 162.64,
+    "sid": 71,
+    "location": 2,
+    "content": "不是纯 JSON",
+    "music": 0
+  },
+  {
+    "from": 162.69,
+    "to": 164.29,
+    "sid": 72,
+    "location": 2,
+    "content": "是命令号",
+    "music": 0
+  },
+  {
+    "from": 164.34,
+    "to": 166.54,
+    "sid": 73,
+    "location": 2,
+    "content": "加一个 Tab",
+    "music": 0
+  },
+  {
+    "from": 166.59,
+    "to": 168.79,
+    "sid": 74,
+    "location": 2,
+    "content": "再加 JSON",
+    "music": 0
+  },
+  {
+    "from": 168.84,
+    "to": 171.44,
+    "sid": 75,
+    "location": 2,
+    "content": "这个 Tab 记住",
+    "music": 0
+  },
+  {
+    "from": 171.49,
+    "to": 173.49,
+    "sid": 76,
+    "location": 2,
+    "content": "后面救你一命",
+    "music": 0
+  },
+  {
+    "from": 173.54,
+    "to": 175.54,
+    "sid": 77,
+    "location": 2,
+    "content": "先别实现业务",
+    "music": 0
+  },
+  {
+    "from": 175.59,
+    "to": 177.39,
+    "sid": 78,
+    "location": 2,
+    "content": "起个空服务",
+    "music": 0
+  },
+  {
+    "from": 177.44,
+    "to": 179.24,
+    "sid": 79,
+    "location": 2,
+    "content": "形状对就行",
+    "music": 0
+  },
+  {
+    "from": 179.29,
+    "to": 181.09,
+    "sid": 80,
+    "location": 2,
+    "content": "目标是别崩",
+    "music": 0
+  },
+  {
+    "from": 181.14,
+    "to": 183.14,
+    "sid": 81,
+    "location": 2,
+    "content": "字段怎么对齐",
+    "music": 0
+  },
+  {
+    "from": 183.19,
+    "to": 185.99,
+    "sid": 82,
+    "location": 2,
+    "content": "不是猜服务端要回什么",
+    "music": 0
+  },
+  {
+    "from": 186.04,
+    "to": 188.44,
+    "sid": 83,
+    "location": 2,
+    "content": "是看客户端读什么",
+    "music": 0
+  },
+  {
+    "from": 188.49,
+    "to": 190.69,
+    "sid": 84,
+    "location": 2,
+    "content": "反编译 SWF",
+    "music": 0
+  },
+  {
+    "from": 190.74,
+    "to": 192.34,
+    "sid": 85,
+    "location": 2,
+    "content": "搜字段名",
+    "music": 0
+  },
+  {
+    "from": 192.39,
+    "to": 193.99,
+    "sid": 86,
+    "location": 2,
+    "content": "谁读它",
+    "music": 0
+  },
+  {
+    "from": 194.04,
+    "to": 195.64,
+    "sid": 87,
+    "location": 2,
+    "content": "就回什么",
+    "music": 0
+  },
+  {
+    "from": 195.69,
+    "to": 198.09,
+    "sid": 88,
+    "location": 2,
+    "content": "背包读 list",
+    "music": 0
+  },
+  {
+    "from": 198.14,
+    "to": 202.64,
+    "sid": 89,
+    "location": 2,
+    "content": "list 里读 index、id、icon",
+    "music": 0
+  },
+  {
+    "from": 202.69,
+    "to": 204.89,
+    "sid": 90,
+    "location": 2,
+    "content": "还有一个 on",
+    "music": 0
+  },
+  {
+    "from": 204.94,
+    "to": 207.14,
+    "sid": 91,
+    "location": 2,
+    "content": "控制格子灰不灰",
+    "music": 0
+  },
+  {
+    "from": 207.19,
+    "to": 208.79,
+    "sid": 92,
+    "location": 2,
+    "content": "多回没用",
+    "music": 0
+  },
+  {
+    "from": 208.84,
+    "to": 210.44,
+    "sid": 93,
+    "location": 2,
+    "content": "少回就崩",
+    "music": 0
+  },
+  {
+    "from": 210.49,
+    "to": 212.69,
+    "sid": 94,
+    "location": 2,
+    "content": "有的页面不判空",
+    "music": 0
+  },
+  {
+    "from": 212.74,
+    "to": 214.74,
+    "sid": 95,
+    "location": 2,
+    "content": "你回个 ok",
+    "music": 0
+  },
+  {
+    "from": 214.79,
+    "to": 216.59,
+    "sid": 96,
+    "location": 2,
+    "content": "它当场报错",
+    "music": 0
+  },
+  {
+    "from": 216.64,
+    "to": 219.44,
+    "sid": 97,
+    "location": 2,
+    "content": "看起来就是点了没反应",
+    "music": 0
+  },
+  {
+    "from": 219.49,
+    "to": 221.09,
+    "sid": 98,
+    "location": 2,
+    "content": "别猜",
+    "music": 0
+  },
+  {
+    "from": 221.14,
+    "to": 223.14,
+    "sid": 99,
+    "location": 2,
+    "content": "找不到消费者",
+    "music": 0
+  },
+  {
+    "from": 223.19,
+    "to": 224.79,
+    "sid": 100,
+    "location": 2,
+    "content": "就不写",
+    "music": 0
+  },
+  {
+    "from": 224.84,
+    "to": 227.44,
+    "sid": 101,
+    "location": 2,
+    "content": "最容易骗自己的地方",
+    "music": 0
+  },
+  {
+    "from": 227.49,
+    "to": 229.29,
+    "sid": 102,
+    "location": 2,
+    "content": "是业务错误",
+    "music": 0
+  },
+  {
+    "from": 229.34,
+    "to": 232.74,
+    "sid": 103,
+    "location": 2,
+    "content": "回了个 -1 冒号 300",
+    "music": 0
+  },
+  {
+    "from": 232.79,
+    "to": 234.79,
+    "sid": 104,
+    "location": 2,
+    "content": "没有 Tab",
+    "music": 0
+  },
+  {
+    "from": 234.84,
+    "to": 236.64,
+    "sid": 105,
+    "location": 2,
+    "content": "客户端一切",
+    "music": 0
+  },
+  {
+    "from": 236.69,
+    "to": 239.29,
+    "sid": 106,
+    "location": 2,
+    "content": "数据变成 null",
+    "music": 0
+  },
+  {
+    "from": 239.34,
+    "to": 241.14,
+    "sid": 107,
+    "location": 2,
+    "content": "提示被吞了",
+    "music": 0
+  },
+  {
+    "from": 241.19,
+    "to": 243.19,
+    "sid": 108,
+    "location": 2,
+    "content": "玩家看到的是",
+    "music": 0
+  },
+  {
+    "from": 243.24,
+    "to": 244.84,
+    "sid": 109,
+    "location": 2,
+    "content": "道具没扣",
+    "music": 0
+  },
+  {
+    "from": 244.89,
+    "to": 246.49,
+    "sid": 110,
+    "location": 2,
+    "content": "也没提示",
+    "music": 0
+  },
+  {
+    "from": 246.54,
+    "to": 248.74,
+    "sid": 111,
+    "location": 2,
+    "content": "你以为是逻辑错",
+    "music": 0
+  },
+  {
+    "from": 248.79,
+    "to": 250.79,
+    "sid": 112,
+    "location": 2,
+    "content": "其实是格式错",
+    "music": 0
+  },
+  {
+    "from": 250.84,
+    "to": 255.34,
+    "sid": 113,
+    "location": 2,
+    "content": "改成 -1 Tab -1 冒号 300",
+    "music": 0
+  },
+  {
+    "from": 255.39,
+    "to": 257.19,
+    "sid": 114,
+    "location": 2,
+    "content": "提示出来了",
+    "music": 0
+  },
+  {
+    "from": 257.24,
+    "to": 259.04,
+    "sid": 115,
+    "location": 2,
+    "content": "日志也有了",
+    "music": 0
+  },
+  {
+    "from": 259.09,
+    "to": 260.69,
+    "sid": 116,
+    "location": 2,
+    "content": "记住",
+    "music": 0
+  },
+  {
+    "from": 260.74,
+    "to": 264.14,
+    "sid": 117,
+    "location": 2,
+    "content": "HTTP 200 不是成功",
+    "music": 0
+  },
+  {
+    "from": 264.19,
+    "to": 265.79,
+    "sid": 118,
+    "location": 2,
+    "content": "数值最难",
+    "music": 0
+  },
+  {
+    "from": 265.84,
+    "to": 267.84,
+    "sid": 119,
+    "location": 2,
+    "content": "因为你想当然",
+    "music": 0
+  },
+  {
+    "from": 267.89,
+    "to": 269.49,
+    "sid": 120,
+    "location": 2,
+    "content": "顺序是",
+    "music": 0
+  },
+  {
+    "from": 269.54,
+    "to": 271.34,
+    "sid": 121,
+    "location": 2,
+    "content": "配置表第一",
+    "music": 0
+  },
+  {
+    "from": 271.39,
+    "to": 273.59,
+    "sid": 122,
+    "location": 2,
+    "content": "游戏内帮助第二",
+    "music": 0
+  },
+  {
+    "from": 273.64,
+    "to": 275.64,
+    "sid": 123,
+    "location": 2,
+    "content": "你的设计第三",
+    "music": 0
+  },
+  {
+    "from": 275.69,
+    "to": 277.89,
+    "sid": 124,
+    "location": 2,
+    "content": "配置表是原厂的",
+    "music": 0
+  },
+  {
+    "from": 277.94,
+    "to": 279.74,
+    "sid": 125,
+    "location": 2,
+    "content": "但也会坑你",
+    "music": 0
+  },
+  {
+    "from": 279.79,
+    "to": 282.19,
+    "sid": 126,
+    "location": 2,
+    "content": "怪物表抄了宠物表",
+    "music": 0
+  },
+  {
+    "from": 282.24,
+    "to": 284.04,
+    "sid": 127,
+    "location": 2,
+    "content": "列序不一样",
+    "music": 0
+  },
+  {
+    "from": 284.09,
+    "to": 285.69,
+    "sid": 128,
+    "location": 2,
+    "content": "照着读",
+    "music": 0
+  },
+  {
+    "from": 285.74,
+    "to": 287.34,
+    "sid": 129,
+    "location": 2,
+    "content": "数值全错",
+    "music": 0
+  },
+  {
+    "from": 287.39,
+    "to": 289.79,
+    "sid": 130,
+    "location": 2,
+    "content": "帮助文本也会骗人",
+    "music": 0
+  },
+  {
+    "from": 289.84,
+    "to": 294.04,
+    "sid": 131,
+    "location": 2,
+    "content": "它写着 1500 代 30 个特性",
+    "music": 0
+  },
+  {
+    "from": 294.09,
+    "to": 297.49,
+    "sid": 132,
+    "location": 2,
+    "content": "它自己的公式算出来是 39",
+    "music": 0
+  },
+  {
+    "from": 297.54,
+    "to": 299.54,
+    "sid": 133,
+    "location": 2,
+    "content": "只信能自证的",
+    "music": 0
+  },
+  {
+    "from": 299.59,
+    "to": 301.99,
+    "sid": 134,
+    "location": 2,
+    "content": "剩下全标本地设计",
+    "music": 0
+  },
+  {
+    "from": 302.04,
+    "to": 304.04,
+    "sid": 135,
+    "location": 2,
+    "content": "别装是原厂的",
+    "music": 0
+  },
+  {
+    "from": 304.09,
+    "to": 305.69,
+    "sid": 136,
+    "location": 2,
+    "content": "然后存档",
+    "music": 0
+  },
+  {
+    "from": 305.74,
+    "to": 308.34,
+    "sid": 137,
+    "location": 2,
+    "content": "SQLite 就够",
+    "music": 0
+  },
+  {
+    "from": 308.39,
+    "to": 309.99,
+    "sid": 138,
+    "location": 2,
+    "content": "先只读",
+    "music": 0
+  },
+  {
+    "from": 310.04,
+    "to": 311.64,
+    "sid": 139,
+    "location": 2,
+    "content": "再写",
+    "music": 0
+  },
+  {
+    "from": 311.69,
+    "to": 314.29,
+    "sid": 140,
+    "location": 2,
+    "content": "每个写操作一个事务",
+    "music": 0
+  },
+  {
+    "from": 314.34,
+    "to": 315.94,
+    "sid": 141,
+    "location": 2,
+    "content": "退出重进",
+    "music": 0
+  },
+  {
+    "from": 315.99,
+    "to": 317.59,
+    "sid": 142,
+    "location": 2,
+    "content": "数据还在",
+    "music": 0
+  },
+  {
+    "from": 317.64,
+    "to": 319.24,
+    "sid": 143,
+    "location": 2,
+    "content": "才算过",
+    "music": 0
+  },
+  {
+    "from": 319.29,
+    "to": 321.09,
+    "sid": 144,
+    "location": 2,
+    "content": "改多了会乱",
+    "music": 0
+  },
+  {
+    "from": 321.14,
+    "to": 323.54,
+    "sid": 145,
+    "location": 2,
+    "content": "一个任务一个分支",
+    "music": 0
+  },
+  {
+    "from": 323.59,
+    "to": 325.19,
+    "sid": 146,
+    "location": 2,
+    "content": "一个端口",
+    "music": 0
+  },
+  {
+    "from": 325.24,
+    "to": 326.84,
+    "sid": 147,
+    "location": 2,
+    "content": "一个存档",
+    "music": 0
+  },
+  {
+    "from": 326.89,
+    "to": 328.49,
+    "sid": 148,
+    "location": 2,
+    "content": "一个窗口",
+    "music": 0
+  },
+  {
+    "from": 328.54,
+    "to": 330.74,
+    "sid": 149,
+    "location": 2,
+    "content": "窗口标题带名字",
+    "music": 0
+  },
+  {
+    "from": 330.79,
+    "to": 332.79,
+    "sid": 150,
+    "location": 2,
+    "content": "截图按标题抓",
+    "music": 0
+  },
+  {
+    "from": 332.84,
+    "to": 335.04,
+    "sid": 151,
+    "location": 2,
+    "content": "两个版本同时跑",
+    "music": 0
+  },
+  {
+    "from": 335.09,
+    "to": 336.69,
+    "sid": 152,
+    "location": 2,
+    "content": "互不干扰",
+    "music": 0
+  },
+  {
+    "from": 336.74,
+    "to": 338.54,
+    "sid": 153,
+    "location": 2,
+    "content": "测试只许加",
+    "music": 0
+  },
+  {
+    "from": 338.59,
+    "to": 340.19,
+    "sid": 154,
+    "location": 2,
+    "content": "不许删",
+    "music": 0
+  },
+  {
+    "from": 340.24,
+    "to": 342.24,
+    "sid": 155,
+    "location": 2,
+    "content": "满意了再打包",
+    "music": 0
+  },
+  {
+    "from": 342.29,
+    "to": 344.29,
+    "sid": 156,
+    "location": 2,
+    "content": "adt 签名",
+    "music": 0
+  },
+  {
+    "from": 344.34,
+    "to": 345.94,
+    "sid": 157,
+    "location": 2,
+    "content": "装真机",
+    "music": 0
+  },
+  {
+    "from": 345.99,
+    "to": 348.99,
+    "sid": 158,
+    "location": 2,
+    "content": "adb reverse",
+    "music": 0
+  },
+  {
+    "from": 349.04,
+    "to": 351.44,
+    "sid": 159,
+    "location": 2,
+    "content": "记住端口转发会掉",
+    "music": 0
+  },
+  {
+    "from": 351.49,
+    "to": 353.69,
+    "sid": 160,
+    "location": 2,
+    "content": "掉了就网络错误",
+    "music": 0
+  },
+  {
+    "from": 353.74,
+    "to": 355.74,
+    "sid": 161,
+    "location": 2,
+    "content": "重建一下就行",
+    "music": 0
+  },
+  {
+    "from": 355.79,
+    "to": 357.39,
+    "sid": 162,
+    "location": 2,
+    "content": "最后",
+    "music": 0
+  },
+  {
+    "from": 357.44,
+    "to": 359.04,
+    "sid": 163,
+    "location": 2,
+    "content": "别商用",
+    "music": 0
+  },
+  {
+    "from": 359.09,
+    "to": 360.89,
+    "sid": 164,
+    "location": 2,
+    "content": "别传播素材",
+    "music": 0
+  },
+  {
+    "from": 360.94,
+    "to": 362.54,
+    "sid": 165,
+    "location": 2,
+    "content": "别架公网",
+    "music": 0
+  },
+  {
+    "from": 362.59,
+    "to": 364.39,
+    "sid": 166,
+    "location": 2,
+    "content": "有法律风险",
+    "music": 0
+  },
+  {
+    "from": 364.44,
+    "to": 366.04,
+    "sid": 167,
+    "location": 2,
+    "content": "就这些",
+    "music": 0
+  },
+  {
+    "from": 366.09,
+    "to": 367.69,
+    "sid": 168,
+    "location": 2,
+    "content": "你也可以",
+    "music": 0
+  },
+  {
+    "from": 367.74,
+    "to": 369.34,
+    "sid": 169,
+    "location": 2,
+    "content": "去救一个",
+    "music": 0
+  }
+]
