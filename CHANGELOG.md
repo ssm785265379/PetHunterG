@@ -4,6 +4,7 @@
 
 ## 2026-10-25
 
+- `8085035` 10-25 17:58 — merge: 515 返回可渲染的防守资料（`feat/loadout-profile` `ff7957f`）——`name/lv/job/sex/img/pic_num/skills/buffs` + 六维 + `weapon/clothes/hat`（含 `*_level`/`*_index`）+ 防守宠物列表 + `is_default/updated_at`；无快照回退 PvE；客户端防守页可只靠 515 渲染，不必先发 510；234 → **235 passed**
 - `724cae5` 10-25 17:50 — merge: 擂台防守页服务端（`feat/loadout-server` `af06548`）——`22` 装备 tab 支持 `slot=1/2/3`（按 `equip.txt type` 过滤后分页，`bag_size` 同口径）；`44/45` 新增 `ttype=3` 只写 `player_loadouts(kind='arena_defense')`，**不改** `pets.squad_slot`；`ttype=1/2` 保持 PvE 语义；232 → **234 passed**
 - `9311f07` 10-25 17:45 — merge: 合成口径纠正（`fix/pet-synthesis-semantics` `53dc50d`）——技能与特性被搞反：技能应为**随机替换/重组（不升级）**、特性应为**累加 + 同族取高等级 + 30% 升级**；新增 `_merge_traits`，利用 trait id 自带等级（`族×100+等级`）无需加列；231 → **232 passed**
 - `53dc50d` 10-25 17:38 — fix(合成): **特性和技能的合成口径对调纠正** —— 技能 = 定长槽位**随机替换/重组**（`_merge_skills` 取消族并集累加、取消 30% 升 1 级，等级随条目原样保留，`|池| > 槽位` 时随机保留）；特性 = **集合累加** + 同族取高等级 + 30% 概率 +1 级（新 `_merge_traits`，等级编码 = 族×100+等级，数量上限 `min(30, isqrt(gen)+1)`、等级上限 `min(25, isqrt(gen)+1)`）；规格 §4.7 的 R1 与两行口径同步改写；231 → **232 passed**
