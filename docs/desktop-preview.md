@@ -59,9 +59,28 @@ powershell -ExecutionPolicy Bypass -File .\tools\preview-shot.ps1 -ClientArea -N
 
 - 同时最多 3 个窗口（每个 ADL 约 200MB）；第 4 个先停一个。
 - 抓图按标题精确匹配：`preview-shot.ps1 -Title "PetHunterG preview [b1]"`。
-- **现状**：`dev-desktop.ps1` 还是单实例（固定 8080、固定 `build\desktop-dev`、启动前 `Stop-Process adl64`）。
-  多窗口参数（`-Label` / `-Port` / `-NoKill` / `-DevDir`）与 `tools/lane.ps1` 在看板 **T01 / T02**，
-  落地后本节命令才成立；在那之前只能一次开一个窗口。
+- **每个 lane 的窗口用不同的 app id**（`com.lv1.hunter.dev.<lane>`）：ADL 是按 application id 单实例的，
+  同 id 的第二个进程会把启动请求转发给第一个窗口然后自己退出（症状是"窗口一闪而过、日志只有
+  `invocation forwarded to primary instance`"）。
+- 起窗口：`dev-desktop.ps1 -Label b1 -Port 8081`；停只停自己那个（pid 记在 `<DevDir>\adl.pid`），
+  不会误杀别的 lane。整套「服务 + 窗口 + 存档」用 `tools/lane.ps1 start b1` 一条命令。
+
+## lane 脚手架（`tools/lane.ps1`）
+
+```powershell
+pwsh tools\lane.ps1 new   b1 feat/hero-growth      # worktree .worktrees\b1 + 分支 + 端口 8081
+pwsh tools\lane.ps1 start b1 [-CopySave] [-NoUi]   # 起 Flask(8081) + 窗口 [b1]；-CopySave 复制主存档
+pwsh tools\lane.ps1 shoot b1 -Shot bag-popup       # → docs/preview/<日期>/<时间>-b1-bag-popup.png
+pwsh tools\lane.ps1 list                           # lane / 端口 / health / flask pid / 窗口 pid
+pwsh tools\lane.ps1 stop  b1                       # 只停 8081 与该窗口
+pwsh tools\lane.ps1 remove b1 [-Force]             # 删 worktree（分支保留）
+```
+
+- lane 的存档是 `worktrees\<lane>\server\instance\game.sqlite3`，首次启动自动建空库；
+  想看自己真实存档就 `start -CopySave`（会在启动前复制主库，运行中不允许覆盖）。
+- lane 首次跑客户端补丁前没有 `build\`，`start` 会退回预览主仓库的
+  `build\input-explore\APetHunter.swf` 并把服务地址改写到该 lane 的端口；要验证客户端补丁就在
+  lane 里跑 `rebuild-client-patches.py` 后再 `start -Build`。
 
 ## 脚本做了什么（`dev-desktop.ps1`）
 
