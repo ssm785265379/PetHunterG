@@ -2,6 +2,11 @@
 
 本文件按时间倒序记录每一次已提交的改动。规则见 `docs/dev-workflow.md`：**一次修复 = 一次提交 = 一次测试**。
 
+## 2026-10-26
+
+- `docs` 10-26 01:05 — 交接归档 `docs/handoff-2026-10-26.md`：276 passed 基线、今日合入的 T04/T15/T16/T16b/T19/T20、未完成的 b17 客户端补丁/T11 四项/109 崩溃/擂台入口/107 条目/UI P0 七条、常用命令与 APK 打包全流程
+- `chore(打包)` 10-26 01:02 — 重新打包 `client/air51-repack/build/out/PetHunterG-LocalWiFi.apk`：SWF `456876` bytes（含图鉴/铁匠/P1 战斗补丁），APK **43,330,124** bytes，SHA-256 `DB2189368F2A9A9B0ADC5CF8714D6840EF0DD09C7F0269850592BE5046D2FFF1`，`air.com.lv1.hunter.localwifi` 2.7.3，服务地址 `127.0.0.1:8080`（配 `adb reverse`）
+
 ## 2026-10-25
 
 - `335fde4` 10-25 18:52 — merge: 图鉴/神器（`fix/illustration` `7069ef4`）——**25/26** 改用 `pic.txt` 全量（宠物 342 / 装备 936 / 道具 97 / 发现 42，真分页，`is_reward`=已登记，`finish_rate` 真实）；**客户端** `GetPicItem` 缺 `p<icon>` 不再崩（跳过立绘继续画名字/奖励）、奖励 192 行距改横排 72/64、无奖励隐藏标题、书图标改开图鉴总览；**7 号**新增 `_pic_id_for_pet()`，弹窗/入库/25 列表三处 id 统一（1003 个怪 icon 全在 pic.txt，0 例外）；**48/49** 进度改为 `pic_unlocked ∩ 四页签`（1417 条），重复领仍 `-1:504`；**107** 四档 `ttype=1..4` 固定 `{id,need_money:0,is_reward:0,pics:[]}`（条目清单随包无表，未编），**108 注册为明确 `-1:100` 拒绝**（避免空 pics 时客户端 `0>=0` 走假成功）；256 → **276 passed**
