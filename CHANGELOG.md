@@ -4,6 +4,10 @@
 
 ## 2026-10-25
 
+- `5f20884` 10-25 14:05 — refactor(服务): `/flash.do` 的 100 多条 `showId` if 链换成 `_SHOW_HANDLERS` 路由表——两个并行 lane 加命令不再抢同一段；测试 helper 抽到 `tests/support.py`、autouse fixture 抽到 `tests/conftest.py`，新测试可按主题独立成文件；新增 `test_routing.py` 逐条打表（不 5xx、成功回包 echo showId、错误体仍是 `-1\t-1:<id>`、未命中落到空信封）；**179 passed**
+- `403a7fb` 10-25 13:58 — feat(工具): lane 脚手架 `tools/lane.ps1`——`new/start/shoot/stop/list/remove` 一条命令管 worktree + 分支 + 端口(8081–8089) + 独立存档 + 独立窗口；`-CopySave` 复制主库存档（运行中拒绝覆盖）；`stop` 只停该端口与该窗口；实测 b1(8081)/b2(8082) 同时 `/health` 200、互不串库
+- `55d1a1c` 10-25 13:50 — feat(工具): 桌面预览按 lane 开窗口——`dev-desktop.ps1` 新增 `-Label/-Port/-DevDir/-NoKill`，只重启自己那个窗口（`<DevDir>\adl.pid`）；每个 lane 独立 app id（ADL 按 app id 单实例，同 id 第二个进程只会转发启动后退出）；`preview-shot.ps1` 新增 `-Width/-Height`，把 150% 缩放下抓到的 960×1440 缩回 640×960。实测 [main]/[b1] 两窗口并存
+- `f50206d` 10-25 13:40 — docs: 多 agent 并行准则 `AGENTS.md`（lane = 一个任务 = 一个分支 = 一个 worktree = 一个端口 = 一个窗口；合并门 6 条；真机由用户操作、agent 只读日志）+ `docs/task-board.md` 任务看板 + `tools/preview-shot.ps1` 截图归档；`.gitignore` 增加 `.worktrees/`、`docs/preview/`、`_acl-recovery/`
 - `9a93a16` 10-25 13:20 — fix(道具): 业务错误终于能看见了——`_pet_error` 以前回没有 tab 的裸 `-1:300`，客户端按 tab 切分后数据段变 `"null"`，`GameUtil.isError()` 失效、错误被整段吞掉（玩家只看到"道具没扣也没提示"）；现在统一 `-1\t-1:<id>`，并把 7/26 满值改成 415「现在体力充沛」、无效果道具改 417「该道具不能直接使用」、开蛋宠物满改 500「宠物数量已达最大」。同时落地限时增益：`player_buffs` 表 + 幸运四叶草（全能力+30 进战斗）、狩猎秘籍（狩猎经验×1.5）、荣誉勋章（擂台水晶×2 记录）、探险饮料（回探险行动值），三者按 prop.txt 累加狩猎行动值上限；11 号报真实扩建证书数量、40 号真扣 10013（不够回 205）；开蛋/开箱把新宠物写进 `pending_box`，22 号 `notice_box` 带回，客户端弹「获得宠物 ×N」（3 列两行、超出可上下拖动、点宠物进面板且不移除、右上角 X 或点空白关闭）。客户端：数量行按真实按钮宽度居中、`√/X` 按美术重心补 8px、数字改成可点输入框、素材可点并提示 417、弹窗遮罩改 Button（Shape/裸 Bitmap 在真机收不到点击，会穿透）；175 passed
 - `e1c3fb8` 10-25 01:50 — feat(道具): 使用弹窗——点道具先弹【名称/remark/数量 − N +/使用/取消】，确认后 50 号带 `num` 批量结算；结果文本写入 `players.pending_notice`，下一次 22 号带回并清空（50 的响应不一定能路由回背包页）。真机验证「银币 +5000」结果弹窗；数量文字略偏右（x=260，可改 240）
 - `c425014` 10-25 01:00 — feat(道具): 50 号支持 `num` 批量使用——体力/背包容量按剩余空间少用、宠物经验一次加 N 份并报升级、宝箱一次开 N 个汇总奖励；响应新增 `used/text`；171 passed
