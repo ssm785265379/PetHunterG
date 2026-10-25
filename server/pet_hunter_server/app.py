@@ -156,6 +156,54 @@ def exp_to_next(lv: int) -> int:
     if lv <= 500:
         return 700_000 + 10_000 * (lv - 200)
     return 4_000_000 + 60_000 * (lv - 500)
+
+
+# 人物（猎人）等级：1-1000，经验够了自动升；称号另走 upRole 的 72 手动转职。
+# LOCAL DEFAULT: 原服的人物经验表不可恢复，下面四个系数是本地调参（1 级一场
+# 狩猎即可升到 2 级，方便真机验证；长线 400/600/800/1000 级仍是称号门槛）。
+LOCAL_HERO_MAX_LEVEL = 1000
+LOCAL_HERO_EXP_BASE = 100
+LOCAL_HERO_EXP_GROWTH = 10
+# 战斗给人物经验：基础 + 每个参考等级。
+LOCAL_HERO_BATTLE_EXP_BASE = 200
+LOCAL_HERO_BATTLE_EXP_PER_REF = 20
+
+
+def hunter_exp_to_next(lv: int) -> int:
+    """LOCAL DEFAULT 人物升级所需经验：100 + 10*(lv-1)（1→2 级 100，400 级 4090）。"""
+    return LOCAL_HERO_EXP_BASE + LOCAL_HERO_EXP_GROWTH * (max(1, int(lv)) - 1)
+
+
+def hero_battle_exp(reference_lv: int) -> int:
+    """LOCAL DEFAULT 一场战斗给的人物经验，按对手参考等级增长。"""
+    return LOCAL_HERO_BATTLE_EXP_BASE + LOCAL_HERO_BATTLE_EXP_PER_REF * max(
+        0, int(reference_lv)
+    )
+
+
+def _grant_hero_exp(connection, player_id: int, amount: int) -> int:
+    """加人物经验并自动升级，返回新等级。
+
+    经验只在当前等级内累积，升级会扣掉所需值；1000 级封顶后经验继续累积但
+    不再升级（与宠物 `_grant_pet_exp` 的口径一致）。升级本身不发宝箱，宝箱
+    在 72 转职时按 upRole.rewardGoods 发。
+    """
+    if amount <= 0:
+        return 0
+    row = connection.execute(
+        "SELECT lv, exp FROM players WHERE id=?", (player_id,)
+    ).fetchone()
+    if row is None:
+        return 0
+    lv = max(1, int(row["lv"] or 1))
+    exp = int(row["exp"] or 0) + int(amount)
+    while lv < LOCAL_HERO_MAX_LEVEL and exp >= hunter_exp_to_next(lv):
+        exp -= hunter_exp_to_next(lv)
+        lv += 1
+    connection.execute(
+        "UPDATE players SET lv=?, exp=? WHERE id=?", (lv, exp, player_id)
+    )
+    return lv
 # LOCAL DEFAULT: exp a single battle awards to each pet that took part, per
 # monster level. 100,000 means a lv-1 hunt is ~10% of a level.
 # Fallback only: monster.txt ships a per-monster `exp` column, which is the real
@@ -511,6 +559,16 @@ def _initialize_database(database_path: Path) -> None:
         if "max_explore_ap" not in player_columns:
             connection.execute(
                 f"ALTER TABLE players ADD COLUMN max_explore_ap INTEGER NOT NULL DEFAULT {LOCAL_DEFAULT_EXPLORE_AP}"
+            )
+        # 人物成长（阶段 2）：lv 靠战斗经验自动升，job 是 1-120 的称号/转生。
+        # exp 存当前等级内的余量；老存档保留 lv，默认 job=1 / exp=0。
+        if "exp" not in player_columns:
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN exp INTEGER NOT NULL DEFAULT 0"
+            )
+        if "job" not in player_columns:
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN job INTEGER NOT NULL DEFAULT 1"
             )
         if "pending_notice" not in player_columns:
             # 50 号使用结果：客户端不一定能把 50 的响应路由回背包页，下一次 22
@@ -1233,6 +1291,18 @@ ROLE_BASE_STATS = {
     "phy_def": 10,
     "mag_def": 10,
 }
+# LOCAL DEFAULT 人物成长系数：六维共用，1 级 1 称号时乘数恰为 1（老存档不变）。
+LOCAL_HERO_LEVEL_STAT_STEP = 0.006
+LOCAL_HERO_JOB_STAT_STEP = 0.02
+
+
+def _hero_stat_multiplier(lv: int, job: int) -> float:
+    """1 + 0.6%/级 + 2%/称号；面板与战斗共用。"""
+    return (
+        1
+        + LOCAL_HERO_LEVEL_STAT_STEP * (max(1, int(lv)) - 1)
+        + LOCAL_HERO_JOB_STAT_STEP * (max(1, int(job)) - 1)
+    )
 # The bare character is THREE layers, not one. CreateUI.as:366-378 builds the
 # default skin as "100001_100002_100003" (male) / "100001_100004_100005" (female):
 # body + head + hair. Sending only 100001 drew a headless hunter, because no other
@@ -1338,13 +1408,35 @@ def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     return "_".join(str(lid) for lid in layers)
 
 
-def _role_stats(worn: dict[int, sqlite3.Row]) -> dict[str, int]:
-    """Base stats plus the summed bonuses of every worn equipment."""
-    totals = dict(ROLE_BASE_STATS)
+def _role_stats(
+    worn: dict[int, sqlite3.Row], lv: int = 1, job: int = 1
+) -> dict[str, int]:
+    """Base × (等级 + 称号) + 装备；面板与战斗共用这一份。
+
+    LOCAL DEFAULT: 原服的人物成长系数不可恢复。1 级 1 称号时乘数为 1，所以老
+    存档的数值不变；等级/称号越高越强，且 510/2/3/37 与战斗读的是同一个函数。
+    """
+    mult = _hero_stat_multiplier(lv, job)
+    totals = {key: round(value * mult) for key, value in ROLE_BASE_STATS.items()}
     for row in worn.values():
         for key in totals:
             totals[key] += row[key] or 0
     return totals
+
+
+def _equipment_skills(worn: dict[int, sqlite3.Row]) -> list[dict[str, int]]:
+    """已穿装备自带的技能，按 id 去重排序。
+
+    返回 `[{"id": 101}, ...]` 而不是 `[101, ...]`：RoleInfoUI.as:158-166 调
+    GameUtil.getSkill()，后者逐项读 `_loc6_.id`，传裸整数会显示成空。技能只做
+    展示，不进入 `_battle_side`，不改变伤害。
+    """
+    seen: set[int] = set()
+    for row in worn.values():
+        record = config_tables.equip_record(row["item_id"])
+        if record:
+            seen.update(config_tables.equip_skills(record))
+    return [{"id": skill_id} for skill_id in sorted(seen)]
 
 
 def _equipped_slot_fields(worn: dict[int, sqlite3.Row]) -> dict[str, object]:
@@ -1382,20 +1474,21 @@ def _player_payload(connection: sqlite3.Connection, player: sqlite3.Row) -> dict
     # stats, the three equipment slots and `img` (the paper-doll layer string) were
     # all missing, which is why the panel printed `undefined` and why worn gear
     # never showed up on the character.
-    payload.update(_role_stats(worn))
+    payload.update(_role_stats(worn, player["lv"], player["job"]))
     payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
     payload["pic_num"] = pic_num
-    payload["skills"] = []
+    payload["skills"] = _equipment_skills(worn)
     payload["buffs"] = []
     payload.update(_equipped_slot_fields(worn))
     # Local starting state; guild and arena systems are not restored yet.
-    # HomeUI resolves job through the bundled upRole configuration.
-    payload.update(job=1, guild_name="", guild_position=0, arena_rank=_local_arena_rank())
+    # job/exp now come from the players row (dict(player) above): the old hardcoded
+    # job=1 made every promoted hunter look like a 1级猎人 in the panel.
+    payload.update(guild_name="", guild_position=0, arena_rank=_local_arena_rank())
     return payload
 
 
 _PLAYER_ROW_SQL = """
-    SELECT id, nick AS name, lv, sex, img, money, point, crystal,
+    SELECT id, nick AS name, lv, job, exp, sex, img, money, point, crystal,
            ht_ap, max_ht_ap, arena_ap, max_arena_ap
     FROM players WHERE uid = ?
 """
@@ -2445,18 +2538,126 @@ def _explore_discover_gain(need_rate: int) -> int:
 LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
 
 
-LOCAL_JOBS = {1: {"state":1}, 2: {"state":0}}
+def _job_goods(raw: str) -> list[dict[str, int]]:
+    """upRole.rewardGoods 的 `id:num,id:num` -> `[{id,num}]`；"0" 表示没有宝箱。"""
+    goods: list[dict[str, int]] = []
+    for part in str(raw or "").split(","):
+        bits = part.split(":")
+        if (
+            len(bits) >= 2
+            and bits[0].strip().isdigit()
+            and bits[1].strip().isdigit()
+            and int(bits[0]) > 0
+        ):
+            goods.append({"id": int(bits[0]), "num": int(bits[1])})
+    return goods
+
+
+def _job_table_int(row: dict[str, str], key: str) -> int:
+    raw = str(row.get(key, "") or "").strip()
+    return int(raw) if raw.isdigit() else 0
 
 
 def _job_list(database_path: Path) -> Response:
-    return _protocol_response(70,{"list":[{"job":k,"state":v["state"]} for k,v in LOCAL_JOBS.items()]})
+    """70 — 120 个称号/转生，按当前 job 标 state：2 已获得，1 可转，0 未开放。"""
+    uid = _request_value("uid")
+    try:
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+    current = int(player["job"] or 1)
+    entries = [
+        {
+            "job": job,
+            "state": 2 if job <= current else (1 if job == current + 1 else 0),
+        }
+        for job in sorted(config_tables.up_role_table())
+    ]
+    start = (page - 1) * size
+    return _protocol_response(70, {"list": entries[start:start + size]})
 
 
 def _job_detail(database_path: Path) -> Response:
-    try: job=int(_request_value("gid",""))
-    except ValueError:return _pet_error(100)
-    if job not in LOCAL_JOBS:return _pet_error(400)
-    return _protocol_response(71,{"job":job,"need_lv":1,"diff_lv":0,"nextRole":{"now_hp":0,"next_hp":0,"now_speed":0,"next_speed":0,"now_phy_att":0,"next_phy_att":0,"now_phy_def":0,"next_phy_def":0,"now_mag_att":0,"next_mag_att":0,"now_mag_def":0,"next_mag_def":0},"reward_goods":[]})
+    """71 — 一个称号的需求等级、转职掉级、六维对比与宝箱预览。"""
+    try:
+        job = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    table = config_tables.up_role_table()
+    if job not in table:
+        return _pet_error(400)
+    row = table[job]
+    uid = _request_value("uid")
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, lv, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        worn = _worn_equipment(connection, player["id"])
+    need = _job_table_int(row, "needLevel")
+    lower = _job_table_int(row, "lowerLevel")
+    now_lv = max(1, int(player["lv"] or 1))
+    now_job = int(player["job"] or 1)
+    now_stats = _role_stats(worn, now_lv, now_job)
+    next_stats = _role_stats(worn, max(1, now_lv - lower), job)
+    next_role: dict[str, int] = {}
+    for key in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"):
+        next_role[f"now_{key}"] = now_stats[key]
+        next_role[f"next_{key}"] = next_stats[key]
+    return _protocol_response(71, {
+        "job": job,
+        "need_lv": need,
+        "diff_lv": lower,
+        "nextRole": next_role,
+        "reward_goods": _job_goods(row.get("rewardGoods", "")),
+    })
+
+
+def _job_change(database_path: Path) -> Response:
+    """72 — 手动转职：只能转下一个称号，等级够才能转，成功后掉级并发宝箱。"""
+    try:
+        job = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    table = config_tables.up_role_table()
+    if job not in table:
+        return _pet_error(400)
+    uid = _request_value("uid")
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, lv, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        current = int(player["job"] or 1)
+        if job != current + 1:
+            # 非相邻称号 / 已到 120 级：不是"等级不够"，用通用参数错误。
+            return _pet_error(100)
+        need = _job_table_int(table[job], "needLevel")
+        if int(player["lv"] or 1) < need:
+            return _pet_error(207)
+        lower = _job_table_int(table[job], "lowerLevel")
+        new_lv = max(1, int(player["lv"] or 1) - lower)
+        connection.execute(
+            "UPDATE players SET job=?, lv=? WHERE id=?", (job, new_lv, player["id"])
+        )
+        goods = _job_goods(table[job].get("rewardGoods", ""))
+        if goods:
+            _grant_goods(
+                connection,
+                player["id"],
+                [(entry["id"], entry["num"]) for entry in goods],
+            )
+    return _protocol_response(72, {"value": "ok", "job": job, "lv": new_lv})
 
 
 def _pic_list(database_path: Path) -> Response:
@@ -2802,7 +3003,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # slots that RoleInfoUI.as:150-172 prints without any null guards.
     target=_request_value("gid") or _request_value("uid")
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,uid,nick,lv,sex FROM players WHERE uid=?",(target,)).fetchone()
+        p=c.execute("SELECT id,uid,nick,lv,job,sex FROM players WHERE uid=?",(target,)).fetchone()
         if p is None:return _pet_error(103)
         pets=c.execute("SELECT id AS 'index',pet_id AS id,icon,name,lv FROM pets WHERE player_id=?",(p["id"],)).fetchall()
         worn=_worn_equipment(c,p["id"])
@@ -2814,10 +3015,10 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
     # so both shapes are shipped.
     player_fields={"id":p["uid"],"name":p["nick"],"lv":p["lv"],
                    "img":_role_skin_string(worn,p["sex"]),
-                   "job":1,"guild_name":"0","guild_position":0,
+                   "job":p["job"],"guild_name":"0","guild_position":0,
                    "arena_rank":_local_arena_rank(),"pic_num":pic_num,
-                   **_role_stats(worn), **slots,
-                   "skills":[],"buffs":[]}
+                   **_role_stats(worn,p["lv"],p["job"]), **slots,
+                   "skills":_equipment_skills(worn),"buffs":[]}
     payload={**player_fields,
              "show_type":0,"player":player_fields,
              "pets":[dict(r) for r in pets]}
@@ -3024,17 +3225,18 @@ def _combat_stats(pet_row) -> tuple[int, int, int]:
 
 
 def _hunter_combat_stats(player_row, worn) -> tuple[int, int, int]:
-    """猎人的战斗数值：ROLE_BASE_STATS 随等级成长 + 装备加成。
+    """猎人的战斗数值：与 510/2/3/37 面板共用 `_role_stats` 的唯一口径。
 
-    基础值必须成长，否则 1000 级猎人仍然是 lv1 的 att10，"参战"没有意义。
+    等级/称号乘数已包含在 `_role_stats` 里，这里不能再叠一次等级系数，否则
+    面板一个数、打起来另一个数。
     """
-    stats = _role_stats(worn)
-    lv = max(1, int(player_row["lv"] or 1))
-    lf = 1 + 0.006 * (lv - 1)
-    hp = round(ROLE_BASE_STATS["hp"] * lf) + (stats["hp"] - ROLE_BASE_STATS["hp"])
-    att = round(ROLE_BASE_STATS["phy_att"] * lf) + (stats["phy_att"] - ROLE_BASE_STATS["phy_att"])
-    defence = round(ROLE_BASE_STATS["phy_def"] * lf) + (stats["phy_def"] - ROLE_BASE_STATS["phy_def"])
-    return hp, att, defence
+    keys = player_row.keys()
+    stats = _role_stats(
+        worn,
+        int(player_row["lv"] or 1),
+        int(player_row["job"] or 1) if "job" in keys else 1,
+    )
+    return stats["hp"], stats["phy_att"], stats["phy_def"]
 
 
 def _monster_stats(level: int) -> tuple[int, int, int]:
@@ -3284,7 +3486,7 @@ def _hunter_fight(database_path: Path) -> Response:
     monsters=_monsters_for_map(hid)
     if not monsters: return _pet_error(400)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,nick,lv,sex,ht_ap,max_ht_ap,rage_point FROM players WHERE uid=?",(uid,)).fetchone()
+        p=c.execute("SELECT id,nick,lv,job,sex,ht_ap,max_ht_ap,rage_point FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if p["ht_ap"] < 1: return _pet_error(100)
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
@@ -3327,6 +3529,11 @@ def _hunter_fight(database_path: Path) -> Response:
         # The pets that actually fought gain the battle exp, so levelling (and the
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
+        # 人物经验与宠物分开记：按本场怪物的最高等级给，失败只给十分之一。
+        # LOCAL DEFAULT 数值，见 hero_battle_exp。
+        hero_ref = max((int(monster["lv"] or 1) for monster in monsters), default=1)
+        hero_exp = hero_battle_exp(hero_ref)
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # Only the entries unlocked by THIS hunt may pop the 图鉴 banner; the
             # response used to list every monster in the fight, so an already
@@ -3998,7 +4205,7 @@ def _explore_start(database_path: Path) -> Response:
     except ValueError: return _pet_error(100)
     with _connect_database(database_path) as c:
         p=c.execute(
-            "SELECT id,nick,lv,sex,point,money,cur_explore_map,explore_ap,max_explore_ap"
+            "SELECT id,nick,lv,job,sex,point,money,cur_explore_map,explore_ap,max_explore_ap"
             " FROM players WHERE uid=?",(uid,)).fetchone()
         if p is None: return _pet_error(103)
         if gid is None:
@@ -4152,6 +4359,9 @@ def _explore_start(database_path: Path) -> Response:
             if is_win
             else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
         )
+        # 探险战斗也练人物；参考等级是本场实际出场的 reference_lv，失败十分之一。
+        hero_exp = hero_battle_exp(reference_lv)
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         progress = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
             (p["id"], gid),
@@ -4949,7 +5159,7 @@ def _fight_payload(database_path: Path, defenders):
     """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record)."""
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        p = c.execute("SELECT id,nick,lv,sex FROM players WHERE uid=?", (uid,)).fetchone()
+        p = c.execute("SELECT id,nick,lv,job,sex FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
             return None
         worn = _worn_equipment(c, p["id"])
@@ -5021,6 +5231,9 @@ def _arena_battle(database_path: Path) -> Response:
         ).fetchone()[0]
         arena_exp = _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
         _grant_pet_exp(c, arena_pets, arena_exp if is_win else arena_exp // 10)
+        # 擂台同样给人物经验；对手参考等级 = max(擂台保底等级, 队伍等级)。
+        hero_exp = hero_battle_exp(max(LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv)))
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
         "is_win": 1 if is_win else 0, "arena_ap": ap, "max_arena_ap": max_ap,
@@ -5109,6 +5322,9 @@ def _copy_battle(database_path: Path) -> Response:
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
         copy_exp = int(_battle_exp(stage_level, LOCAL_COPY_EXP_SHARE) * copy_mult)
         _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
+        # 副本按层参考等级给人物经验，失败十分之一。
+        hero_exp = hero_battle_exp(stage_level)
+        _grant_hero_exp(c, player["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # 记通关，73 才能显示完成度并解锁下一层（同层重复通关不重复推进）。
             c.execute(
@@ -7250,9 +7466,10 @@ _SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
     "91": _guild_members,
     "92": _create_guild,
     "94": _guild_battle,
-    # 称号 / 转职（70/71 已实现，72 转职在 T04 里补）
+    # 称号 / 转职：70 列表、71 详情、72 手动转职（读 upRole.txt）
     "70": _job_list,
     "71": _job_detail,
+    "72": _job_change,
 }
 
 
