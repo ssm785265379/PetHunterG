@@ -6658,25 +6658,153 @@ def _forge_equip_field(equip_id: int, column: str) -> int | None:
     return int(raw) if raw.lstrip("-").isdigit() else None
 
 
-# LOCAL DESIGN: the shipped config has no equipment-fusion table (the same is true
-# for pet training/evolution), so both the merge rule and the fee are ours.
-LOCAL_SYNTHESIS_FEE_BASE = 100
-LOCAL_SYNTHESIS_FEE_PER_LEVEL = 50
+# help.txt 条目 7《金币装备转化熔合说明》：
+#   1) 只有金币装备才能转化熔合          -> equip.txt `money` > 0
+#   2) 武器/铠甲/头盔只能同类转化        -> equip.txt `type`（1/2/3）相同
+#   3) 同级（同金币价值）收价值 20% 的蓝色晶石；升级转化收双方价值差额
+#   4) 蓝色晶石在金币商店购买            -> prop.txt 10032（error.txt 423 专用）
+#   5) 原装备特性转移到新装备，原装备消失
+#   6) 已经在使用的装备不能熔合          -> inventory.equipped = 1 拒绝
+#
+# 表里没有、只能本地定的部分（LOCAL DEFAULT）：
+#   * “价值”= equip.txt `money`（唯一的金币价格列）；蓝色晶石枚数按 prop.txt
+#     10032 自己的 money=100 金币折算 —— help 只给了 20%/差额，没给换算率。
+#   * 升级转化的产物 = 同类别、同性别、金币价值严格高一档里最低档；同档取 id 最小。
+#   * 同级转化的产物保持主装备本体（配置里没有“同价值互换表”）。
+#   * 产物强化等级：同级保留主装备等级，升级从 1 级开始；`pro` 沿用主装备。
+#   * 特性按产物的 equipEnchant.maxCount 截断（装备没有附魔行则不截断）。
+LOCAL_SYNTHESIS_PERCENT = 20
+LOCAL_BLUECRYSTAL_ID = 10032
+LOCAL_BLUECRYSTAL_FALLBACK_GOLD = 100
 _SYNTHESIS_STATS = ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")
 
 
-def _synthesis_fee(level: int) -> int:
-    return LOCAL_SYNTHESIS_FEE_BASE + LOCAL_SYNTHESIS_FEE_PER_LEVEL * max(1, int(level or 1))
+class _SynthesisRejected(Exception):
+    """help.txt 7 的某一条不满足；`code` 直接作为 `-1:<error.txt key>` 返回。"""
+
+    def __init__(self, code: int):
+        super().__init__(str(code))
+        self.code = code
 
 
-def _synthesis_merge(rows) -> dict[str, int]:
-    """Per stat: keep the better piece and add a quarter of the weaker one."""
-    merged: dict[str, int] = {}
-    for column in _SYNTHESIS_STATS:
-        values = sorted((int(row[column] or 0) for row in rows), reverse=True)
-        top, second = values[0], (values[1] if len(values) > 1 else 0)
-        merged[column] = top + second // 4
-    return merged
+def _equip_gold_value(record: dict[str, str] | None) -> int:
+    """equip.txt `money`，即 help 7 所说的“金币价值”；0 = 非金币装备。"""
+    return _forge_record_number(record or {}, "money")
+
+
+def _bluecrystal_gold_price() -> int:
+    """蓝色晶石自己的金币单价，用来把“价值”折成枚数（LOCAL DEFAULT 换算）。"""
+    price = _forge_record_number(
+        config_tables.prop_record(LOCAL_BLUECRYSTAL_ID) or {}, "money"
+    )
+    return price if price > 0 else LOCAL_BLUECRYSTAL_FALLBACK_GOLD
+
+
+def _synthesis_fee(main_value: int, vice_value: int) -> int:
+    """蓝色晶石枚数：同级收 20% 价值，升级收双方价值差额（help 7-3）。"""
+    price = _bluecrystal_gold_price()
+    if main_value == vice_value:
+        gold = main_value * LOCAL_SYNTHESIS_PERCENT / 100
+    else:
+        gold = abs(main_value - vice_value)
+    return max(1, math.ceil(gold / price))
+
+
+def _synthesis_upgrade_target(
+    record: dict[str, str], value: int
+) -> int | None:
+    """同类别、同性别、金币价值严格高于 `value`（双方较高值）的最低档装备 id。
+
+    LOCAL DEFAULT：同档取 id 最小，保证同一对材料永远合成同一件产物。
+    """
+    slot = config_tables.equip_slot(record)
+    sex = config_tables.equip_sex(record)
+    best: tuple[int, int] | None = None
+    for other_id, other in config_tables.equip_table().items():
+        if config_tables.equip_slot(other) != slot:
+            continue
+        if config_tables.equip_sex(other) != sex:
+            continue
+        money = _equip_gold_value(other)
+        if money <= value:
+            continue
+        candidate = (money, other_id)
+        if best is None or candidate < best:
+            best = candidate
+    return best[1] if best else None
+
+
+def _synthesis_merge(main_row, vice_row) -> dict:
+    """两件金币装备的熔合结果（help 7），不满足规则时抛 `_SynthesisRejected`。
+
+    79 预览与 80 执行都走这里，避免“预览一套规则、执行另一套规则”。
+    返回的 dict 带产物 id/icon/star/level/pro/属性/特性/费用，以及 same_tier
+    标记（同级转化不换装备本体）。
+    """
+    if main_row is None or vice_row is None or main_row["id"] == vice_row["id"]:
+        raise _SynthesisRejected(400)
+    main_record = config_tables.equip_record(main_row["item_id"])
+    vice_record = config_tables.equip_record(vice_row["item_id"])
+    if main_record is None or vice_record is None:
+        raise _SynthesisRejected(400)
+    if main_row["equipped"] or vice_row["equipped"]:
+        raise _SynthesisRejected(424)  # error.txt 424：已装备的物品不能进行装备融合
+    main_value = _equip_gold_value(main_record)
+    vice_value = _equip_gold_value(vice_record)
+    if main_value <= 0 or vice_value <= 0:
+        raise _SynthesisRejected(426)  # error.txt 426：非金币装备不能转化熔合
+    if config_tables.equip_slot(main_record) != config_tables.equip_slot(vice_record):
+        raise _SynthesisRejected(425)  # error.txt 425：不同部位的装备，不能进行融合
+
+    same_tier = main_value == vice_value
+    if same_tier:
+        target_id = main_row["item_id"]
+    else:
+        # help 7 只说“升级转化收双方价值差额”，没说产物取哪一件。LOCAL DEFAULT：
+        # 产物 = 同类别、同性别、金币价值严格高于双方的那一档里最低档（同档 id 最小），
+        # 这样两件不同价值的装备一定向上换一档，而不是把原料原样返还给玩家。
+        target_id = _synthesis_upgrade_target(
+            main_record, max(main_value, vice_value)
+        )
+        if target_id is None:
+            raise _SynthesisRejected(100)  # 已是最高档，没有可升级的产物
+    target_record = config_tables.equip_record(target_id)
+    if target_record is None:
+        raise _SynthesisRejected(100)
+
+    if same_tier:
+        # help 7-5 只要求“原装备消失、特性转移”，同级产物保持主装备本体：
+        # 属性/等级/星级/图标都用主装备当前值（可能已经被强化过）。
+        stats = {column: int(main_row[column] or 0) for column in _SYNTHESIS_STATS}
+        level = int(main_row["level"] or 1)
+        star = int(main_row["star"] or 1)
+        icon = main_row["icon"] or config_tables.equip_icon(target_record) or target_id
+    else:
+        # help 7 “升级转化”：产物按 equip.txt 属性重新生成，等级从 1 开始。
+        stats = config_tables.equip_stats(target_record)
+        level = 1
+        star = config_tables.equip_star(target_record)
+        icon = config_tables.equip_icon(target_record) or target_id
+
+    enchant = config_tables.equip_enchant_record(target_id)
+    cap = config_tables.equip_enchant_max_count(enchant) if enchant else None
+    return {
+        "id": target_id,
+        "icon": icon,
+        "star": star,
+        "level": level,
+        "pro": int(main_row["pro"] or 0),
+        "item_type": config_tables.equip_slot(target_record),
+        "use_type": _forge_record_number(target_record, "useType"),
+        "stats": stats,
+        "buffs": _merge_traits(
+            _trait_ids(main_row["buffs"]), _trait_ids(vice_row["buffs"]), cap
+        ),
+        "buff_cap": cap,
+        "skills": [{"id": skill_id} for skill_id in config_tables.equip_skills(target_record)],
+        "fee": _synthesis_fee(main_value, vice_value),
+        "same_tier": same_tier,
+    }
 
 
 def _equipment_row(connection: sqlite3.Connection, player_id: int, index: int):
@@ -6693,6 +6821,11 @@ def _synthesis_candidates(database_path: Path, exclude: int = 0) -> Response:
 
     Both screens read `list[]` with index/id/icon/loc (IntegrationListUI.as:227-234),
     and the vice picker sends the chosen `main` so it must not be offered again.
+
+    The list itself is now filtered by help.txt 7: only gold equipment (equip.txt
+    `money` > 0) that is not equipped, and for 78 only the main piece's own
+    category (weapon/armour/helmet). A non-gold starter piece therefore no longer
+    shows up as a fusion candidate.
     """
     command_id = 77 if exclude == 0 else 78
     uid = _request_value("uid")
@@ -6711,25 +6844,47 @@ def _synthesis_candidates(database_path: Path, exclude: int = 0) -> Response:
         player = c.execute("SELECT id, sex FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
+        main_slot: int | None = None
+        if command_id == 78:
+            # 78 是“副装备”列表：没有 main 就不知道该收哪一类，直接拒。
+            if not main:
+                return _pet_error(400)
+            main_row = _equipment_row(c, player["id"], main)
+            main_record = (
+                config_tables.equip_record(main_row["item_id"]) if main_row else None
+            )
+            if main_row is None or main_record is None:
+                return _pet_error(400)
+            main_slot = config_tables.equip_slot(main_record)
         rows = c.execute(
-            "SELECT id AS row_index, item_id, icon, level FROM inventory"
-            " WHERE player_id=? AND team=3 AND id<>? ORDER BY id LIMIT ? OFFSET ?",
-            (player["id"], main or max(0, exclude), size, (page - 1) * size),
+            "SELECT id AS row_index, item_id, icon, level, equipped FROM inventory"
+            " WHERE player_id=? AND team=3 AND id<>? ORDER BY id",
+            (player["id"], main),
         ).fetchall()
     equipment = []
     for row in rows:
         record = config_tables.equip_record(row["item_id"])
-        if record is not None and not _equip_matches_sex(row["item_id"], player["sex"]):
+        if record is None or not _equip_matches_sex(row["item_id"], player["sex"]):
             continue
+        if row["equipped"]:
+            continue  # help 7-6
+        if _equip_gold_value(record) <= 0:
+            continue  # help 7-1
+        if main_slot is not None and config_tables.equip_slot(record) != main_slot:
+            continue  # help 7-2
         equipment.append({
             "index": row["row_index"], "id": row["item_id"],
             "icon": row["icon"], "loc": row["level"] or 1,
         })
-    return _protocol_response(command_id, {"list": equipment, "type": 2, "value": "ok"})
+    start = (page - 1) * size
+    return _protocol_response(
+        command_id,
+        {"list": equipment[start:start + size], "type": 2, "value": "ok"},
+    )
 
 
 def _equip_synthesis_confirm(database_path: Path) -> Response:
-    """79 (EQUIP_SYN_CONFIRM) — the preview page: merged stats plus the fee."""
+    """79 (EQUIP_SYN_CONFIRM) — the preview page: result stats plus the fee."""
     uid = _request_value("uid")
     try:
         main = int(_request_value("main", ""))
@@ -6737,36 +6892,46 @@ def _equip_synthesis_confirm(database_path: Path) -> Response:
     except ValueError:
         return _pet_error(100)
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         main_row = _equipment_row(c, player["id"], main)
         vice_row = _equipment_row(c, player["id"], vice)
-        if main_row is None or vice_row is None or main == vice:
-            return _pet_error(400)
-    merged = _synthesis_merge((main_row, vice_row))
-    fee = _synthesis_fee(main_row["level"])
+        try:
+            plan = _synthesis_merge(main_row, vice_row)
+        except _SynthesisRejected as rejected:
+            return _pet_error(rejected.code)
+        own_stones = _owned_goods(c, player["id"], LOCAL_BLUECRYSTAL_ID)
     return _protocol_response(79, {
-        "id": main_row["item_id"],
-        "icon": main_row["icon"],
-        "star": main_row["star"],
-        "pro": main_row["pro"],
-        "level": main_row["level"],
-        **merged,
-        "skills": [], "buffs": [],
-        "need_money": fee, "own_money": player["money"],
+        "id": plan["id"],
+        "icon": plan["icon"],
+        "star": plan["star"],
+        "pro": plan["pro"],
+        "level": plan["level"],
+        **plan["stats"],
+        "skills": plan["skills"],
+        # help 7-5：原装备（双方）的特性都转移到产物上。
+        "buffs": [{"id": trait_id} for trait_id in plan["buffs"]],
+        "need_money": 0, "own_money": player["money"],
         "need_point": 0, "own_point": player["point"],
         "need_crystal": 0, "own_crystal": player["crystal"],
-        "need_goods": [],
+        "need_goods": [{
+            "id": LOCAL_BLUECRYSTAL_ID,
+            "need_num": plan["fee"],
+            "own_num": own_stones,
+        }],
         "value": "ok",
     })
 
 
 def _equip_synthesis_perform(database_path: Path) -> Response:
-    """80 (SYN_EQUIP) — fuse the vice piece into the main one.
+    """80 (SYN_EQUIP) — 熔合：双方原装备消失（升级转化换成产物），特性全转移。
 
-    The vice row is consumed (that is the whole point of the screen), the main row
-    keeps its identity and gains the merged stats.
+    help.txt 7：同级（同金币价值）转化保留主装备本体、收 20% 价值的蓝色晶石；
+    升级转化按双方价值差额收费并产出同槽位高一档的装备。扣减失败用 error.txt
+    423（蓝色晶石不足，请到金币商店购买）。
     """
     uid = _request_value("uid")
     try:
@@ -6777,30 +6942,70 @@ def _equip_synthesis_perform(database_path: Path) -> Response:
     if main == vice:
         return _pet_error(400)
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         main_row = _equipment_row(c, player["id"], main)
         vice_row = _equipment_row(c, player["id"], vice)
-        if main_row is None or vice_row is None:
-            return _pet_error(400)
-        fee = _synthesis_fee(main_row["level"])
-        if player["money"] < fee:
-            return _pet_error(403)
-        merged = _synthesis_merge((main_row, vice_row))
-        c.execute(
-            "UPDATE players SET money = money - ? WHERE id = ? AND money >= ?",
-            (fee, player["id"], fee),
-        )
-        assignments = ", ".join(f"{column} = ?" for column in _SYNTHESIS_STATS)
-        c.execute(
-            f"UPDATE inventory SET {assignments} WHERE id = ?",
-            (*[merged[column] for column in _SYNTHESIS_STATS], main),
-        )
-        c.execute("DELETE FROM inventory WHERE id = ? AND player_id = ?", (vice, player["id"]))
-        current = c.execute("SELECT id, item_id, icon FROM inventory WHERE id = ?", (main,)).fetchone()
+        try:
+            plan = _synthesis_merge(main_row, vice_row)
+        except _SynthesisRejected as rejected:
+            return _pet_error(rejected.code)
+        if not _spend_goods(c, player["id"], LOCAL_BLUECRYSTAL_ID, plan["fee"]):
+            return _pet_error(423)
+        buffs = ":".join(str(trait_id) for trait_id in plan["buffs"])
+        if plan["same_tier"]:
+            # 主装备本体不动，只把副装备的特性并进来，然后副装备消失。
+            c.execute("UPDATE inventory SET buffs=? WHERE id=?", (buffs, main))
+            c.execute(
+                "DELETE FROM inventory WHERE id=? AND player_id=?", (vice, player["id"])
+            )
+            result_index = main
+        else:
+            # 升级转化：主副两件都没了（help 7-5），产物按 equip.txt 重新生成。
+            c.execute(
+                "DELETE FROM inventory WHERE id IN (?,?) AND player_id=?",
+                (main, vice, player["id"]),
+            )
+            existing = c.execute(
+                "SELECT id, buffs FROM inventory WHERE player_id=? AND item_id=?",
+                (player["id"], plan["id"]),
+            ).fetchone()
+            if existing is not None:
+                # inventory is UNIQUE(player_id,item_id)：已经拥有同一件产物时叠加，
+                # 特性按产物上限合并（LOCAL DEFAULT：保留原有属性/等级）。
+                merged = _merge_traits(
+                    _trait_ids(existing["buffs"]), plan["buffs"], plan["buff_cap"]
+                )
+                c.execute(
+                    "UPDATE inventory SET quantity=quantity+1, buffs=? WHERE id=?",
+                    (":".join(str(trait_id) for trait_id in merged), existing["id"]),
+                )
+                result_index = existing["id"]
+            else:
+                c.execute(
+                    """INSERT INTO inventory (player_id,item_id,team,quantity,icon,
+                                              item_type,use_type,level,star,pro,
+                                              hp,speed,phy_att,mag_att,phy_def,mag_def,buffs)
+                       VALUES (?,?,3,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        player["id"], plan["id"], plan["icon"],
+                        plan["item_type"], plan["use_type"], plan["level"],
+                        plan["star"], plan["pro"],
+                        plan["stats"]["hp"], plan["stats"]["speed"],
+                        plan["stats"]["phy_att"], plan["stats"]["mag_att"],
+                        plan["stats"]["phy_def"], plan["stats"]["mag_def"],
+                        buffs,
+                    ),
+                )
+                result_index = c.execute(
+                    "SELECT id FROM inventory WHERE player_id=? AND item_id=?",
+                    (player["id"], plan["id"]),
+                ).fetchone()[0]
     return _protocol_response(80, {
-        "index": current["id"], "id": current["item_id"], "icon": current["icon"],
+        "index": result_index, "id": plan["id"], "icon": plan["icon"],
         "pic": [], "value": "ok",
     })
 

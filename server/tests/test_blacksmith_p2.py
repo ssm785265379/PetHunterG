@@ -219,6 +219,7 @@ def test_enchant_detail_rejects_a_piece_without_a_table_row(tmp_path: Path):
         starter = connection.execute(
             "SELECT id FROM inventory WHERE team = 3 ORDER BY id LIMIT 1"
         ).fetchone()[0]
+    # 20001 is a one-star piece: error.txt 9 「4星级（含）以上的装备才能附魔」.
     assert _raw(client, uid, showId="33", ttype="3", gid=str(starter)) == "-1\t-1:9"
 
 
@@ -415,3 +416,202 @@ def test_refine_refuses_a_piece_that_is_not_an_artifact(tmp_path: Path):
     assert _raw(client, uid, showId="33", ttype="2", gid=str(index)) == "-1\t-1:406"
     assert _raw(client, uid, showId="35", index=str(index)) == "-1\t-1:406", \
         "error.txt 406 此装备不能强化"
+
+# ---------------------------------------------------------------------------
+# 77/78: fusion candidate lists (help.txt 7-1 / 7-2 / 7-6)
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_candidates_require_gold_equipment_and_skip_equipped(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    equipped = _equip(database, uid, FUSION_MAIN, equipped=1)
+    free = _equip(database, uid, FUSION_VICE)
+
+    command, payload = _show(client, uid, showId="77", ttype="2", loc="0", p="1", n="9")
+    assert command == 77
+    indexes = [row["index"] for row in payload["list"]]
+    assert free in indexes
+    assert equipped not in indexes, "help 7-6: an equipped piece cannot be fused"
+    assert all(
+        row["id"] != 20001 for row in payload["list"]
+    ), "help 7-1: the non-gold starter piece is not a fusion candidate"
+    for row in payload["list"]:
+        assert {"index", "id", "icon", "loc"} <= set(row)
+
+
+def test_vice_list_is_scoped_to_the_main_category(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, ENCHANT_WEAPON)  # 25001 weapon
+    _equip(database, uid, FUSION_MAIN)            # 25002 armour
+    vice = _equip(database, uid, 25011)           # 25011 weapon
+
+    command, payload = _show(
+        client, uid, showId="78", ttype="2", main=str(main), loc="0", p="1", n="9"
+    )
+    assert command == 78
+    assert [row["index"] for row in payload["list"]] == [vice], \
+        "help 7-2: only weapons may be offered for a weapon main"
+
+
+# ---------------------------------------------------------------------------
+# 79/80: fusion transactions
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_same_value_keeps_the_main_and_charges_twenty_percent(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, FUSION_MAIN, buffs="12101")
+    vice = _equip(database, uid, FUSION_VICE, buffs="30001")
+    _give(database, uid, 10032, 20)
+    record = config_tables.equip_record(FUSION_MAIN)
+    stats = config_tables.equip_stats(record)
+
+    command, preview = _show(client, uid, showId="79", main=str(main), vice=str(vice))
+    assert command == 79
+    assert preview["id"] == FUSION_MAIN, "same-value fusion keeps the main piece"
+    assert preview["level"] == 1
+    assert [preview[column] for column in stats] == [stats[column] for column in stats]
+    assert preview["need_money"] == 0 and preview["need_crystal"] == 0
+    # 20% of 3600 gold = 720 gold; 10032 is priced 100 gold -> 8 stones.
+    assert preview["need_goods"] == [{"id": 10032, "need_num": 8, "own_num": 20}]
+    assert preview["buffs"] == [{"id": 12101}, {"id": 30001}]
+
+    command, result = _show(client, uid, showId="80", main=str(main), vice=str(vice))
+    assert command == 80
+    assert result == {"index": main, "id": FUSION_MAIN, "icon": preview["icon"],
+                      "pic": [], "value": "ok"}
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE id=?", (vice,)
+        ).fetchone()[0] == 0, "the vice piece disappears"
+        stored = connection.execute(
+            "SELECT item_id, level, buffs FROM inventory WHERE id=?", (main,)
+        ).fetchone()
+    assert stored[0] == FUSION_MAIN and stored[1] == 1
+    assert stored[2] == "12101:30001", "help 7-5: both pieces' traits move to the result"
+    assert _quantity(database, uid, 10032) == 12
+
+
+def test_fusion_upgrade_builds_the_next_tier_and_charges_the_difference(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, FUSION_MAIN, buffs="12101")   # 3600
+    vice = _equip(database, uid, UPGRADE_VICE, buffs="30001")  # 9600
+    _give(database, uid, 10032, 60)
+
+    command, preview = _show(client, uid, showId="79", main=str(main), vice=str(vice))
+    assert command == 79
+    assert preview["id"] == 25032, "upgrade product = next gold tier for that slot"
+    product = config_tables.equip_record(25032)
+    assert preview["icon"] == config_tables.equip_icon(product)
+    assert preview["star"] == config_tables.equip_star(product)
+    assert preview["level"] == 1
+    for column, value in config_tables.equip_stats(product).items():
+        assert preview[column] == value, column
+    # |9600 - 3600| = 6000 gold -> 60 stones.
+    assert preview["need_goods"] == [{"id": 10032, "need_num": 60, "own_num": 60}]
+    assert [row["id"] for row in preview["buffs"]] == [12101, 30001]
+
+    command, result = _show(client, uid, showId="80", main=str(main), vice=str(vice))
+    assert command == 80
+    assert result["id"] == 25032
+    assert result["index"] not in (main, vice), "the upgrade produces a new bag row"
+    with sqlite3.connect(database) as connection:
+        remaining = {
+            row[0] for row in connection.execute(
+                "SELECT id FROM inventory WHERE player_id=? AND team=3",
+                (_player_id(database, uid),),
+            )
+        }
+    assert main not in remaining and vice not in remaining, "help 7-5: originals disappear"
+    assert result["index"] in remaining
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT item_id, level, star, buffs FROM inventory WHERE id=?",
+            (result["index"],),
+        ).fetchone()
+    assert row[0] == 25032 and row[1] == 1 and row[2] == config_tables.equip_star(product)
+    assert row[3] == "12101:30001"
+    assert _quantity(database, uid, 10032) == 0
+
+
+def test_fusion_rejects_the_rule_violations(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, ENCHANT_WEAPON)  # 25001 weapon
+    armour = _equip(database, uid, FUSION_MAIN)   # 25002 armour
+    player_id = _player_id(database, uid)
+    with sqlite3.connect(database) as connection:
+        starter = connection.execute(
+            "SELECT id FROM inventory WHERE player_id=? AND item_id=20001", (player_id,)
+        ).fetchone()[0]
+    equipped = _equip(database, uid, 25011, equipped=1)
+
+    base = {"m": "show", "uid": uid, "showId": "79"}
+    # help 7-1 / error.txt 426: the starter piece is not gold equipment.
+    assert client.post("/flash.do", data={**base, "main": str(starter),
+                                          "vice": str(main)}).get_data(as_text=True) == "-1\t-1:426"
+    # help 7-2 / error.txt 425: weapon + armour.
+    assert client.post("/flash.do", data={**base, "main": str(main),
+                                          "vice": str(armour)}).get_data(as_text=True) == "-1\t-1:425"
+    # help 7-6 / error.txt 424: an equipped piece cannot be fused.
+    assert client.post("/flash.do", data={**base, "main": str(equipped),
+                                          "vice": str(main)}).get_data(as_text=True) == "-1\t-1:424"
+    # Same row twice / a row that is not in this bag.
+    assert client.post("/flash.do", data={**base, "main": str(main),
+                                          "vice": str(main)}).get_data(as_text=True) == "-1\t-1:400"
+    assert client.post("/flash.do", data={**base, "main": str(main),
+                                          "vice": "999999"}).get_data(as_text=True) == "-1\t-1:400"
+
+
+def test_fusion_reports_blue_crystal_shortage_with_423(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, FUSION_MAIN)
+    vice = _equip(database, uid, FUSION_VICE)
+    _give(database, uid, 10032, 7)  # one short of the same-value fee
+
+    command, preview = _show(client, uid, showId="79", main=str(main), vice=str(vice))
+    assert command == 79
+    assert preview["need_goods"][0]["own_num"] == 7
+
+    body = _raw(client, uid, showId="80", main=str(main), vice=str(vice))
+    assert body == "-1\t-1:423", "error.txt 423 蓝色晶石不足，请到金币商店购买"
+    assert _quantity(database, uid, 10032) == 7
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM inventory WHERE id IN (?,?)", (main, vice)
+        ).fetchone()[0] == 2, "a refused fusion must not consume either piece"
+
+
+def test_fusion_truncates_traits_to_the_product_slot_count(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, FUSION_MAIN, buffs="12101:30001")
+    vice = _equip(database, uid, FUSION_VICE, buffs="12201:42001")
+    _give(database, uid, 10032, 8)
+    cap = config_tables.equip_enchant_max_count(
+        config_tables.equip_enchant_record(FUSION_MAIN)
+    )
+
+    _show(client, uid, showId="80", main=str(main), vice=str(vice))
+    with sqlite3.connect(database) as connection:
+        buffs = connection.execute(
+            "SELECT buffs FROM inventory WHERE id=?", (main,)
+        ).fetchone()[0]
+    assert buffs == ":".join(buffs.split(":")[:cap])
+    assert len(buffs.split(":")) == cap
+
+
+def test_fusion_upgrade_stacks_onto_an_existing_product_row(tmp_path: Path):
+    client, database, uid = _client(tmp_path)
+    main = _equip(database, uid, FUSION_MAIN)
+    vice = _equip(database, uid, UPGRADE_VICE)
+    owned = _equip(database, uid, 25032)  # the player already owns the product
+    _give(database, uid, 10032, 60)
+
+    command, result = _show(client, uid, showId="80", main=str(main), vice=str(vice))
+    assert command == 80
+    assert result["index"] == owned, "inventory is UNIQUE(player_id,item_id)"
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT id, quantity FROM inventory WHERE player_id=? AND item_id=25032",
+            (_player_id(database, uid),),
+        ).fetchall()
+    assert rows == [(owned, 2)], "the second copy stacks instead of raising IntegrityError"
