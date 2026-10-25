@@ -5,10 +5,14 @@
 """
 
 import os
+import sqlite3
+from pathlib import Path
 
 import pytest
 
 from pet_hunter_server import app as A
+from pet_hunter_server import create_app
+from support import create_local_player, envelope
 
 
 def _pet_row(**fields):
@@ -118,3 +122,34 @@ def test_combat_v2_switch(monkeypatch):
     assert A._combat_v2_enabled() is True
     monkeypatch.setenv("PETHUNTER_COMBAT_V2", "0")
     assert A._combat_v2_enabled() is False
+
+
+def test_combat_switch_changes_the_replay(tmp_path: Path, monkeypatch):
+    """PETHUNTER_COMBAT_V2=0 必须真的回到旧公式（K=0.6、无 skill_mult/相克）。"""
+    monkeypatch.setattr(A, "LOCAL_ELITE_CHANCE", 0.0)
+
+    def hunt(flag: str) -> dict:
+        monkeypatch.setenv("PETHUNTER_COMBAT_V2", flag)
+        database = tmp_path / f"game-{flag}.sqlite3"
+        client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+        uid = create_local_player(client, f"Switch{flag}")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE players SET ht_ap = 5, max_ht_ap = 20 WHERE uid = ?", (uid,)
+            )
+            connection.commit()
+        _command, payload = envelope(
+            client.post("/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": "1"})
+        )
+        return payload
+
+    legacy = hunt("0")
+    modern = hunt("1")
+    legacy_damage = sum(step["att"]["skill"]["dm"] for step in legacy["record"])
+    modern_damage = sum(step["att"]["skill"]["dm"] for step in modern["record"])
+    assert modern_damage != legacy_damage
+    # K 0.6 → 0.28：同一个 lv1 队伍的总伤害必须明显变小
+    assert modern_damage < legacy_damage
+    # 每一步都要带 skill（客户端 FightProcess 从 att.skill.dm 取数字）
+    assert all(step["att"].get("skill") for step in modern["record"])
+    assert modern["att_list"][0]["hp"] == legacy["att_list"][0]["hp"]
