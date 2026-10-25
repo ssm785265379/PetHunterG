@@ -117,10 +117,11 @@ pwsh tools\lane.ps1 remove b1 [-Force]             # 删 worktree（分支保留
 
 | 现象 | 处理 |
 |---|---|
-| 窗口不出现 / 一闪而过 | 看 `build\desktop-dev\adl.log` 与 `adl.log.err`（`trace()` 输出在 `.err`） |
+| 窗口不出现 / 一闪而过 | 看 `build\desktop-dev-<lane>\adl.log` 与 `adl.log.err`（`trace()` 输出在 `.err`）；`adl.log` 只有 `invocation forwarded to primary instance` 说明两个窗口用了同一个 app id |
 | 弹出 "ActionScript error" 对话框 | SWF 里的 AS3 异常，不是预览的问题；按 #错误号查补丁源码 |
 | 按钮/弹窗位置和真机不一致 | 确认窗口是 640×960（SWF 原生舞台） |
 | 连不上服务器 | 先 `curl http://127.0.0.1:8080/health`；再看脚本输出里是否提示"未知服务器基址，未改写" |
+| 命令打完了却不返回 | `adl64` 长驻，继承了调用方的 stdout 句柄。用 `lane.ps1 start`（内部已 `Start-Process` 分离），或从 agent 终端用后台任务启动，别用 `& pwsh ...dev-desktop.ps1` 等它 |
 
 ## 已验证记录
 

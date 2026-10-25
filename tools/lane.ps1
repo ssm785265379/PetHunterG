@@ -11,6 +11,11 @@
 #   pwsh tools\lane.ps1 stop  b1
 #   pwsh tools\lane.ps1 list
 #
+# Note: `start` launches the window in a detached process and waits on the pid
+# file, so it always returns. Never wrap `dev-desktop.ps1` in `& pwsh ...` and
+# wait for it from an agent shell: adl64 outlives it and keeps the inherited
+# stdout handle open, which makes the caller hang after printing everything.
+#
 # Rules (docs/AGENTS.md):
 #   - worktrees live under .worktrees<name> inside the repo (git-ignored);
 #   - each lane has its own port (8081..8089) and its own server/instance DB;
@@ -115,8 +120,31 @@ function Invoke-Adl([string]$laneName, [int]$listenPort, [string]$laneDir) {
         '-DevDir', (Join-Path $laneDir "client\air51-repack\build\desktop-dev-$laneName")
     )
     if ($Build) { $arguments += '-Build' }
-    & pwsh @arguments
-    if ($LASTEXITCODE -ne 0) { throw "dev-desktop.ps1 failed (exit $LASTEXITCODE)" }
+
+    # Launch the preview in a separate process and wait on its pid file instead of
+    # on the process: adl64 outlives the launcher, and any caller that waits for the
+    # launcher's inherited stdout handle never sees EOF (symptom: the command hangs
+    # after printing everything, because a long-lived GUI child holds the pipe).
+    $devDir = Join-Path $laneDir "client\air51-repack\build\desktop-dev-$laneName"
+    Start-Process -FilePath 'pwsh' -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden | Out-Null
+
+    $title = "PetHunterG preview [$laneName]"
+    $pidFile = Join-Path $devDir 'adl.pid'
+    $deadline = (Get-Date).AddSeconds(30)
+    $ready = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Test-Path $pidFile)) { continue }
+        $raw = Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not ($raw -as [int])) { continue }
+        $ui = Get-Process -Id ([int]$raw) -ErrorAction SilentlyContinue
+        if ($ui -and $ui.MainWindowTitle -eq $title) { $ready = $true; break }
+    }
+    if ($ready) {
+        Write-Host "[ok] window ready: $title" -ForegroundColor Green
+    } else {
+        Write-Host "[!] window not confirmed within 30s; see $(Join-Path $devDir 'adl.log.err')" -ForegroundColor Yellow
+    }
 }
 
 switch ($Command) {
