@@ -34,6 +34,20 @@ git commit -m "<类型>(<模块>): <根因> —— <做了什么>"
 
 真机/线上验证通过后，再单独提交文档（`docs:` / `chore:`）。
 
+## 客户端改动：先桌面预览，再打包
+
+改 AS3 / 补丁脚本后，**不要立刻打 APK**，先用桌面 AIR 运行时看效果（秒级）：
+
+```powershell
+cd client\air51-repack
+powershell -ExecutionPolicy Bypass -File .\dev-desktop.ps1 -Build
+```
+
+- 默认取 `build\input-explore\APetHunter.swf`，自动把服务器地址改到 `http://127.0.0.1:8080`；
+- 窗口必须是 **640×960**（SWF 原生舞台），用别的尺寸按钮/弹窗位置会偏；
+- 桌面确认布局、弹窗、协议跳转后，再 `adt` 打包装真机；装机只在里程碑或怀疑平台差异时做；
+- 细节与排错见 [desktop-preview.md](desktop-preview.md)。
+
 ## 如何回溯
 
 ```bash
