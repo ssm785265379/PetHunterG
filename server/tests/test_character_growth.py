@@ -59,3 +59,55 @@ def test_510_profile_carries_real_job_and_exp(tmp_path: Path):
     assert profile["lv"] == 7
     assert profile["job"] == 3
     assert profile["exp"] == 123
+
+
+def test_hero_exp_curve_and_grant_carry_overflow(tmp_path: Path):
+    from pet_hunter_server import app as A
+
+    # LOCAL DEFAULT 曲线：1 级 100，之后每级 +10（400 级 4090）。
+    assert A.hunter_exp_to_next(1) == 100
+    assert A.hunter_exp_to_next(2) == 110
+    assert A.hunter_exp_to_next(400) == 4090
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroXp")
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid=?", (uid,)
+        ).fetchone()[0]
+    with A._connect_database(database) as connection:
+        # 220 = 100(1→2) + 110(2→3) + 10 余量。
+        assert A._grant_hero_exp(connection, player_id, 220) == 3
+        row = connection.execute(
+            "SELECT lv, exp FROM players WHERE id=?", (player_id,)
+        ).fetchone()
+        assert (row["lv"], row["exp"]) == (3, 10)
+        # 封顶 1000 级，不再升。
+        connection.execute(
+            "UPDATE players SET lv=1000, exp=0 WHERE id=?", (player_id,)
+        )
+        assert A._grant_hero_exp(connection, player_id, 10_000) == 1000
+
+
+def test_hunt_win_grants_hero_exp_and_levels_the_hunter(tmp_path: Path, monkeypatch):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroExp")
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+
+    _, result = envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "6", "uid": uid, "hid": 1, "ttype": 1},
+        )
+    )
+    assert result["is_win"] == 1
+
+    _, profile = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+    assert profile["lv"] > 1, "一场胜利的人物经验应足够升到 2 级"
+    assert profile["exp"] >= 0

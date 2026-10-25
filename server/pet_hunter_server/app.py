@@ -156,6 +156,54 @@ def exp_to_next(lv: int) -> int:
     if lv <= 500:
         return 700_000 + 10_000 * (lv - 200)
     return 4_000_000 + 60_000 * (lv - 500)
+
+
+# 人物（猎人）等级：1-1000，经验够了自动升；称号另走 upRole 的 72 手动转职。
+# LOCAL DEFAULT: 原服的人物经验表不可恢复，下面四个系数是本地调参（1 级一场
+# 狩猎即可升到 2 级，方便真机验证；长线 400/600/800/1000 级仍是称号门槛）。
+LOCAL_HERO_MAX_LEVEL = 1000
+LOCAL_HERO_EXP_BASE = 100
+LOCAL_HERO_EXP_GROWTH = 10
+# 战斗给人物经验：基础 + 每个参考等级。
+LOCAL_HERO_BATTLE_EXP_BASE = 200
+LOCAL_HERO_BATTLE_EXP_PER_REF = 20
+
+
+def hunter_exp_to_next(lv: int) -> int:
+    """LOCAL DEFAULT 人物升级所需经验：100 + 10*(lv-1)（1→2 级 100，400 级 4090）。"""
+    return LOCAL_HERO_EXP_BASE + LOCAL_HERO_EXP_GROWTH * (max(1, int(lv)) - 1)
+
+
+def hero_battle_exp(reference_lv: int) -> int:
+    """LOCAL DEFAULT 一场战斗给的人物经验，按对手参考等级增长。"""
+    return LOCAL_HERO_BATTLE_EXP_BASE + LOCAL_HERO_BATTLE_EXP_PER_REF * max(
+        0, int(reference_lv)
+    )
+
+
+def _grant_hero_exp(connection, player_id: int, amount: int) -> int:
+    """加人物经验并自动升级，返回新等级。
+
+    经验只在当前等级内累积，升级会扣掉所需值；1000 级封顶后经验继续累积但
+    不再升级（与宠物 `_grant_pet_exp` 的口径一致）。升级本身不发宝箱，宝箱
+    在 72 转职时按 upRole.rewardGoods 发。
+    """
+    if amount <= 0:
+        return 0
+    row = connection.execute(
+        "SELECT lv, exp FROM players WHERE id=?", (player_id,)
+    ).fetchone()
+    if row is None:
+        return 0
+    lv = max(1, int(row["lv"] or 1))
+    exp = int(row["exp"] or 0) + int(amount)
+    while lv < LOCAL_HERO_MAX_LEVEL and exp >= hunter_exp_to_next(lv):
+        exp -= hunter_exp_to_next(lv)
+        lv += 1
+    connection.execute(
+        "UPDATE players SET lv=?, exp=? WHERE id=?", (lv, exp, player_id)
+    )
+    return lv
 # LOCAL DEFAULT: exp a single battle awards to each pet that took part, per
 # monster level. 100,000 means a lv-1 hunt is ~10% of a level.
 # Fallback only: monster.txt ships a per-monster `exp` column, which is the real
@@ -3338,6 +3386,11 @@ def _hunter_fight(database_path: Path) -> Response:
         # The pets that actually fought gain the battle exp, so levelling (and the
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
+        # 人物经验与宠物分开记：按本场怪物的最高等级给，失败只给十分之一。
+        # LOCAL DEFAULT 数值，见 hero_battle_exp。
+        hero_ref = max((int(monster["lv"] or 1) for monster in monsters), default=1)
+        hero_exp = hero_battle_exp(hero_ref)
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # Only the entries unlocked by THIS hunt may pop the 图鉴 banner; the
             # response used to list every monster in the fight, so an already
