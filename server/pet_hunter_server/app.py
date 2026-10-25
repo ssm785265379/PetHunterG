@@ -3517,6 +3517,33 @@ def _hunt_map_unlocked(database_path: Path, uid: str, map_id: int) -> bool:
     return bool(row and row["cleared"])
 
 
+def _squad_pet_rows(
+    connection: sqlite3.Connection,
+    player_id: int,
+    columns: str,
+    limit: int = 2,
+):
+    """PvE 出战宠：优先读狩猎安排的 squad_slot 1/2；一只都没安排时回退 id 最小两只。
+
+    只给 6 狩猎 / 74 副本 / 103 探险用。擂台 24/506 是异步 PvP 的对手/防守展示，
+    不能跟着 PvE 队伍变，所以它们继续走原来的 id 顺序。
+    `PET_READY_SQL` 仍排除训练中的宠物。
+    """
+    base = (
+        f"SELECT {columns} FROM pets WHERE player_id=? AND battle_state=0"
+        f" AND is_locked=0 AND {PET_READY_SQL}"
+    )
+    rows = connection.execute(
+        base + " AND squad_slot>0 ORDER BY squad_slot LIMIT ?",
+        (player_id, limit),
+    ).fetchall()
+    if rows:
+        return rows
+    return connection.execute(
+        base + " ORDER BY id LIMIT ?", (player_id, limit)
+    ).fetchall()
+
+
 def _hunter_fight(database_path: Path) -> Response:
     try: hid=int(_request_value("hid",""))
     except ValueError: return _pet_error(100)
@@ -3533,7 +3560,11 @@ def _hunter_fight(database_path: Path) -> Response:
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
         buffs=_player_buffs(c,p["id"])
-        rows=c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv,skills,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+        rows=_squad_pet_rows(
+            c, p["id"],
+            "id AS 'index',pet_id AS id,icon,name,lv,skills,pro_hp,pro_speed,"
+            "pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def",
+        )
         # Resolve the replay BEFORE paying anything: the outcome decides the payout.
         att_list, def_list, combat = _battle_side(
             hunter_skin=_role_skin_string(worn,p["sex"]),
@@ -4349,11 +4380,11 @@ def _explore_start(database_path: Path) -> Response:
             defenders = [leader] + defenders
         elite_fight = any(d.get("elite") for d in defenders)
         worn = _worn_equipment(c, p["id"])
-        pet_rows = c.execute(
-            'SELECT id AS "index", pet_id AS id, icon, name, lv, skills, pro_hp, pro_speed,'
-            ' pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def FROM pets'
-            f' WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2',
-            (p["id"],)).fetchall()
+        pet_rows = _squad_pet_rows(
+            c, p["id"],
+            'id AS "index", pet_id AS id, icon, name, lv, skills, pro_hp, pro_speed,'
+            ' pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def',
+        )
         att_list, def_list, combat = _battle_side(
             hunter_skin=_role_skin_string(worn, p["sex"] or 1),
             hunter_name=p["nick"] or "猎人",
@@ -4382,10 +4413,7 @@ def _explore_start(database_path: Path) -> Response:
             )
         # Expedition battles train the squad too, so exploring is a viable way to
         # level pets for evolution (LOCAL DEFAULT exp amount).
-        explore_rows=[r for r in c.execute(
-            f"SELECT id, pet_id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",
-            (p["id"],))]
-        explore_pets=[r["id"] for r in explore_rows]
+        explore_pets=[r["index"] for r in pet_rows]
         # A quarter of a level for the squad's own level (the old flat 300,000 was
         # 60 levels at lv1 on the new curve).
         squad_lv = c.execute(
@@ -5196,8 +5224,12 @@ def _explore_defenders(gid: int, terrain: int, reference_lv: int, rotation: int 
     return picked
 
 
-def _fight_payload(database_path: Path, defenders):
-    """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record)."""
+def _fight_payload(database_path: Path, defenders, *, use_squad: bool = False):
+    """Assemble the shared 6/24/74 body. Returns (att_list, def_list, record).
+
+    `use_squad=True` 时按 PvE 出战槽选宠（74 副本）；默认 False 保留擂台的
+    原行为（24 是异步 PvP 的对手，不跟 PvE 队伍走）。
+    """
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
         p = c.execute("SELECT id,nick,lv,job,sex FROM players WHERE uid=?", (uid,)).fetchone()
@@ -5205,13 +5237,19 @@ def _fight_payload(database_path: Path, defenders):
             return None
         worn = _worn_equipment(c, p["id"])
         buffs = _player_buffs(c, p["id"])
-        rows = c.execute(
-            f"""SELECT id AS "index", pet_id AS id, icon, name, lv, skills,
-                      pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
-               FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}
-               ORDER BY id LIMIT 2""",
-            (p["id"],),
-        ).fetchall()
+        battle_columns = (
+            'id AS "index", pet_id AS id, icon, name, lv, skills,'
+            ' pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def'
+        )
+        if use_squad:
+            rows = _squad_pet_rows(c, p["id"], battle_columns)
+        else:
+            rows = c.execute(
+                f"""SELECT {battle_columns}
+                   FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}
+                   ORDER BY id LIMIT 2""",
+                (p["id"],),
+            ).fetchall()
     att_list, def_list, combat = _battle_side(
         hunter_skin=_role_skin_string(worn,p["sex"]),
         hunter_name=p["nick"] or "猎人",
@@ -5344,7 +5382,9 @@ def _copy_battle(database_path: Path) -> Response:
         return _pet_error(400)
     # 副本四层按等级递进；固定 (1, 11) 组合是 L1 + L90，新手必败。
     stage_level = LOCAL_COPY_STAGE_LEVEL.get(hid, 10)
-    parts = _fight_payload(database_path, _defenders_for_level(1, stage_level))
+    parts = _fight_payload(
+        database_path, _defenders_for_level(1, stage_level), use_squad=True
+    )
     if parts is None:
         return _pet_error(103)
     att_list, def_list, record = parts
@@ -5357,9 +5397,7 @@ def _copy_battle(database_path: Path) -> Response:
         copy_mult = LOCAL_COPY_REWARD_MULT.get(hid, 1.0)
         copy_point = int(LOCAL_COPY_REWARD * copy_mult) if is_win else 0
         _credit_battle_rewards(c, player["id"], point=copy_point, crystal=0)
-        copy_pets=[r[0] for r in c.execute(
-            f"SELECT id FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",
-            (player["id"],))]
+        copy_pets=[r["id"] for r in _squad_pet_rows(c, player["id"], "id")]
         # Half a level at the stage's reference level, so clearing stage 1001 does
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
         copy_exp = int(_battle_exp(stage_level, LOCAL_COPY_EXP_SHARE) * copy_mult)
