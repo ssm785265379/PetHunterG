@@ -7,6 +7,8 @@ app.py 里用 LOCAL DEFAULT 标注。
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -401,3 +403,63 @@ def test_job_list_marks_every_title_owned_at_job_120(tmp_path: Path):
         jobs.extend(payload["list"])
     assert len(jobs) == 120
     assert all(row["state"] == 2 for row in jobs)
+
+
+def test_grant_hero_exp_script_updates_level_and_job(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroSc")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "grant_hero_exp.py"
+
+    run = subprocess.run(
+        [sys.executable, str(script), "--uid", uid, "--db", str(database), "--exp", "220"],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    assert "lv -> 3" in run.stdout
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT lv, exp FROM players WHERE uid=?", (uid,)
+        ).fetchone() == (3, 10)
+
+    run = subprocess.run(
+        [
+            sys.executable, str(script), "--uid", uid, "--db", str(database),
+            "--lv", "400", "--job", "2",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT lv, job FROM players WHERE uid=?", (uid,)
+        ).fetchone() == (400, 2)
+
+
+def test_old_save_with_exp_zero_and_job_one_keeps_its_level(tmp_path: Path):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    config = {"TESTING": True, "DATABASE": database}
+    client = create_app(config).test_client()
+    uid = create_local_player(client, "OldSave")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE players SET lv=50, job=1, exp=0 WHERE uid=?", (uid,)
+        )
+        connection.commit()
+
+    # 重新打开应用 = 老存档走一遍启动迁移：缺的列补默认值，lv 必须保留。
+    reopened = create_app(config).test_client()
+    _, profile = envelope(
+        reopened.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+
+    assert (profile["lv"], profile["job"], profile["exp"]) == (50, 1, 0)
+    # 等级保留后六维按新口径成长（1 级 1 称号时才是基准值），而不是被重置。
+    assert profile["hp"] == round(
+        A.ROLE_BASE_STATS["hp"] * (1 + A.LOCAL_HERO_LEVEL_STAT_STEP * 49)
+    )
+    assert profile["hp"] > A.ROLE_BASE_STATS["hp"]
