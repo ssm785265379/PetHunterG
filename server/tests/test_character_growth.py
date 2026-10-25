@@ -244,3 +244,34 @@ def test_hero_stats_grow_with_level_and_job_and_match_combat(tmp_path: Path):
     )
     assert role["job"] == 10
     assert role["hp"] == grown["hp"]
+
+
+def test_510_lists_worn_equipment_skills_as_objects(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroSk")
+
+    # 新手装默认在背包里（equipped=0），没穿时人物技能栏应为空。
+    _, bare = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+    assert bare["skills"] == []
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE inventory SET equipped=1 WHERE player_id=1 AND team=3"
+        )
+        connection.commit()
+
+    _, profile = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+    # 烈焰之剑的 101:5101 要出现在人物技能里；客户端 getSkill 逐项读 .id，
+    # 所以每一项必须是 {"id": n} 而不是裸整数。
+    assert all(isinstance(entry, dict) for entry in profile["skills"])
+    assert {entry["id"] for entry in profile["skills"]} >= {101, 5101}
+
+    _, role = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "3", "uid": uid})
+    )
+    assert role["skills"] == profile["skills"]

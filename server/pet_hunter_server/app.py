@@ -1424,6 +1424,21 @@ def _role_stats(
     return totals
 
 
+def _equipment_skills(worn: dict[int, sqlite3.Row]) -> list[dict[str, int]]:
+    """已穿装备自带的技能，按 id 去重排序。
+
+    返回 `[{"id": 101}, ...]` 而不是 `[101, ...]`：RoleInfoUI.as:158-166 调
+    GameUtil.getSkill()，后者逐项读 `_loc6_.id`，传裸整数会显示成空。技能只做
+    展示，不进入 `_battle_side`，不改变伤害。
+    """
+    seen: set[int] = set()
+    for row in worn.values():
+        record = config_tables.equip_record(row["item_id"])
+        if record:
+            seen.update(config_tables.equip_skills(record))
+    return [{"id": skill_id} for skill_id in sorted(seen)]
+
+
 def _equipped_slot_fields(worn: dict[int, sqlite3.Row]) -> dict[str, object]:
     """RoleInfoUI.as:170-172 reads weapon/clothes/hat plus a *_level each."""
     payload: dict[str, object] = {}
@@ -1462,7 +1477,7 @@ def _player_payload(connection: sqlite3.Connection, player: sqlite3.Row) -> dict
     payload.update(_role_stats(worn, player["lv"], player["job"]))
     payload["img"] = _role_skin_string(worn, player["sex"] if "sex" in player.keys() else 1)
     payload["pic_num"] = pic_num
-    payload["skills"] = []
+    payload["skills"] = _equipment_skills(worn)
     payload["buffs"] = []
     payload.update(_equipped_slot_fields(worn))
     # Local starting state; guild and arena systems are not restored yet.
@@ -2895,7 +2910,7 @@ def _social_detail_response(database_path: Path, command_id: int) -> Response:
                    "job":p["job"],"guild_name":"0","guild_position":0,
                    "arena_rank":_local_arena_rank(),"pic_num":pic_num,
                    **_role_stats(worn,p["lv"],p["job"]), **slots,
-                   "skills":[],"buffs":[]}
+                   "skills":_equipment_skills(worn),"buffs":[]}
     payload={**player_fields,
              "show_type":0,"player":player_fields,
              "pets":[dict(r) for r in pets]}
