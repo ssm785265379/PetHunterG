@@ -1444,6 +1444,22 @@ def _equipment_skills(worn: dict[int, sqlite3.Row]) -> list[dict[str, int]]:
     return [{"id": skill_id} for skill_id in sorted(seen)]
 
 
+def _first_skill_id(raw: object) -> int:
+    """从 `"101:5101"` / JSON 形态的技能列里取第一个正 id；没有则 0。
+
+    战斗回放只需要一个真实 `skill.txt` id 来做攻击表现；伤害仍由 dm 决定。
+    """
+    text = str(raw or "")
+    for token in (
+        text.replace("{", " ").replace("}", " ").replace("[", " ")
+        .replace("]", " ").replace('"', " ").replace(":", " ")
+        .replace(",", " ").replace(";", " ").split()
+    ):
+        if token.isdigit() and int(token) > 0:
+            return int(token)
+    return 0
+
+
 def _equipped_slot_fields(worn: dict[int, sqlite3.Row]) -> dict[str, object]:
     """RoleInfoUI.as:170-172 reads weapon/clothes/hat plus a *_level each."""
     payload: dict[str, object] = {}
@@ -3152,6 +3168,8 @@ def _pick_monster(monster_id: int) -> dict[str, object] | None:
         # monster.txt carries a real `exp` column; hunt payouts read it instead of
         # inventing a per-level constant.
         "exp": stat("exp", 0),
+        # 真实技能列：战斗回放用它选中该怪物自己的技能，而不是统一 101。
+        "skills": record.get("skills", ""),
     }
 
 
@@ -3267,6 +3285,7 @@ def _battle_side(
     hunter_name: str,
     hunter_lv: int,
     hunter_stats: tuple[int, int, int],
+    hunter_skills: list[int] | None = None,
     pet_rows,
     defenders,
     stat_bonus: int = 0,
@@ -3305,6 +3324,8 @@ def _battle_side(
     lead = {
         "team": 1, "code": 0, "is_pet": 0, "id": 0, "name": hunter_name,
         "lv": hunter_lv, "pre_lv": hunter_lv, "hp": hunter_hp, "img": hunter_skin,
+        # 猎人用自己已穿装备的第一个技能；没有装备技能时回落到 101。
+        "skill_id": (hunter_skills or [0])[0],
     }
 
     def attacker(row, code: int) -> dict:
@@ -3318,6 +3339,10 @@ def _battle_side(
             "team": 1, "code": code, "is_pet": 1, "index": row["index"],
             "id": row["id"], "name": _pet_name(row["id"], row["name"]),
             "lv": row["lv"], "pre_lv": row["lv"], "hp": hp, "img": row["icon"],
+            # 宠物用自己 skills 列里的第一个技能。
+            "skill_id": _first_skill_id(
+                row["skills"] if "skills" in row.keys() else ""
+            ),
         }
 
     att_list = [lead] + [attacker(r, i + 1) for i, r in enumerate(pet_rows)][:2]
@@ -3330,7 +3355,8 @@ def _battle_side(
             mon_def = round(mon_def * LOCAL_ELITE_SCALE)
         combat["def"][i] = {"hp": mon_hp, "att": mon_att, "def": mon_def, "speed": 0}
         def_list.append({"team": 2, "code": i, "is_pet": 0, "id": d["id"],
-                         "name": d["name"], "lv": d["lv"], "hp": mon_hp, "img": d["icon"]})
+                         "name": d["name"], "lv": d["lv"], "hp": mon_hp, "img": d["icon"],
+                         "skill_id": _first_skill_id(d.get("skills", ""))})
     return att_list, def_list, combat
 
 
@@ -3343,6 +3369,15 @@ LOCAL_BATTLE_STEP_LIMIT = 30
 LOCAL_BATTLE_ROUND_LIMIT = 12
 # skill.txt 101 = 烈焰之刃 (a real, physical skill); only used for the animation.
 LOCAL_REPLAY_SKILL_ID = 101
+
+
+def _replay_skill(unit: dict, swing: int) -> dict:
+    """一步攻击的 skill 对象：id 用该角色自己的技能，伤害仍用 swing。"""
+    return {
+        "id": int(unit.get("skill_id") or LOCAL_REPLAY_SKILL_ID),
+        "pro": 1,
+        "dm": swing,
+    }
 
 
 def _battle_record(att_list, def_list, combat=None) -> list[dict]:
@@ -3373,7 +3408,7 @@ def _battle_record(att_list, def_list, combat=None) -> list[dict]:
             steps.append({
                 "att": {"team": 1, "code": 0, "cur_hp": attacker_hp,
                         "is_dead": False, "is_revive": False,
-                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": swing}},
+                        "skill": _replay_skill(att_list[0], swing)},
                 "def": {"team": 2, "code": index, "cur_hp": remaining,
                         "is_dead": remaining <= 0, "is_revive": False},
             })
@@ -3415,7 +3450,7 @@ def _battle_record_simulated(att_list, def_list, combat) -> list[dict]:
             steps.append({
                 "att": {"team": 1, "code": code, "cur_hp": hp[code],
                         "is_dead": False, "is_revive": False,
-                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": swing}},
+                        "skill": _replay_skill(att_list[code], swing)},
                 "def": {"team": 2, "code": target, "cur_hp": mon[target],
                         "is_dead": mon[target] <= 0, "is_revive": False},
             })
@@ -3426,7 +3461,7 @@ def _battle_record_simulated(att_list, def_list, combat) -> list[dict]:
             steps.append({
                 "att": {"team": 2, "code": target, "cur_hp": mon[target],
                         "is_dead": False, "is_revive": False,
-                        "skill": {"id": LOCAL_REPLAY_SKILL_ID, "pro": 1, "dm": hit}},
+                        "skill": _replay_skill(def_list[target], hit)},
                 "def": {"team": 1, "code": code, "cur_hp": hp[code],
                         "is_dead": hp[code] <= 0, "is_revive": False},
             })
@@ -3498,13 +3533,14 @@ def _hunter_fight(database_path: Path) -> Response:
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
         buffs=_player_buffs(c,p["id"])
-        rows=c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",(p["id"],)).fetchall()
+        rows=c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv,skills,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",(p["id"],)).fetchall()
         # Resolve the replay BEFORE paying anything: the outcome decides the payout.
         att_list, def_list, combat = _battle_side(
             hunter_skin=_role_skin_string(worn,p["sex"]),
             hunter_name=p["nick"] or "猎人",
             hunter_lv=p["lv"] or 1,
             hunter_stats=_hunter_combat_stats(p, worn),
+            hunter_skills=[entry["id"] for entry in _equipment_skills(worn)],
             pet_rows=rows,
             defenders=monsters,
             stat_bonus=int(buffs.get(LOCAL_BUFF_STAT_BONUS, 0) or 0),
@@ -4314,7 +4350,7 @@ def _explore_start(database_path: Path) -> Response:
         elite_fight = any(d.get("elite") for d in defenders)
         worn = _worn_equipment(c, p["id"])
         pet_rows = c.execute(
-            'SELECT id AS "index", pet_id AS id, icon, name, lv, pro_hp, pro_speed,'
+            'SELECT id AS "index", pet_id AS id, icon, name, lv, skills, pro_hp, pro_speed,'
             ' pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def FROM pets'
             f' WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2',
             (p["id"],)).fetchall()
@@ -4323,6 +4359,7 @@ def _explore_start(database_path: Path) -> Response:
             hunter_name=p["nick"] or "猎人",
             hunter_lv=p["lv"] or 1,
             hunter_stats=_hunter_combat_stats(p, worn),
+            hunter_skills=[entry["id"] for entry in _equipment_skills(worn)],
             pet_rows=pet_rows,
             defenders=defenders,
         )
@@ -5169,7 +5206,7 @@ def _fight_payload(database_path: Path, defenders):
         worn = _worn_equipment(c, p["id"])
         buffs = _player_buffs(c, p["id"])
         rows = c.execute(
-            f"""SELECT id AS "index", pet_id AS id, icon, name, lv,
+            f"""SELECT id AS "index", pet_id AS id, icon, name, lv, skills,
                       pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
                FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL}
                ORDER BY id LIMIT 2""",
@@ -5180,6 +5217,7 @@ def _fight_payload(database_path: Path, defenders):
         hunter_name=p["nick"] or "猎人",
         hunter_lv=p["lv"] or 1,
         hunter_stats=_hunter_combat_stats(p, worn),
+        hunter_skills=[entry["id"] for entry in _equipment_skills(worn)],
         pet_rows=rows,
         defenders=defenders,
         stat_bonus=int(buffs.get(LOCAL_BUFF_STAT_BONUS, 0) or 0),
