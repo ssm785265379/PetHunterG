@@ -5484,3 +5484,72 @@ def test_egg_box_hands_back_the_new_pet_and_full_roster_says_so(tmp_path: Path):
         assert connection.execute(
             "SELECT quantity FROM inventory WHERE id = ?", (ids[12001],)
         ).fetchone()[0] == 1, "开不出来就不能吃道具"
+
+
+# ---------------------------------------------------------------------------
+# 图鉴（25 / 26）：目录来自 pic.txt，不再写死 3 条
+# ---------------------------------------------------------------------------
+def test_pic_list_pages_through_pic_txt_catalogue(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicCat")
+    command, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": 25, "uid": uid, "ttype": 1, "p": 1, "n": 9}))
+    assert command == 25
+    # pic.txt 的 type=1（宠物）有 342 条，一页 9 条必须给满
+    assert len(payload["pics"]) == 9
+    catalogue = config_tables._table("pic.txt")
+    assert all(row["id"] in catalogue for row in payload["pics"])
+    assert payload["finish_rate"] == 0, "新号一条图鉴都没登记"
+    first_page = [row["id"] for row in payload["pics"]]
+    _command, page2 = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": 25, "uid": uid, "ttype": 1, "p": 2, "n": 9}))
+    assert [row["id"] for row in page2["pics"]] != first_page, "翻页必须换内容"
+
+
+def test_pic_list_separates_the_four_tabs(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicTab")
+    seen = {}
+    for ttype in (1, 2, 3, 4):
+        _command, payload = _envelope(client.post("/flash.do", data={
+            "m": "show", "showId": 25, "uid": uid, "ttype": ttype, "p": 1, "n": 9}))
+        seen[ttype] = [row["id"] for row in payload["pics"]]
+    assert len({tuple(ids) for ids in seen.values()}) == 4, "四个分页不能是同一份数据"
+
+
+def test_pic_list_marks_unlocked_entries_and_finish_rate(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicOwn")
+    _command, page1 = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": 25, "uid": uid, "ttype": 1, "p": 1, "n": 9}))
+    first_id = page1["pics"][0]["id"]
+    assert page1["pics"][0]["is_reward"] == 0
+    with sqlite3.connect(database) as connection:
+        player_id = connection.execute(
+            "SELECT id FROM players WHERE uid = ?", (uid,)).fetchone()[0]
+        connection.execute(
+            "INSERT OR IGNORE INTO pic_unlocked (player_id, pic_id, unlocked_at)"
+            " VALUES (?,?,datetime('now'))", (player_id, first_id))
+        connection.commit()
+    _command, page1 = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": 25, "uid": uid, "ttype": 1, "p": 1, "n": 9}))
+    assert page1["pics"][0]["is_reward"] == 1
+    assert page1["finish_rate"] >= 1
+
+
+def test_pic_info_serves_any_pic_txt_entry_with_type(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "PicInfo")
+    command, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": 26, "uid": uid, "gid": 5001}))
+    assert command == 26
+    # IllustrationInfoUI.as:172 按 param2.type 分支，缺它就整页不出图
+    assert payload["type"] == 1
+    assert payload["icon"] > 0 and payload["is_reward"] == 0
+    assert payload["pics"] and payload["pics"][0]["id"] == 5001
+    bad = client.post("/flash.do", data={"m": "show", "showId": 26, "uid": uid, "gid": 999999})
+    assert bad.get_data(as_text=True) == "-1\t-1:506"

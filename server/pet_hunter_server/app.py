@@ -2809,7 +2809,8 @@ def _explore_discover_gain(need_rate: int) -> int:
 # exploreMap.txt (worldId / terrain / star / name and the reward columns).
 
 
-LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
+# 图鉴目录以前是写死的 3 条（LOCAL_PICS），页面上只有 3 个格子。现在改由
+# pic.txt 全量驱动（见 _pic_catalogue），这里不再留常量。
 
 
 def _job_goods(raw: str) -> list[dict[str, int]]:
@@ -2934,30 +2935,181 @@ def _job_change(database_path: Path) -> Response:
     return _protocol_response(72, {"value": "ok", "job": job, "lv": new_lv})
 
 
+PIC_MAX_PAGE_SIZE = 60
+
+
+def _pic_catalogue(ttype: int) -> list[tuple[int, int]]:
+    """One 图鉴分页的 (pic_id, icon_id) 列表，按 pic.txt 的 sort 排。
+
+    pic.txt 才是图鉴的真目录（type 1 宠物 342 条 / 2 装备 936 / 3 道具 97 /
+    4 发现 42；另外 54 条 type=5 是坐骑，客户端没有对应分页，直接不列）。
+    上一版把图鉴写死成 3 条（LOCAL_PICS），页面上只有 3 个格子，所以用户看到
+    「图鉴没有了」。
+    """
+    rows: list[tuple[int, int, int]] = []
+    for raw_id, record in config_tables._table("pic.txt").items():
+        if int(str(record.get("type", "0") or 0).strip() or 0) != ttype:
+            continue
+        sort = int(str(record.get("sort", "0") or 0).strip() or 0)
+        raw_icon = str(record.get("iconId", "") or "").strip()
+        icon = int(raw_icon) if raw_icon.lstrip("-").isdigit() and int(raw_icon) > 0 else int(raw_id)
+        rows.append((sort, int(raw_id), icon))
+    rows.sort()
+    return [(pic_id, icon) for _sort, pic_id, icon in rows]
+
+
+def _pic_unlocked_ids(connection: sqlite3.Connection, player_id: int) -> set[int]:
+    return {
+        int(row[0])
+        for row in connection.execute(
+            "SELECT pic_id FROM pic_unlocked WHERE player_id=?", (player_id,)
+        )
+    }
+
+
 def _pic_list(database_path: Path) -> Response:
-    try: ttype=int(_request_value("ttype","1")); page=int(_request_value("p","1")); size=int(_request_value("n","9"))
-    except ValueError:return _pet_error(100)
-    if not 1<=ttype<=4 or page<1:return _pet_error(100)
-    ids=list(LOCAL_PICS); start=(page-1)*size
-    pics=[[i,LOCAL_PICS[i]["icon"],LOCAL_PICS[i]["reward"]] for i in ids[start:start+size]]
-    return _protocol_response(25,{"finish_rate":0,"pics":[{"index":x[0],"id":x[0],"icon":x[1],"is_reward":x[2]} for x in pics]})
+    """25 (PIC_LIST_INFO_KEY)：图鉴列表的一页。
+
+    IllustrationListUI.as:208-243 读 pics[].{id,icon,is_reward}，PicItem.as:120-128
+    在 `on`(=is_reward) 为 0 时把格子画灰并设 mouseEnabled=false，所以这里
+    is_reward 承载的是「是否已登记」；标题上的「完成度 n%」来自 finish_rate。
+    """
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if not 1 <= ttype <= 4 or page < 1:
+        return _pet_error(100)
+    size = max(1, min(size, PIC_MAX_PAGE_SIZE))
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        unlocked = _pic_unlocked_ids(c, player["id"])
+    catalogue = _pic_catalogue(ttype)
+    start = (page - 1) * size
+    pics = [
+        {
+            "index": start + offset,
+            "id": pic_id,
+            "icon": icon,
+            "is_reward": 1 if pic_id in unlocked else 0,
+        }
+        for offset, (pic_id, icon) in enumerate(catalogue[start : start + size])
+    ]
+    total = len(catalogue)
+    owned = sum(1 for pic_id, _icon in catalogue if pic_id in unlocked)
+    if not total:
+        finish_rate = 0
+    elif owned:
+        # 342 条里解锁 1 条 = 0.29%，四舍五入会显示 0%，看起来像"没生效"。
+        finish_rate = max(1, int(round(owned * 100 / total)))
+    else:
+        finish_rate = 0
+    return _protocol_response(25, {"finish_rate": finish_rate, "pics": pics})
 
 
 def _pic_info(database_path: Path) -> Response:
-    try: gid=int(_request_value("gid",""))
-    except ValueError:return _pet_error(100)
-    if gid not in LOCAL_PICS:return _pet_error(506)
-    # IllustrationInfoUI.as:162 does getDefinition("p" + param2.icon) itself, so
-    # this must be a bare number; without it the detail page silently rendered no
-    # artwork (the failure is swallowed by a catch block).
-    record = config_tables._table("pic.txt").get(gid) or {}
+    """26 (PIC_INFO_KEY)：单条图鉴详情。
+
+    IllustrationInfoUI.as:162 does getDefinition("p" + param2.icon) itself, so
+    `icon` must be a bare number; without it the detail page silently rendered no
+    artwork (the failure is swallowed by a catch block). It also switches on
+    param2.type, which the 3-entry stub never sent.
+    """
+    try:
+        gid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    record = config_tables._table("pic.txt").get(gid)
+    if record is None:
+        return _pet_error(506)
     raw_icon = str(record.get("iconId", "") or "").strip()
     icon = int(raw_icon) if raw_icon.lstrip("-").isdigit() and int(raw_icon) > 0 else gid
-    return _protocol_response(26,{"id":gid,"icon":icon,"need_money":0,"is_reward":LOCAL_PICS[gid]["reward"],"pics":[{"id":gid,"icon":icon,"is_reward":LOCAL_PICS[gid]["reward"]}]})
+    try:
+        pic_type = int(str(record.get("type", "0") or 0).strip() or 0)
+    except ValueError:
+        pic_type = 0
+    uid = _request_value("uid")
+    unlocked = 0
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is not None:
+            unlocked = 1 if gid in _pic_unlocked_ids(c, player["id"]) else 0
+    entry = {"id": gid, "icon": icon, "type": pic_type, "is_reward": unlocked}
+    return _protocol_response(
+        26, {"id": gid, "icon": icon, "type": pic_type, "need_money": 0,
+             "is_reward": unlocked, "pics": [entry]}
+    )
+
+
+# 107 (ACHIEVEMENT_LIST_KEY) is the 神器 page opened from 铁匠铺 → 神器.
+# Evidence (FFDec 26.4.0 export of build/input/data/zh-CN/res.swf):
+#   * ArtifactUI.as:138-172 has four buttons and each sends ttype=1..4 with p/n;
+#     img_artifact_1..4 are the 初级/中级/高级/终级神器 bitmaps.
+#   * ArtifactListUI.as:312-420 reads only id / need_money / is_reward / pics[].
+#     Every row of pics is a pic.txt id (the name comes from
+#     getConfigObject("pic", id), the icon from that row's iconId), and
+#     is_reward is that row's "已登记" flag: :378-394 enables 108 when every row
+#     is truthy, otherwise it pops ui 410/411. NB: with an empty pics array
+#     0 >= 0 is true, so the client still offers 领取 — hence 108 below has to
+#     refuse explicitly instead of inheriting the unknown-showId ok fallback.
+# What the shipped tables do NOT contain is which pic ids each tier requires
+# (pic.txt only groups rows by 图鉴 tab; equip.txt only labels the artifact
+# equipment 初级/中级/高级/终级神器). Inventing a requirement list would make the
+# page claimable for fake reasons, so pics stays empty until that list is
+# recovered. See docs/illustration-artifact-protocol.md §107.
+LOCAL_ARTIFACT_TIERS = {1: "初级神器", 2: "中级神器", 3: "高级神器", 4: "终级神器"}
 
 
 def _achievement_list(database_path: Path) -> Response:
-    return _protocol_response(107,{"id":1,"need_money":0,"is_reward":0,"pics":[]})
+    """107 (ACHIEVEMENT_LIST_KEY) — 神器档位页.
+
+    The four buttons are tiers, not pages: ArtifactListUI pages the returned
+    `pics` array client-side (showItem), so p/n are accepted for protocol
+    compatibility but do not slice a server-side list here.
+
+    `id` is echoed back as the 108 `gid`; the tier number keeps it stable per
+    page. `need_money` = 0, so the first claim is free (ui 412 only renders when
+    it is non-zero). `is_reward` = 0: 108 is unimplemented, so no tier has been
+    claimed yet.
+    """
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if ttype not in LOCAL_ARTIFACT_TIERS or page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+    if player is None:
+        return _pet_error(103)
+    return _protocol_response(107, {
+        "id": ttype,
+        "need_money": 0,
+        "is_reward": 0,
+        "pics": [],
+    })
+
+
+def _artifact_reward(database_path: Path) -> Response:
+    """108 (ACHIEVEMENT_REWARD_KEY) — 神器领奖：没有证据，明确拒绝而不是假成功.
+
+    107 serves no entries yet (see above), but ArtifactListUI.as:404 treats an
+    empty list as "all collected" (0 >= 0) and sends 108 anyway. Leaving 108
+    unrouted would fall through to the generic `{"value":"ok"}` envelope, which
+    reads as a successful claim even though nothing was paid. Refuse with the
+    existing protocol error instead; once the per-tier pic list and reward set
+    are recovered this handler becomes the one-time claim (and the repeat-claim
+    fee from 107.need_money).
+    """
+    return _pet_error(100)
 
 
 # LOCAL DEFAULT: the original server was shared by many players; this one has a
@@ -4234,6 +4386,27 @@ def _hunter_fight(database_path: Path) -> Response:
     })
 
 
+def _pic_id_for_pet(pet_id: int) -> int | None:
+    """The pic.txt id a pet registers under, or None when it has no 图鉴 row.
+
+    In the shipped data every catchable species shares one numbering:
+    monster.txt `iconId` == pet.txt id == pic.txt type-1 id (monster 1
+    原味波利 -> iconId 5001, pet 5001, pic 5001). The 63 pets that are absent
+    from pic.txt are the 超级/无双 evolution forms (pet 6501+), and no wild
+    monster points at them, so a catch cannot produce one. pet.txt `iconId` is
+    still tried as a fallback so a future renumbered row lands on the real pic
+    id instead of a dead one.
+    """
+    pics = config_tables._table("pic.txt")
+    if pet_id in pics:
+        return pet_id
+    record = config_tables.pet_record(pet_id) or {}
+    raw = str(record.get("iconId", "") or "").strip()
+    if raw.isdigit() and int(raw) in pics:
+        return int(raw)
+    return None
+
+
 def _pic_entries(monsters) -> list[dict]:
     """Picture-book entries for the monsters a hunt just defeated.
 
@@ -4242,15 +4415,17 @@ def _pic_entries(monsters) -> list[dict]:
     the record without a null guard. So both fields have to resolve for real:
 
     * `icon` must name an existing `p<icon>` symbol,
-    * `id` must exist in one of those four tables.
+    * `id` must be a real `pic.txt` id (the client also resolves the name
+      through pet/prop/exploreEquip, but 25/48 only know pic.txt).
 
-    In the shipped data monster.txt's `iconId` is exactly that id (monster 1
-    "原味波利" has iconId 5001, pet 5001 is the same creature and `p5001` lives in
-    pet6000.swf), so it drives both fields.
+    Every returned id is now a pic.txt id: command 7 stores
+    `_pic_id_for_pet(pet_id)` and this helper resolves a monster's `iconId` the
+    same way, so the 【获得图鉴】 popup can never announce an id that 25/48 do
+    not know. Monsters whose icon resolves to no pic row are skipped (the name
+    lookup would return null and throw in GetPicItem).
 
-    LOCAL DEFAULT: the per-pic rewards come from pic.txt when the entry exists;
-    otherwise a level-scaled point payout is used because the original drop table
-    is not recoverable.
+    The per-entry rewards are the real pic.txt columns, so the popup's
+    【图鉴奖励】 panel matches the detail page.
     """
     pics = config_tables._table("pic.txt")
     pets = config_tables._table("pet.txt")
@@ -4258,25 +4433,23 @@ def _pic_entries(monsters) -> list[dict]:
     seen: set[int] = set()
     for monster in monsters:
         try:
-            pid = int(str(monster["icon"]).strip())
+            icon = int(str(monster["icon"]).strip())
         except (KeyError, TypeError, ValueError):
             continue
-        if pid in seen:
+        if icon in pets:
+            pid = _pic_id_for_pet(icon)
+        else:
+            pid = icon if icon in pics else None
+        if pid is None or pid in seen:
             continue
         seen.add(pid)
-        record = pics.get(pid)
-        if record is not None:
-            point = int(str(record.get("rewardPoint", "0")).strip() or 0)
-            crystal = int(str(record.get("rewardCrystal", "0")).strip() or 0)
-            goods = [
-                {"id": gid, "num": num}
-                for gid, num in _reward_goods_ids(str(record.get("rewardGoods", "") or ""))
-            ]
-        else:
-            level = int(monster["lv"] or 1) if "lv" in monster.keys() else 1
-            point, crystal, goods = 10 * level, 0, []
-        if pid not in pics and pid not in pets:
-            continue  # name lookup would return null and throw in GetPicItem
+        record = pics[pid]
+        point = int(str(record.get("rewardPoint", "0")).strip() or 0)
+        crystal = int(str(record.get("rewardCrystal", "0")).strip() or 0)
+        goods = [
+            {"id": gid, "num": num}
+            for gid, num in _reward_goods_ids(str(record.get("rewardGoods", "") or ""))
+        ]
         entries.append({
             "id": pid, "icon": pid,
             "reward_point": point, "reward_crystal": crystal, "reward_goods": goods,
@@ -4426,8 +4599,12 @@ def _hunter_catch(database_path: Path) -> Response:
         )
         index=cursor.lastrowid
         # Catching registers the creature in the picture book, which is what the
-        # picStep milestones count.
-        newly = set(_unlock_pic(c, p["id"], [pet_id]))
+        # picStep milestones count. The stored id must be a pic.txt id (the same
+        # id _pic_entries returns for the popup and the same id 25 lists), not
+        # a bare pet id: _pic_id_for_pet() is deliberately the only place that
+        # decides this, and returns None for pets with no 图鉴 row.
+        pic_id = _pic_id_for_pet(pet_id)
+        newly = set(_unlock_pic(c, p["id"], [pic_id] if pic_id is not None else []))
     # Only a FIRST registration may pop the 获得图鉴 banner. This used to list the
     # creature unconditionally, so every catch re-announced an entry the player had
     # registered long ago ("捕捉成功会弹出来获得图鉴呢？我不是已经解锁过图鉴了嘛").
@@ -6577,11 +6754,16 @@ def _arena_rank(database_path: Path) -> Response:
 
 
 def _unlock_pic(connection, player_id: int, pic_ids) -> list[int]:
-    """Register creatures in the player's picture book.
+    """Register entries in the player's picture book.
 
-    picStep.txt's milestones count these entries (`value` = how many are needed),
-    and IllustrationTaskUI shows own_num/need_num from command 48, so every place
-    that awards a `pic` entry has to record it here as well.
+    `pic_ids` must be pic.txt ids: 25 renders that catalogue and 48 counts the
+    same set (`_pic_book_ids`). Every award path funnels through here —
+    hunting (6), catching (7, via _pic_id_for_pet), explore kind-3 gifts and
+    the weekly arena star — so the ids cannot drift apart.
+
+    Rows written by older builds are never deleted: an id that is not in
+    pic.txt simply stays in pic_unlocked and is ignored by 25/48, which keeps an
+    old save readable without inventing a 图鉴 row for it.
     """
     unlocked: list[int] = []
     for pic in pic_ids:
@@ -6621,12 +6803,32 @@ def _picstep_entries() -> list[dict]:
     return entries
 
 
+def _pic_book_ids() -> set[int]:
+    """The pic.txt ids the 图鉴 UI can actually list (25's four tabs, types 1-4).
+
+    picStep.txt's milestones top out at 1000 entries while these four tabs hold
+    1417 rows, so counting exactly this set keeps 48 reachable and keeps
+    `own_num` equal to the sum of 25's per-tab unlocked counts. Type-5 rows (54
+    景点) and any legacy pet-only id (the 63 超级/无双 evolution forms have no
+    pic.txt row) stay in pic_unlocked but are not counted, because no 图鉴 page
+    can show them.
+    """
+    return {
+        pic_id
+        for ttype in (1, 2, 3, 4)
+        for pic_id, _icon in _pic_catalogue(ttype)
+    }
+
+
 def _picstep_state(connection, player_id: int) -> tuple[dict, int, set[int]]:
-    """The milestone the page should show, the collected count and claimed ids."""
+    """The milestone the page should show, the collected count and claimed ids.
+
+    `owned` is intersected with `_pic_book_ids()` so 48 reports the same
+    catalogue that 25 lists; before this it counted every pic_unlocked row,
+    including ids 25 could never display.
+    """
     entries = _picstep_entries()
-    owned = connection.execute(
-        "SELECT COUNT(*) FROM pic_unlocked WHERE player_id=?", (player_id,)
-    ).fetchone()[0]
+    owned = len(_pic_unlocked_ids(connection, player_id) & _pic_book_ids())
     claimed = {
         row[0] for row in connection.execute(
             "SELECT step_id FROM pic_step_claimed WHERE player_id=?", (player_id,)
@@ -9058,6 +9260,7 @@ _SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
     "48": _picstep_info,
     "49": _picstep_reward,
     "107": _achievement_list,
+    "108": _artifact_reward,
     # 41 (SHOW_MORE_INFO) 没有真实实现，但 InfoUI.as:232 无判空直接读 param2.list,
     # 兜底的 {"value":"ok"} 会让页面抛 TypeError 卡住，所以这里回形状正确的空载荷。
     "41": lambda database_path: _protocol_response(41, {"list": [], "value": "ok"}),
