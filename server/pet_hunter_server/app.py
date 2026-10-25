@@ -1732,9 +1732,16 @@ def _player_inventory(database_path: Path) -> Response:
         page_size = int(_request_value("n", "9"))
         target_raw = _request_value("target", "").strip()
         target = int(target_raw) if target_raw else -1
+        slot_raw = _request_value("slot", "").strip()
+        slot = int(slot_raw) if slot_raw else 0
     except ValueError:
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
-    if item_type not in (1, 2, 3) or page < 1 or not 1 <= page_size <= 9:
+    if (
+        item_type not in (1, 2, 3)
+        or slot not in (0, 1, 2, 3)
+        or page < 1
+        or not 1 <= page_size <= 9
+    ):
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
 
     with _connect_database(database_path) as connection:
@@ -1770,7 +1777,18 @@ def _player_inventory(database_path: Path) -> Response:
                 """,
                 (player["id"],),
             ).fetchall()
-            visible = [r for r in every_row if _equip_matches_sex(r["id"], sex)]
+            def _visible_equip(row) -> bool:
+                if not _equip_matches_sex(row["id"], sex):
+                    return False
+                if not slot:
+                    return True
+                record = config_tables.equip_record(row["id"])
+                item_slot = (
+                    config_tables.equip_slot(record) if record else row["type"]
+                )
+                return item_slot == slot
+
+            visible = [r for r in every_row if _visible_equip(r)]
             count = len(visible)
             start = (page - 1) * page_size
             rows = visible[start:start + page_size]
@@ -5556,6 +5574,64 @@ def _choose_pet_list(database_path: Path) -> Response:
     return _protocol_response(42, {"list": [_pet_list_entry(r) for r in rows]})
 
 
+def _ensure_arena_defense_row(
+    connection: sqlite3.Connection, player_id: int
+):
+    """防守快照不存在时，用当前 PvE 装备建一行；宠物槽留空等玩家选择。"""
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is not None:
+        return row
+    worn = _worn_equipment(connection, player_id)
+    weapon = worn.get(1)["id"] if worn.get(1) else 0
+    clothes = worn.get(2)["id"] if worn.get(2) else 0
+    hat = worn.get(3)["id"] if worn.get(3) else 0
+    connection.execute(
+        "INSERT INTO player_loadouts (player_id, kind, weapon_inv_id,"
+        " clothes_inv_id, hat_inv_id, pet1_id, pet2_id, updated_at)"
+        " VALUES (?, 'arena_defense', ?, ?, ?, 0, 0, ?)",
+        (
+            player_id,
+            weapon,
+            clothes,
+            hat,
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    return _loadout_row(connection, player_id, "arena_defense")
+
+
+def _arena_defense_add_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> bool:
+    row = _ensure_arena_defense_row(connection, player_id)
+    if pet_id in (int(row["pet1_id"] or 0), int(row["pet2_id"] or 0)):
+        return True
+    for column in ("pet1_id", "pet2_id"):
+        if not int(row[column] or 0):
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=?, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (pet_id, time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+            return True
+    return False
+
+
+def _arena_defense_remove_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> None:
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is None:
+        return
+    for column in ("pet1_id", "pet2_id"):
+        if int(row[column] or 0) == pet_id:
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=0, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+
+
 def _choose_battle_pet(database_path: Path) -> Response:
     """44 (CHOOSE_BATTLE_PET_KEY): park the picked pet in a hunt slot.
 
@@ -5576,6 +5652,12 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(506)
         if int(row["train_end"] or 0) > int(time.time()):
             return _pet_error(100)
+        if slot == "3":
+            # 擂台防守页：写 player_loadouts，不动 pets.squad_slot。
+            if not _arena_defense_add_pet(c, player["id"], index):
+                return _pet_error(506)
+            pet = _pet_list_entry(row)
+            return _protocol_response(44, {"value": "ok", "pet": pet})
         # FightPetListUI.as:160-164 sends 44 with the pet index; `ttype` there is
         # the page kind from HunterTaskUI.as:302 and is ALWAYS 1, so it can never
         # identify the slot. Put the pet in the first free slot instead — that is
@@ -5611,6 +5693,11 @@ def _choose_rest_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
+        if _request_value("ttype", "1") == "3":
+            # 擂台防守页：从防守快照移除，不动 PvE 出战槽。
+            _arena_defense_remove_pet(c, player["id"], index)
+            pet = _pet_list_entry(row)
+            return _protocol_response(45, {"value": "ok", "pet": pet})
         # HunterTaskUI.as:287-310 sends 45 when the player taps a slot that
         # ALREADY holds a pet — i.e. "take it off the squad". ttype is hardcoded
         # 1 there (it is a page kind, not a slot), so the pet simply leaves.
