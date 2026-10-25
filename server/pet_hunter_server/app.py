@@ -701,6 +701,22 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # 擂台防守快照：PvE 换装/换宠不影响它。只存实例 id，读取时再校验归属。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_loadouts (
+                player_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                weapon_inv_id INTEGER NOT NULL DEFAULT 0,
+                clothes_inv_id INTEGER NOT NULL DEFAULT 0,
+                hat_inv_id INTEGER NOT NULL DEFAULT 0,
+                pet1_id INTEGER NOT NULL DEFAULT 0,
+                pet2_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (player_id, kind)
+            )
+            """
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -1456,6 +1472,77 @@ def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int,
     return worn
 
 
+_LOADOUT_SLOT_COLUMNS = {
+    1: "weapon_inv_id",
+    2: "clothes_inv_id",
+    3: "hat_inv_id",
+}
+_LOADOUT_PET_COLUMNS = ("pet1_id", "pet2_id")
+
+
+def _loadout_row(connection: sqlite3.Connection, player_id: int, kind: str):
+    if kind != "arena_defense":
+        return None
+    return connection.execute(
+        "SELECT * FROM player_loadouts WHERE player_id=? AND kind=?",
+        (player_id, kind),
+    ).fetchone()
+
+
+def _loadout_equipment(
+    connection: sqlite3.Connection, player_id: int, kind: str = "pve"
+) -> dict[int, sqlite3.Row]:
+    """kind='pve' 读当前穿着；kind='arena_defense' 读防守快照，缺行时回退 PvE。"""
+    if kind != "arena_defense":
+        return _worn_equipment(connection, player_id)
+    row = _loadout_row(connection, player_id, kind)
+    if row is None:
+        return _worn_equipment(connection, player_id)
+    worn: dict[int, sqlite3.Row] = {}
+    for slot, column in _LOADOUT_SLOT_COLUMNS.items():
+        inv_id = int(row[column] or 0)
+        if not inv_id:
+            continue
+        item = connection.execute(
+            "SELECT id, item_id, item_type, icon, level, star, hp, speed,"
+            " phy_att, mag_att, phy_def, mag_def"
+            " FROM inventory WHERE id=? AND player_id=? AND team=3",
+            (inv_id, player_id),
+        ).fetchone()
+        if item is None:
+            continue
+        record = config_tables.equip_record(item["item_id"])
+        item_slot = config_tables.equip_slot(record) if record else item["item_type"]
+        if item_slot == slot:
+            worn[slot] = item
+    return worn
+
+
+def _loadout_pets(
+    connection: sqlite3.Connection, player_id: int, kind: str = "pve"
+):
+    """kind='pve' 读 squad_slot；kind='arena_defense' 读快照宠物，缺行时回退 PvE。"""
+    columns = "id AS 'index', pet_id AS id, icon, name, lv, skills"
+    if kind != "arena_defense":
+        return _squad_pet_rows(connection, player_id, columns)
+    row = _loadout_row(connection, player_id, kind)
+    if row is None:
+        return _squad_pet_rows(connection, player_id, columns)
+    pets = []
+    for column in _LOADOUT_PET_COLUMNS:
+        pet_id = int(row[column] or 0)
+        if not pet_id:
+            continue
+        pet = connection.execute(
+            f"SELECT {columns} FROM pets WHERE id=? AND player_id=?"
+            f" AND is_locked=0 AND {PET_READY_SQL}",
+            (pet_id, player_id),
+        ).fetchone()
+        if pet is not None:
+            pets.append(pet)
+    return pets
+
+
 def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
     """Build the ShowItem layer string.
 
@@ -1664,9 +1751,16 @@ def _player_inventory(database_path: Path) -> Response:
         page_size = int(_request_value("n", "9"))
         target_raw = _request_value("target", "").strip()
         target = int(target_raw) if target_raw else -1
+        slot_raw = _request_value("slot", "").strip()
+        slot = int(slot_raw) if slot_raw else 0
     except ValueError:
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
-    if item_type not in (1, 2, 3) or page < 1 or not 1 <= page_size <= 9:
+    if (
+        item_type not in (1, 2, 3)
+        or slot not in (0, 1, 2, 3)
+        or page < 1
+        or not 1 <= page_size <= 9
+    ):
         return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
 
     with _connect_database(database_path) as connection:
@@ -1702,7 +1796,18 @@ def _player_inventory(database_path: Path) -> Response:
                 """,
                 (player["id"],),
             ).fetchall()
-            visible = [r for r in every_row if _equip_matches_sex(r["id"], sex)]
+            def _visible_equip(row) -> bool:
+                if not _equip_matches_sex(row["id"], sex):
+                    return False
+                if not slot:
+                    return True
+                record = config_tables.equip_record(row["id"])
+                item_slot = (
+                    config_tables.equip_slot(record) if record else row["type"]
+                )
+                return item_slot == slot
+
+            visible = [r for r in every_row if _visible_equip(r)]
             count = len(visible)
             start = (page - 1) * page_size
             rows = visible[start:start + page_size]
@@ -2461,6 +2566,31 @@ def _sale_price(item_id: int) -> int | None:
     return LOCAL_SELL_PRICES.get(item_id)
 
 
+def _player_unequip(database_path: Path, uid: str) -> Response:
+    """37&action=off&slot=n：只卸下该槽，不删行、不退钱。"""
+    try:
+        slot = int(_request_value("slot", ""))
+    except ValueError:
+        return _pet_error(100)
+    if slot not in EQUIP_SLOT_FIELD:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        connection.execute(
+            "UPDATE inventory SET equipped=0"
+            " WHERE player_id=? AND team=3 AND item_type=? AND equipped=1",
+            (player["id"], slot),
+        )
+        player_row = connection.execute(_PLAYER_ROW_SQL, (uid,)).fetchone()
+        payload = _player_payload(connection, player_row)
+    payload["value"] = "ok"
+    return _protocol_response(37, payload)
+
+
 def _player_on_equip(database_path: Path) -> Response:
     """ON_EQUIP (37): wear the equipment row and refresh the home screen.
 
@@ -2472,6 +2602,8 @@ def _player_on_equip(database_path: Path) -> Response:
     shape as command 2, not {"value":"ok"}.
     """
     uid = _request_value("uid")
+    if _request_value("action") == "off":
+        return _player_unequip(database_path, uid)
     try:
         item_index = int(_request_value("index", ""))
     except ValueError:
@@ -3279,13 +3411,22 @@ def _pick_monster(monster_id: int) -> dict[str, object] | None:
     def stat(column: str, fallback: int) -> int:
         raw = str(record.get(column, "")).strip()
         return int(raw) if raw.isdigit() else fallback
+    properties = str(record.get("properties", "") or "").strip()
     return {
         "id": monster_id,
         "icon": int(icon),
         "name": record.get("name", ""),
         "lv": stat("level", 1),
+        # 阶段 3：怪物六维改用表内真实值（规格 §2.4/§3.11），旧曲线 `_monster_stats`
+        # 只在 PETHUNTER_COMBAT_V2=0 的回滚路径里继续使用。
         "hp": stat("hp", 50),
+        "speed": stat("speed", 50),
         "phy_att": stat("phyAtt", 10),
+        "phy_def": stat("phyDef", 10),
+        "mag_att": stat("magAtt", 10),
+        "mag_def": stat("magDef", 10),
+        "properties": int(properties) if properties.isdigit() else 0,
+        "grows": str(record.get("grows", "") or ""),
         # monster.txt carries a real `exp` column; hunt payouts read it instead of
         # inventing a per-level constant.
         "exp": stat("exp", 0),
@@ -3345,6 +3486,234 @@ def _monsters_for_map(hid: int) -> list[dict[str, object]]:
         leader["elite"] = True
         return [leader] + picked
     return picked
+
+
+# ---------------------------------------------------------------------------
+# 阶段 3 P1：宠物六维唯一口径 + 属性相克 + 技能威力
+# 规格：docs/superpowers/specs/2026-10-25-pet-combat-design.md §3.1 / §3.8 / §3.11 /
+#       §4.2.3 / §4.2.4 / §4.2.6
+# 回滚：PETHUNTER_COMBAT_V2=0 → 战斗仍走旧的 `_combat_stats` / `_monster_stats` / 0.6 系数。
+# ---------------------------------------------------------------------------
+LOCAL_DAMAGE_K = 0.28            # §3.10：旧值 0.6；配合 skill_mult 后保持 3~6 击
+LOCAL_SKILL_POWER_GAIN = 0.5      # §4.2.3：skill_mult = 1 + damage/100 × 0.5
+LOCAL_SKILL_LEVEL_CAP = 15        # §4.2.6：技能等级 = min(15, 星级)，15 是族行数
+LOCAL_GW_PER_LEVEL = 100          # §3.3：每 100 级兑现 gw 点
+LOCAL_PET_LEVEL_STAT_STEP = 0.006 # 与人物 LOCAL_HERO_LEVEL_STAT_STEP 同源
+LOCAL_MONSTER_SCALE = 0.80      # 【本地】怪物 hp/物攻的整体缩放：
+#   monster.txt 的数值与 pet.txt 是同一套序列，直接照抄会让 lv1 波利(lv1 att 65)
+#   反杀 lv1 火龙(att 52)。0.8 让同级狩猎回到"队伍能赢、但会掉血"（§3.11 的 D 之外的手感旋钮）。
+LOCAL_ELEMENT_ADVANTAGE = 1.30    # §3.8：克制（help 8 只有关系没有数字，倍率是 LOCAL）
+LOCAL_ELEMENT_WEAKNESS = 0.77     # §3.8：被克
+# help.txt 8「属性说明」：火克草电/被水土克；草克水土/被火风克；水克火风/被草电克；
+# 土克火电/被草风克；风克草土/被水电克；电克水风/被火土克；原属性不参与。
+LOCAL_ELEMENT_BEATS: dict[int, tuple[int, int]] = {
+    1: (2, 6),
+    2: (3, 4),
+    3: (1, 5),
+    4: (1, 6),
+    5: (2, 4),
+    6: (3, 5),
+}
+# (战斗键, pet.txt 列, pro 列, gw 列)
+_PET_STAT_FIELDS = (
+    ("hp", "hp", "pro_hp", "gw_hp"),
+    ("speed", "speed", "pro_speed", "gw_speed"),
+    ("phy_att", "phyAtt", "pro_phy_att", "gw_phy_att"),
+    ("mag_att", "magAtt", "pro_mag_att", "gw_mag_att"),
+    ("phy_def", "phyDef", "pro_phy_def", "gw_phy_def"),
+    ("mag_def", "magDef", "pro_mag_def", "gw_mag_def"),
+)
+
+
+def _combat_monsters_enabled() -> bool:
+    """怪物用不用 monster.txt 的真实六维。
+
+    默认 **关**：实测（P1）在真实六维下，lv1 队伍打 lv1 地图 24 场 0 胜 ——
+    monster.txt 的 lv1 行里就有 130 血 / 75 攻 的怪（大地犬），旧曲线 `_monster_stats`
+    把它们压平了。要开需要先按 §3.11 重做内容难度（P4 的模拟器任务），
+    所以这一步单独留开关：`PETHUNTER_COMBAT_MONSTERS=1` 打开。
+    """
+    return os.environ.get("PETHUNTER_COMBAT_MONSTERS", "0").strip().lower() in {
+        "1", "true", "on", "yes",
+    }
+
+
+def _combat_v2_enabled() -> bool:
+    """阶段 3 战斗新口径的开关；默认开，`PETHUNTER_COMBAT_V2=0` 回旧公式。"""
+    return os.environ.get("PETHUNTER_COMBAT_V2", "1").strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+def _nature_multipliers(nature: int) -> dict[str, float]:
+    """nature.txt：aKey×aValue/100、bKey×bValue/100；id=0 普通无加成。"""
+    record = config_tables._table("nature.txt").get(int(nature or 0)) or {}
+    # nature.txt 的 aKey/bKey 写的是 pet.txt 的列名（phyAtt/magDef...），
+    # 要映射回战斗键（phy_att/mag_def...）再参与乘法。
+    by_config_column = {column[1]: column[0] for column in _PET_STAT_FIELDS}
+    multipliers: dict[str, float] = {}
+    for key_field, value_field in (("aKey", "aValue"), ("bKey", "bValue")):
+        key = str(record.get(key_field, "") or "").strip()
+        raw = str(record.get(value_field, "") or "").strip()
+        stat = by_config_column.get(key, key)
+        if stat in {column[0] for column in _PET_STAT_FIELDS} and raw.isdigit():
+            multipliers[stat] = int(raw) / 100.0
+    return multipliers
+
+
+def _pet_stats(pet_row) -> dict[str, int]:
+    """宠物六维唯一口径（§3.1）：
+
+        stat = round( (round(base × lvf) + pro + floor(gw × lv / 100)) × naturef ) + buff_flat
+
+    lv1 / pro=0 / nature=0 时等于 `_pet_base_stats`，与旧口径在 1 级完全一致；
+    调用方传进来的行可以缺 `gw_*`/`nature`（旧 SELECT），缺列按 0 处理。
+    """
+    keys = pet_row.keys()
+    # 两种行形状：战斗里的 SELECT 把 pet_id 别名成 id；面板/详情行同时有 id(行号) 和 pet_id。
+    species = int(pet_row["pet_id"]) if "pet_id" in keys else int(pet_row["id"])
+    base = _pet_base_stats(species)
+
+    def value(column: str) -> int:
+        return int(pet_row[column] or 0) if column in keys else 0
+
+    lv = max(1, int(pet_row["lv"] or 1))
+    lvf = 1 + LOCAL_PET_LEVEL_STAT_STEP * (lv - 1)
+    nature = _nature_multipliers(value("nature"))
+    stats: dict[str, int] = {}
+    for stat, _config_column, pro_column, gw_column in _PET_STAT_FIELDS:
+        raw = (
+            round(base.get(stat, 0) * lvf)
+            + value(pro_column)
+            + (value(gw_column) * lv) // LOCAL_GW_PER_LEVEL
+        )
+        stats[stat] = max(1, round(raw * nature.get(stat, 1.0)))
+    return stats
+
+
+def _pet_stats_before_pro(pet_row) -> dict[str, int]:
+    """面板用：拆出"不含强化的部分"，使 面板值 + *_tp == `_pet_stats`（§3.4）。"""
+    final = _pet_stats(pet_row)
+    keys = pet_row.keys()
+    out: dict[str, int] = {}
+    for stat, _config_column, pro_column, _gw_column in _PET_STAT_FIELDS:
+        pro = int(pet_row[pro_column] or 0) if pro_column in keys else 0
+        out[stat] = max(1, final[stat] - pro)
+    return out
+
+
+def _element_multiplier(attacker_pro: int, defender_pro: int) -> float:
+    """help 8 的相克：克制 ×1.30 / 被克 ×0.77 / 原与其它一律 ×1.00。"""
+    attacker = int(attacker_pro or 0)
+    defender = int(defender_pro or 0)
+    if attacker <= 0 or defender <= 0:
+        return 1.0
+    if defender in LOCAL_ELEMENT_BEATS.get(attacker, ()):
+        return LOCAL_ELEMENT_ADVANTAGE
+    if attacker in LOCAL_ELEMENT_BEATS.get(defender, ()):
+        return LOCAL_ELEMENT_WEAKNESS
+    return 1.0
+
+
+def _damage_v2(att: int, defence: int, element: float = 1.0) -> int:
+    """§3.10 的伤害：K=0.28。旧 `_damage`（0.6）保留给回滚路径。"""
+    att = max(1, int(att or 1))
+    defence = max(1, int(defence or 1))
+    return max(1, round(LOCAL_DAMAGE_K * att * att / (att + defence) * float(element or 1.0)))
+
+
+def _skill_mult(damage: int) -> float:
+    """§4.2.3：技能等级 → 攻击乘区（L1 ×1.20 … L15 ×2.25）。"""
+    return 1.0 + (max(0, int(damage or 0)) / 100.0) * LOCAL_SKILL_POWER_GAIN
+
+
+def _skill_family_name(record: dict) -> str:
+    name = str(record.get("name", "") or "").strip()
+    return name.split("级", 1)[-1].strip() if "级" in name else name
+
+
+def _skill_choices(skill_text: object) -> list[dict]:
+    """§4.2.2：`skills` 列 → 去重后的主动技能候选（同族取最高级），按等级降序。"""
+    table = config_tables._table("skill.txt")
+    best: dict[str, dict] = {}
+    for token in str(skill_text or "").replace(";", ":").split(":"):
+        token = token.strip()
+        if not token.isdigit():
+            continue
+        skill_id = int(token)
+        record = table.get(skill_id)
+        if not record or str(record.get("team", "")).strip() != "1":
+            continue
+        family = _skill_family_name(record)
+        level = int(str(record.get("level", "1")).strip() or 1)
+        if family in best and int(best[family]["level"]) >= level:
+            continue
+        damage = str(record.get("damage", "0")).strip()
+        element = str(record.get("pro", "0")).strip()
+        best[family] = {
+            "id": skill_id,
+            "family": family,
+            "level": level,
+            "damage": int(damage) if damage.isdigit() else 0,
+            "physical": str(record.get("damageType", "1")).strip() != "2",
+            "element": int(element) if element.isdigit() else 0,
+        }
+    return sorted(best.values(), key=lambda item: (-int(item["level"]), int(item["id"])))
+
+
+def _skill_pick(choices: list[dict], attacker: dict, defender: dict) -> dict | None:
+    """§4.2.4：按期望伤害取最大（物/魔通道 × 相克 × 技能等级），同分取族名最小。"""
+    if not choices:
+        return None
+    defender_element = int(defender.get("element") or 0)
+    ranked: list[tuple[int, str, int, dict]] = []
+    for index, choice in enumerate(choices):
+        physical = bool(choice.get("physical", True))
+        att = int(attacker.get("phy_att" if physical else "mag_att")
+                  or attacker.get("att") or 1)
+        defence = int(defender.get("phy_def" if physical else "mag_def")
+                      or defender.get("def") or 1)
+        effective = max(1, int(round(att * _skill_mult(choice.get("damage", 0)))))
+        dealt = _damage_v2(effective, max(1, defence),
+                           _element_multiplier(int(choice.get("element", 0)), defender_element))
+        ranked.append((-dealt, str(choice.get("family", "")), index, choice))
+    ranked.sort()
+    return ranked[0][3]
+
+
+def _monster_stats_from_row(
+    row, reference_lv: int | None = None, pro_term: int = 0, difficulty: float = 1.0
+) -> dict[str, int]:
+    """§3.11：怪物六维 = 表内真实六维 × lvf + gw_term + pro_term，再乘内容难度 D。
+
+    `monster.txt` 的列序与 `pet.txt` 不同（§2.4 已记录"表头与数据至少一个错"），
+    这里按表头读，`difficulty` 与 `pro_term` 是手感旋钮。
+    """
+    lv = max(1, int(reference_lv or row.get("lv") or 1))
+    table_lv = max(1, int(row.get("lv") or 1))
+    # monster.txt 的六维**不随等级变化**（§2.4）：lv10 的怪天生就比 lv1 的壮。
+    # 所以内容等级要按 sqrt(参考等级/表内等级) 归一化，否则 lv1 队伍会撞上 lv10 的
+    # 数值（皮薄但攻击 100），同级内容永远打不过。比例夹在 [0.5, 2.0] 防止极端。
+    ratio = min(2.0, max(0.5, (lv / table_lv) ** 0.5))
+    lvf = 1 + LOCAL_PET_LEVEL_STAT_STEP * (lv - 1)
+    grows = str(row.get("grows", "") or "").strip()
+    gw_mid = 0
+    if ":" in grows:
+        low, _sep, high = grows.partition(":")
+        if low.strip().isdigit() and high.strip().isdigit():
+            gw_mid = (int(low.strip()) + int(high.strip())) // 2
+    stats: dict[str, int] = {}
+    for stat, _config_column, _pro_column, _gw_column in _PET_STAT_FIELDS:
+        raw = (
+            round(int(row.get(stat) or 0) * ratio * lvf)
+            + (gw_mid * lv) // LOCAL_GW_PER_LEVEL
+            + int(pro_term or 0)
+        )
+        stats[stat] = max(1, int(round(raw * float(difficulty or 1.0))))
+    # 只有 hp 与物攻参与 LOCAL_MONSTER_SCALE：防御保持表内值，避免"越调越肉"。
+    for scaled in ("hp", "phy_att"):
+        stats[scaled] = max(1, int(round(stats[scaled] * LOCAL_MONSTER_SCALE)))
+    return stats
 
 
 def _combat_stats(pet_row) -> tuple[int, int, int]:
@@ -3410,6 +3779,7 @@ def _battle_side(
     pet_rows,
     defenders,
     stat_bonus: int = 0,
+    reference_lv: int | None = None,
 ) -> tuple[list[dict], list[dict], dict]:
     """Shared attacker/defender builder for HUNT(6), ARENA(24) and COPY(74).
 
@@ -3436,12 +3806,20 @@ def _battle_side(
     # 幸运四叶草（prop.txt type 18）：出战的猎人和宠物"所有能力提升 value 点"。
     # 战斗只读 hp/att/def/speed，强化值/六维的完整口径留到阶段 3 再统一。
     bonus = max(0, int(stat_bonus or 0))
+    v2 = _combat_v2_enabled()
     hunter_hp, hunter_att, hunter_def = hunter_stats
     hunter_hp += bonus
     hunter_att += bonus
     hunter_def += bonus
-    combat["att"][0] = {"hp": hunter_hp, "att": hunter_att, "def": hunter_def,
-                        "speed": int(ROLE_BASE_STATS.get("speed", 10)) + bonus}
+    hunter_choices = _skill_choices(":".join(str(s) for s in (hunter_skills or []))) if v2 else []
+    combat["att"][0] = {
+        "hp": hunter_hp, "att": hunter_att, "def": hunter_def,
+        "mag_att": hunter_att + bonus, "mag_def": hunter_def + bonus,
+        "speed": int(ROLE_BASE_STATS.get("speed", 10)) + bonus,
+        "element": 0,
+        "choices": hunter_choices,
+        "skill_id": int((hunter_skills or [0])[0] or 0),
+    }
     lead = {
         "team": 1, "code": 0, "is_pet": 0, "id": 0, "name": hunter_name,
         "lv": hunter_lv, "pre_lv": hunter_lv, "hp": hunter_hp, "img": hunter_skin,
@@ -3450,34 +3828,82 @@ def _battle_side(
     }
 
     def attacker(row, code: int) -> dict:
-        hp, att, defence = _combat_stats(row)
-        hp += bonus
-        att += bonus
-        defence += bonus
-        combat["att"][code] = {"hp": hp, "att": att, "def": defence,
-                               "speed": int(_pet_base_stats(row["id"])["speed"]) + bonus}
+        keys = row.keys()
+        if v2:
+            stats = _pet_stats(row)
+            hp = stats["hp"] + bonus
+            att = stats["phy_att"] + bonus
+            defence = stats["phy_def"] + bonus
+            record = config_tables.pet_record(int(row["id"])) or {}
+            raw_element = str(record.get("properties", "") or "").strip()
+            element = int(raw_element) if raw_element.isdigit() else 0
+            choices = _skill_choices(row["skills"] if "skills" in keys else "")
+            speed = stats["speed"] + bonus
+            mag_att = stats["mag_att"] + bonus
+            mag_def = stats["mag_def"] + bonus
+        else:
+            hp, att, defence = _combat_stats(row)
+            hp += bonus
+            att += bonus
+            defence += bonus
+            element = 0
+            choices = []
+            speed = int(_pet_base_stats(row["id"])["speed"]) + bonus
+            mag_att = att
+            mag_def = defence
+        combat["att"][code] = {
+            "hp": hp, "att": att, "def": defence,
+            "mag_att": mag_att, "mag_def": mag_def,
+            "speed": speed, "element": element, "choices": choices,
+            "skill_id": _first_skill_id(row["skills"] if "skills" in keys else ""),
+        }
         return {
             "team": 1, "code": code, "is_pet": 1, "index": row["index"],
             "id": row["id"], "name": _pet_name(row["id"], row["name"]),
             "lv": row["lv"], "pre_lv": row["lv"], "hp": hp, "img": row["icon"],
-            # 宠物用自己 skills 列里的第一个技能。
-            "skill_id": _first_skill_id(
-                row["skills"] if "skills" in row.keys() else ""
+            # 宠物用自己的技能；第一条就是 AI 会用的（§4.2.4 优先级排序）。
+            "skill_id": (
+                int(choices[0]["id"]) if choices
+                else _first_skill_id(row["skills"] if "skills" in keys else "")
             ),
         }
 
     att_list = [lead] + [attacker(r, i + 1) for i, r in enumerate(pet_rows)][:2]
+    squad_lv = max([int(r["lv"] or 1) for r in pet_rows] or [int(hunter_lv or 1)])
+    content_lv = int(reference_lv or squad_lv)
     def_list = []
     for i, d in enumerate(defenders):
-        mon_hp, mon_att, mon_def = _monster_stats(int(d["lv"] or 1))
-        if d.get("elite"):
-            mon_hp = round(mon_hp * LOCAL_ELITE_SCALE)
-            mon_att = round(mon_att * LOCAL_ELITE_SCALE)
-            mon_def = round(mon_def * LOCAL_ELITE_SCALE)
-        combat["def"][i] = {"hp": mon_hp, "att": mon_att, "def": mon_def, "speed": 0}
+        if v2 and _combat_monsters_enabled():
+            # 内容等级 = 队伍等级（与探险 103 的橡皮筋同口径）：monster.txt 的怪物
+            # 跨 1~1000 级，地图分带又宽，直接用表内等级会让 lv1 队伍撞上 lv10 的怪。
+            stats = _monster_stats_from_row(d, reference_lv=int(content_lv))
+            if d.get("elite"):
+                stats = {key: round(value * LOCAL_ELITE_SCALE) for key, value in stats.items()}
+            mon_hp = stats["hp"]
+            mon_att = stats["phy_att"]
+            mon_def = stats["phy_def"]
+            mon_mag_att = stats["mag_att"]
+            mon_mag_def = stats["mag_def"]
+            mon_speed = stats["speed"]
+            mon_element = int(d.get("properties") or 0)
+            mon_choices = _skill_choices(d.get("skills", ""))
+        else:
+            mon_hp, mon_att, mon_def = _monster_stats(int(d["lv"] or 1))
+            if d.get("elite"):
+                mon_hp = round(mon_hp * LOCAL_ELITE_SCALE)
+                mon_att = round(mon_att * LOCAL_ELITE_SCALE)
+                mon_def = round(mon_def * LOCAL_ELITE_SCALE)
+            mon_mag_att, mon_mag_def, mon_speed = mon_att, mon_def, 0
+            mon_element, mon_choices = 0, []
+        combat["def"][i] = {
+            "hp": mon_hp, "att": mon_att, "def": mon_def,
+            "mag_att": mon_mag_att, "mag_def": mon_mag_def,
+            "speed": mon_speed, "element": mon_element, "choices": mon_choices,
+            "skill_id": _first_skill_id(d.get("skills", "")),
+        }
         def_list.append({"team": 2, "code": i, "is_pet": 0, "id": d["id"],
                          "name": d["name"], "lv": d["lv"], "hp": mon_hp, "img": d["icon"],
-                         "skill_id": _first_skill_id(d.get("skills", ""))})
+                         "skill_id": combat["def"][i]["skill_id"]})
     return att_list, def_list, combat
 
 
@@ -3485,20 +3911,40 @@ def _battle_side(
 # The original damage formula is not recoverable (monster.txt's own hp/att/def do
 # not scale with level at all), so the replay is budgeted rather than simulated.
 LOCAL_SWINGS_PER_MONSTER = 4
-LOCAL_BATTLE_STEP_LIMIT = 30
+# 阶段 3：技能多了之后单回合步数变多（规格 §3.10：回合 20 / 步数 100）。
+LOCAL_BATTLE_STEP_LIMIT = 100
 # Guard for the simulated replay: three actors plus their counters per round.
-LOCAL_BATTLE_ROUND_LIMIT = 12
+LOCAL_BATTLE_ROUND_LIMIT = 20
 # skill.txt 101 = 烈焰之刃 (a real, physical skill); only used for the animation.
 LOCAL_REPLAY_SKILL_ID = 101
 
 
-def _replay_skill(unit: dict, swing: int) -> dict:
-    """一步攻击的 skill 对象：id 用该角色自己的技能，伤害仍用 swing。"""
-    return {
-        "id": int(unit.get("skill_id") or LOCAL_REPLAY_SKILL_ID),
-        "pro": 1,
-        "dm": swing,
-    }
+def _swing_damage(attacker: dict, defender: dict, choice: dict | None) -> int:
+    """一次攻击的伤害：有选中技能就 att_eff = att × skill_mult 并吃相克，否则普攻。"""
+    if not _combat_v2_enabled():
+        return _damage(int(attacker.get("att") or 1), int(defender.get("def") or 1))
+    if not choice:
+        return _damage_v2(int(attacker.get("att") or 1), int(defender.get("def") or 1))
+    physical = bool(choice.get("physical", True))
+    base = int(attacker.get("phy_att" if physical else "mag_att") or attacker.get("att") or 1)
+    defence = int(defender.get("phy_def" if physical else "mag_def") or defender.get("def") or 1)
+    effective = max(1, int(round(base * _skill_mult(int(choice.get("damage") or 0)))))
+    element = _element_multiplier(int(choice.get("element") or 0), int(defender.get("element") or 0))
+    return _damage_v2(effective, max(1, defence), element)
+
+
+def _replay_skill(unit: dict, swing: int, choice: dict | None = None) -> dict:
+    """一步攻击的 skill 对象。
+
+    `id` 用这一击实际选中的技能（§4.2.4 的期望伤害最大者）；`pro` 决定客户端放
+    哪套特效（1=物理、2=魔法，见 FightProcess.as:282-285 的 s{1000+pro}）。
+    """
+    physical = True if choice is None else bool(choice.get("physical", True))
+    skill_id = (
+        int(choice["id"]) if choice
+        else int(unit.get("skill_id") or LOCAL_REPLAY_SKILL_ID)
+    )
+    return {"id": skill_id, "pro": 1 if physical else 2, "dm": swing}
 
 
 def _battle_record(att_list, def_list, combat=None) -> list[dict]:
@@ -3566,23 +4012,34 @@ def _battle_record_simulated(att_list, def_list, combat) -> list[dict]:
             if target is None:
                 break
             acted = True
-            swing = _damage(combat["att"][code]["att"], combat["def"][target]["def"])
+            me = combat["att"][code]
+            foe = combat["def"][target]
+            choice = None
+            if _combat_v2_enabled():
+                choice = _skill_pick(me.get("choices") or [], me, foe)
+            swing = _swing_damage(me, foe, choice)
             mon[target] = max(0, mon[target] - swing)
             steps.append({
                 "att": {"team": 1, "code": code, "cur_hp": hp[code],
                         "is_dead": False, "is_revive": False,
-                        "skill": _replay_skill(att_list[code], swing)},
+                        "skill": _replay_skill(att_list[code], swing, choice)},
                 "def": {"team": 2, "code": target, "cur_hp": mon[target],
                         "is_dead": mon[target] <= 0, "is_revive": False},
             })
             if len(steps) >= LOCAL_BATTLE_STEP_LIMIT or mon[target] <= 0:
                 continue
-            hit = _damage(combat["def"][target]["att"], combat["att"][code]["def"])
+            counter_choice = None
+            if _combat_v2_enabled():
+                counter_choice = _skill_pick(
+                    combat["def"][target].get("choices") or [],
+                    combat["def"][target], combat["att"][code],
+                )
+            hit = _swing_damage(combat["def"][target], combat["att"][code], counter_choice)
             hp[code] = max(0, hp[code] - hit)
             steps.append({
                 "att": {"team": 2, "code": target, "cur_hp": mon[target],
                         "is_dead": False, "is_revive": False,
-                        "skill": _replay_skill(def_list[target], hit)},
+                        "skill": _replay_skill(def_list[target], hit, counter_choice)},
                 "def": {"team": 1, "code": code, "cur_hp": hp[code],
                         "is_dead": hp[code] <= 0, "is_revive": False},
             })
@@ -4955,6 +5412,8 @@ LOCAL_TRAIN_SECONDS = 600
 # prop.txt 10505's remark states a single reinforcement tops out around 1000.
 LOCAL_PRO_CAP = 1000
 # LOCAL DESIGN: 技能合成的"追加"概率 —— 副宠独有的技能族按此概率并入主宠。
+LOCAL_TRAIT_LEVEL_CAP = 25   # §4.7：skill.txt team=2 的数据上限（help 10 说的 30 不存在）
+LOCAL_TRAIT_UPGRADE_CHANCE = 0.30  # §4.7 R1：合成时特性有 30% 概率 +1 级（LOCAL）
 LOCAL_SKILL_ADD_CHANCE = 0.5
 # LOCAL DEFAULT gains per training type; the original duration/gain tables are
 # not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
@@ -5138,6 +5597,64 @@ def _choose_pet_list(database_path: Path) -> Response:
     return _protocol_response(42, {"list": [_pet_list_entry(r) for r in rows]})
 
 
+def _ensure_arena_defense_row(
+    connection: sqlite3.Connection, player_id: int
+):
+    """防守快照不存在时，用当前 PvE 装备建一行；宠物槽留空等玩家选择。"""
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is not None:
+        return row
+    worn = _worn_equipment(connection, player_id)
+    weapon = worn.get(1)["id"] if worn.get(1) else 0
+    clothes = worn.get(2)["id"] if worn.get(2) else 0
+    hat = worn.get(3)["id"] if worn.get(3) else 0
+    connection.execute(
+        "INSERT INTO player_loadouts (player_id, kind, weapon_inv_id,"
+        " clothes_inv_id, hat_inv_id, pet1_id, pet2_id, updated_at)"
+        " VALUES (?, 'arena_defense', ?, ?, ?, 0, 0, ?)",
+        (
+            player_id,
+            weapon,
+            clothes,
+            hat,
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    return _loadout_row(connection, player_id, "arena_defense")
+
+
+def _arena_defense_add_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> bool:
+    row = _ensure_arena_defense_row(connection, player_id)
+    if pet_id in (int(row["pet1_id"] or 0), int(row["pet2_id"] or 0)):
+        return True
+    for column in ("pet1_id", "pet2_id"):
+        if not int(row[column] or 0):
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=?, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (pet_id, time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+            return True
+    return False
+
+
+def _arena_defense_remove_pet(
+    connection: sqlite3.Connection, player_id: int, pet_id: int
+) -> None:
+    row = _loadout_row(connection, player_id, "arena_defense")
+    if row is None:
+        return
+    for column in ("pet1_id", "pet2_id"):
+        if int(row[column] or 0) == pet_id:
+            connection.execute(
+                f"UPDATE player_loadouts SET {column}=0, updated_at=?"
+                " WHERE player_id=? AND kind='arena_defense'",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), player_id),
+            )
+
+
 def _choose_battle_pet(database_path: Path) -> Response:
     """44 (CHOOSE_BATTLE_PET_KEY): park the picked pet in a hunt slot.
 
@@ -5158,6 +5675,12 @@ def _choose_battle_pet(database_path: Path) -> Response:
             return _pet_error(506)
         if int(row["train_end"] or 0) > int(time.time()):
             return _pet_error(100)
+        if slot == "3":
+            # 擂台防守页：写 player_loadouts，不动 pets.squad_slot。
+            if not _arena_defense_add_pet(c, player["id"], index):
+                return _pet_error(506)
+            pet = _pet_list_entry(row)
+            return _protocol_response(44, {"value": "ok", "pet": pet})
         # FightPetListUI.as:160-164 sends 44 with the pet index; `ttype` there is
         # the page kind from HunterTaskUI.as:302 and is ALWAYS 1, so it can never
         # identify the slot. Put the pet in the first free slot instead — that is
@@ -5193,6 +5716,11 @@ def _choose_rest_pet(database_path: Path) -> Response:
             return _pet_error(103)
         if row is None:
             return _pet_error(506)
+        if _request_value("ttype", "1") == "3":
+            # 擂台防守页：从防守快照移除，不动 PvE 出战槽。
+            _arena_defense_remove_pet(c, player["id"], index)
+            pet = _pet_list_entry(row)
+            return _protocol_response(45, {"value": "ok", "pet": pet})
         # HunterTaskUI.as:287-310 sends 45 when the player taps a slot that
         # ALREADY holds a pet — i.e. "take it off the squad". ttype is hardcoded
         # 1 there (it is a page kind, not a slot), so the pet simply leaves.
@@ -5824,6 +6352,129 @@ def _explore_add_slot(database_path: Path) -> Response:
         "need_money": LOCAL_EXPLORE_SLOT_PRICE,
         "own_money": own,
     })
+
+
+def _arena_loadout_info(database_path: Path) -> Response:
+    """515 — 读擂台防守快照；没有快照时回退当前 PvE 并标 is_default。"""
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute(
+            "SELECT id, nick, lv, job, sex FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _loadout_row(c, player["id"], "arena_defense")
+        worn = _loadout_equipment(c, player["id"], "arena_defense")
+        pets = _loadout_pets(c, player["id"], "arena_defense")
+        pic_num = c.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
+        ).fetchone()[0]
+    payload: dict[str, object] = {
+        "id": player["id"],
+        "name": player["nick"],
+        "lv": player["lv"],
+        "job": player["job"],
+        "sex": player["sex"],
+        "img": _role_skin_string(worn, player["sex"]),
+        "pic_num": pic_num,
+        "skills": _equipment_skills(worn),
+        "buffs": [],
+        "guild_name": "",
+        "guild_position": 0,
+        "arena_rank": _local_arena_rank(),
+        "kind": "arena_defense",
+        "is_default": 0 if row else 1,
+        "updated_at": str(row["updated_at"] or "") if row else "",
+        "pets": [dict(pet) for pet in pets],
+    }
+    payload.update(_role_stats(worn, player["lv"], player["job"]))
+    payload.update(_equipped_slot_fields(worn))
+    for slot, field in EQUIP_SLOT_FIELD.items():
+        item = worn.get(slot)
+        payload[f"{field}_index"] = item["id"] if item else 0
+    return _protocol_response(515, payload)
+
+
+def _arena_loadout_save(database_path: Path) -> Response:
+    """516 — 保存擂台防守快照。
+
+    请求里的装备/宠物参数都是实例 id（inventory.id / pets.id），0 表示空槽；
+    只写 player_loadouts，不动 inventory.equipped / pets.squad_slot。
+    """
+    uid = _request_value("uid")
+
+    def parse_id(name: str) -> int | None:
+        raw = _request_value(name, "0").strip() or "0"
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+
+    values: dict[str, object] = {}
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        for slot, column, name in (
+            (1, "weapon_inv_id", "weapon"),
+            (2, "clothes_inv_id", "clothes"),
+            (3, "hat_inv_id", "hat"),
+        ):
+            inv_id = parse_id(name)
+            if inv_id is None:
+                return _pet_error(100)
+            if inv_id:
+                item = c.execute(
+                    "SELECT item_id, item_type FROM inventory"
+                    " WHERE id=? AND player_id=? AND team=3",
+                    (inv_id, player["id"]),
+                ).fetchone()
+                if item is None:
+                    return _pet_error(100)
+                record = config_tables.equip_record(item["item_id"])
+                item_slot = (
+                    config_tables.equip_slot(record) if record else item["item_type"]
+                )
+                if item_slot != slot:
+                    return _pet_error(100)
+            values[column] = inv_id
+        for column, name in (("pet1_id", "pet1"), ("pet2_id", "pet2")):
+            pet_id = parse_id(name)
+            if pet_id is None:
+                return _pet_error(100)
+            if pet_id:
+                pet = c.execute(
+                    "SELECT 1 FROM pets WHERE id=? AND player_id=?"
+                    f" AND is_locked=0 AND {PET_READY_SQL}",
+                    (pet_id, player["id"]),
+                ).fetchone()
+                if pet is None:
+                    return _pet_error(100)
+            values[column] = pet_id
+        updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        c.execute(
+            "INSERT INTO player_loadouts (player_id, kind, weapon_inv_id,"
+            " clothes_inv_id, hat_inv_id, pet1_id, pet2_id, updated_at)"
+            " VALUES (?, 'arena_defense', ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(player_id, kind) DO UPDATE SET"
+            " weapon_inv_id=excluded.weapon_inv_id,"
+            " clothes_inv_id=excluded.clothes_inv_id,"
+            " hat_inv_id=excluded.hat_inv_id,"
+            " pet1_id=excluded.pet1_id,"
+            " pet2_id=excluded.pet2_id,"
+            " updated_at=excluded.updated_at",
+            (
+                player["id"],
+                values["weapon_inv_id"],
+                values["clothes_inv_id"],
+                values["hat_inv_id"],
+                values["pet1_id"],
+                values["pet2_id"],
+                updated_at,
+            ),
+        )
+    return _protocol_response(516, {"value": "ok", "updated_at": updated_at})
 
 
 def _arena_fighter(database_path: Path) -> Response:
@@ -7720,8 +8371,16 @@ def _player_pet_full_detail(database_path: Path) -> Response:
         player, row = _find_player_pet(connection, uid, pet_index)
         if player is None: return _pet_error(103)
         if row is None: return _pet_error(506)
-        stats = _pet_base_stats(row["pet_id"])
-        skills = _skill_rows(row["skills"])
+        # §3.4：面板 `hp + hp_tp` 必须等于战斗用的值，所以这里拆成
+        # "不含强化的部分" + "强化点数"（旧行为是 base 全值 + pro，会重复计算）。
+        final_stats = _pet_stats(row)
+        stats = _pet_stats_before_pro(row)
+        # §4.2.4：skills 按 AI 实际优先级下发，第一条就是会用的那条。
+        ordered_ids = [int(choice["id"]) for choice in _skill_choices(row["skills"])]
+        skills = list(_skill_rows(row["skills"]))
+        skills.sort(key=lambda item: (
+            ordered_ids.index(int(item["id"])) if int(item["id"]) in ordered_ids else len(ordered_ids)
+        ))
         growth_total = sum(row[k] for k in ("gw_hp","gw_speed","gw_phy_att","gw_mag_att","gw_phy_def","gw_mag_def"))
         raw_grows = str((config_tables.pet_record(row["pet_id"]) or {}).get("grows", "") or "").strip()
         parts = [part.strip() for part in raw_grows.split(":")]
@@ -8117,59 +8776,83 @@ def _skill_cap(star: int, generation: int) -> int:
     return max(1, min(12, 3 + star // 2 + generation // 2))
 
 
-def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
-    """Skill synthesis (command 65 with ttype=1).
+def _trait_family_level(entry: int) -> tuple[int, int]:
+    """trait id 的编码：family*100 + level（skill.txt team=2，如 10003 = 原系抗性 L3）。"""
+    entry = int(entry)
+    return entry // 100, max(1, entry % 100)
 
-    LOCAL DESIGN — the client ships no rule text for this, only help.txt's one line
-    about "skills being recombined". The rule implemented here:
-      * the pool is the union of both pets' skills,
-      * one skill per family (highest level wins, so breeding never downgrades),
-      * each surviving family has a chance to gain one level,
-      * the cap comes from the pet's rarity (`_skill_cap`), not a flat four.
+
+def _merge_traits(
+    main_buffs: str, vice_buffs: str, cap_count: int, cap_level: int
+) -> str:
+    """特性合成（ttype=2）：**累加 + 同族取高等级**（规格 §4.7 的 R1）。
+
+    特性是**集合**，不是替换：
+      * 副宠有、主宠没有的族 → 追加（一直累加到 cap_count 为止）；
+      * 同族 → 等级取 max（只升不降），再给 30% 概率 +1 级（LOCAL，封顶 cap_level）；
+      * 等级编码在 id 里，所以合并就是把 id 换成同族更高等级的 id。
+
+    数量上限 = min(30, isqrt(世代)+1)；等级上限 = min(25, isqrt(世代)+1)，
+    25 是 `skill.txt` team=2 的数据上限。
     """
-    index = _skill_family_index()
-    by_id = config_tables._table("skill.txt")
-
-    def families(text: str) -> dict[str, int]:
-        found: dict[str, int] = {}
+    levels: dict[int, int] = {}
+    for text in (main_buffs, vice_buffs):
         for token in str(text or "").split(":"):
             if not token.isdigit():
                 continue
-            record = by_id.get(int(token))
-            if record is None:
-                continue
-            name = str(record.get("name", "") or "")
-            family = name.split("级", 1)[-1].strip() if "级" in name else name
-            if not family:
-                continue
-            level = int(str(record.get("level", "1") or 1) or 1)
-            found[family] = max(found.get(family, 0), level)
-        return found
+            family, level = _trait_family_level(int(token))
+            levels[family] = max(levels.get(family, 0), level)
 
-    # 替换/升级：两宠共有的族取最高级；追加：副宠独有的族按概率并入。
-    levels = families(main_skills)
-    for family, level in families(vice_skills).items():
-        if family in levels:
-            levels[family] = max(levels[family], level)
-        elif random.random() < LOCAL_SKILL_ADD_CHANCE:
-            levels[family] = level
+    limit = max(1, min(int(cap_count or 1), 30))
+    ceiling = max(1, min(int(cap_level or 1), LOCAL_TRAIT_LEVEL_CAP))
+    entries: list[tuple[int, int]] = []
+    for family, level in levels.items():
+        if random.random() < LOCAL_TRAIT_UPGRADE_CHANCE:
+            level += 1
+        entries.append((family, min(ceiling, level)))
+    # 数量封顶：先留高等级特性（同等级按族号，保证可复现）
+    entries.sort(key=lambda item: (-item[1], item[0]))
+    entries = entries[:limit]
+    entries.sort(key=lambda item: item[0])
+    return ":".join(str(family * 100 + level) for family, level in entries)
 
-    merged: list[int] = []
-    for family, level in sorted(levels.items()):
-        available = index.get(family, {})
-        if not available:
-            continue
-        # LOCAL DESIGN: 30% chance to inherit one level higher, capped by the family.
-        if random.random() < 0.30:
-            level = min(max(available), level + 1)
-        level = max(min(available), min(max(available), level))
-        merged.append(available[level])
-    merged.sort(key=lambda sid: (
-        int(str(by_id.get(sid, {}).get("level", "0") or 0)),
-        int(str(by_id.get(sid, {}).get("damage", "0") or 0)),
-    ), reverse=True)
-    keep = max(1, min(12, int(cap or 4), len(merged)))
-    return ":".join(str(sid) for sid in merged[:keep])
+
+def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
+    """技能合成（ttype=1）：**随机替换 / 重组**（规格 §4.2.5）。
+
+    池 = 双方技能条目（同族只留等级最高的那条，**等级随条目原样保留**）；
+    `|池| ≤ cap` → 全保留；`|池| > cap` → **随机**保留 cap 条（不按等级/威力排序）。
+
+    不做 30% 升级、不重算等级：技能等级由宠物星级决定（§4.2.6），合成只换条目。
+    所以"弱宠变强"的唯一路径是拿高星副宠当素材，赌它那条高阶技能被抽中并留下。
+    """
+    table = config_tables._table("skill.txt")
+
+    def level_of(skill_id: int) -> int:
+        raw = str(table.get(skill_id, {}).get("level", "0") or 0).strip()
+        return int(raw) if raw.isdigit() else 0
+
+    pool: dict[str, int] = {}
+    for text in (main_skills, vice_skills):
+        for token in str(text or "").replace(";", ":").split(":"):
+            token = token.strip()
+            if not token.isdigit():
+                continue
+            skill_id = int(token)
+            record = table.get(skill_id)
+            if not record or str(record.get("team", "")).strip() != "1":
+                continue
+            family = _skill_family_name(record)
+            current = pool.get(family)
+            if current is None or level_of(skill_id) > level_of(current):
+                pool[family] = skill_id
+
+    entries = list(pool.values())
+    limit = max(1, min(12, int(cap or 4)))
+    if len(entries) > limit:
+        entries = random.sample(entries, limit)
+    entries.sort(key=lambda sid: (-level_of(sid), sid))
+    return ":".join(str(sid) for sid in entries)
 
 
 def _pet_synthesis(database_path: Path) -> Response:
@@ -8243,8 +8926,8 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (current + step, main_index),
             )
         if ttype == 1:
-            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级，
-            # 槽位上限按"星级 + 世代"给（稀有宠带得更多）。
+            # 技能合成（ttype=1）：**随机替换 / 重组**（§4.2.5）——池 = 双方技能条目，
+            # 超出槽位就随机保留，等级随条目走、不升级；槽位上限按"星级 + 世代"给。
             main_skill_count = len([t for t in str(main_row["skills"] or "").split(":") if t.isdigit()])
             skill_cap = max(main_skill_count, _skill_cap(main_row["star"], generation))
             connection.execute(
@@ -8252,13 +8935,16 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (_merge_skills(main_row["skills"], vice_row["skills"], skill_cap), main_index),
             )
         if ttype == 2:
-            # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。
-            cap = min(30, math.isqrt(generation) + 1)
-            merged = [token for token in str(main_row["buffs"] or "").split(":") if token.isdigit()]
-            for token in str(vice_row["buffs"] or "").split(":"):
-                if token.isdigit() and token not in merged and len(merged) < cap:
-                    merged.append(token)
-            connection.execute("UPDATE pets SET buffs=? WHERE id=?", (":".join(merged), main_index))
+            # 特性合成（§4.7 R1）：累加 + 同族取高等级 + 30% 升一级；
+            # 数量上限 min(30, isqrt(gen)+1)、等级上限 min(25, isqrt(gen)+1)。
+            cap_count = min(30, math.isqrt(generation) + 1)
+            cap_level = min(25, math.isqrt(generation) + 1)
+            merged_buffs = _merge_traits(
+                main_row["buffs"], vice_row["buffs"], cap_count, cap_level
+            )
+            connection.execute(
+                "UPDATE pets SET buffs=? WHERE id=?", (merged_buffs, main_index)
+            )
         connection.execute("UPDATE pets SET generation=? WHERE id=?", (generation, main_index))
         connection.execute("DELETE FROM pets WHERE id=?", (vice_index,))
         updated = connection.execute(
@@ -8418,6 +9104,8 @@ _SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
     # 擂台 / 副本
     "24": _arena_battle,
     "506": _arena_fighter,
+    "515": _arena_loadout_info,
+    "516": _arena_loadout_save,
     "507": _arena_rank,
     "82": _arena_star_info,
     "83": _arena_star_reward,
