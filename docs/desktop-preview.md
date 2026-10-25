@@ -32,6 +32,37 @@ powershell -ExecutionPolicy Bypass -File .\dev-desktop.ps1 -Swf build\input-expl
 powershell -ExecutionPolicy Bypass -File .\dev-desktop.ps1 -Width 480 -Height 854
 ```
 
+## 截图（给用户看画面，不用碰手机）
+
+预览窗口开起来后，用 `tools/preview-shot.ps1` 抓图归档：
+
+```powershell
+cd F:\git\PetHunterG
+powershell -ExecutionPolicy Bypass -File .\tools\preview-shot.ps1 -Name login
+powershell -ExecutionPolicy Bypass -File .\tools\preview-shot.ps1 -Title "PetHunterG desktop preview" -Name bag-popup
+powershell -ExecutionPolicy Bypass -File .\tools\preview-shot.ps1 -ClientArea -Name main-home
+```
+
+- 默认存到 `docs\preview\<yyyy-MM-dd>\<HHmmss>-<Name>.png`（该目录被 `.gitignore` 忽略，本地产物）。
+- 脚本会先还原窗口并置前，再按**物理像素**抓；输出 `非黑占比`，接近 0% 说明窗口没画出来（不是游戏黑屏）。
+- 抓完在回复里直接内联：`![背包弹窗](docs/preview/2026-10-25/131500-bag-popup.png)`。
+
+## 多窗口（每个 lane 一个 UI）
+
+并行开发时每个 lane 有自己的服务端口、构建目录和窗口标题，互不干扰：
+
+| lane | 服务端口 | 窗口标题 | 构建目录 |
+|---|---|---|---|
+| main | 8080 | `PetHunterG preview [main]` | `build\desktop-dev-main\` |
+| b1 | 8081 | `PetHunterG preview [b1]` | `build\desktop-dev-b1\` |
+| b2 | 8082 | `PetHunterG preview [b2]` | `build\desktop-dev-b2\` |
+
+- 同时最多 3 个窗口（每个 ADL 约 200MB）；第 4 个先停一个。
+- 抓图按标题精确匹配：`preview-shot.ps1 -Title "PetHunterG preview [b1]"`。
+- **现状**：`dev-desktop.ps1` 还是单实例（固定 8080、固定 `build\desktop-dev`、启动前 `Stop-Process adl64`）。
+  多窗口参数（`-Label` / `-Port` / `-NoKill` / `-DevDir`）与 `tools/lane.ps1` 在看板 **T01 / T02**，
+  落地后本节命令才成立；在那之前只能一次开一个窗口。
+
 ## 脚本做了什么（`dev-desktop.ps1`）
 
 1. 选源：`-Swf` > `build\input-explore\APetHunter.swf` > `src\APetHunter.swf`；

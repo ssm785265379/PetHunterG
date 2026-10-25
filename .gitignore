@@ -28,3 +28,12 @@ server/instance/
 
 # 后台日志监听产物
 .tmp-serverlog.txt
+
+# 并行开发用的 worktree（由 tools/lane.ps1 / git worktree 创建）
+.worktrees/
+
+# 桌面预览截图（本地审阅产物，不入库；要长期保留的证据请写进 docs/playtest）
+docs/preview/
+
+# 沙箱 ACL 诊断工具的产物
+_acl-recovery/
