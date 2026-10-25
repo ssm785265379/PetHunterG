@@ -19,6 +19,7 @@
 |---|---|---|---|
 | **主 agent** | 用户当前会话 | 维护看板、切分支 / worktree、派活、跑合并门、跑桌面预览与截图、写 handoff | 不在功能分支里长期写业务代码（小修正除外） |
 | **工作 agent** | `subagent` 派生 | 只在派给自己的 lane 内实现、测试、提交 | 不碰 `main`、不合并、不启动 ADL、不改别的 lane |
+| **UI/交互设计 agent** | `subagent` 派生（lane `design/ui-*`） | 出评审清单、评截图、给线框与坐标级改法 | 不写业务代码、不改 AS3、不合并 |
 
 派活必须给全：**分支名 / worktree 路径 / 端口 / 允许改的文件与函数 / 验收命令 / 禁止事项**。
 
@@ -110,6 +111,8 @@ F:\git\PetHunterG\server\.venv\Scripts\python.exe -m pytest tests -q
 4. `CHANGELOG.md` 与相关 `docs/` 已更新（改了什么、为什么、怎么验、哪里仍是本地设计）。
 5. 没有 `.tmp_*`、`*.apk`、`build/`、DB、凭据混进提交（`git show --stat` 自查）。
 6. 有冲突就先解决，再**重跑全量测试** —— 不允许凭"看起来没冲突"合并。
+7. **动了 UI / 布局 / 弹窗 / 文案位置**：必须有 UI lane 的评审记录（`docs/design/ui-review.md` 的清单逐条对过，
+   截图附在 PR 描述或提交说明里）。UI lane 没签字 = 不合并。
 
 合并方式：
 
