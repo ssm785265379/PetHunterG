@@ -3,13 +3,14 @@ import hashlib
 import hmac
 import json
 import os
-from functools import lru_cache
+from functools import lru_cache, partial
 import math
 import random
 import secrets
 import sqlite3
 import time
 from pathlib import Path
+from typing import Callable
 
 from flask import Flask, Response, current_app, jsonify, request, send_file
 
@@ -7141,6 +7142,120 @@ def _pet_expand_capacity(database_path: Path) -> Response:
     return _protocol_response(40, {"value": "ok", "max_pet_num": capacity})
 
 
+# ---------------------------------------------------------------------------
+# /flash.do 的 showId 路由表
+#
+# 以前是 100 多条 `if command == "show" and _request_value("showId") == "..."` 平铺在
+# game_api() 里：两个并行 lane 各加一行就要抢同一个位置，合并必冲突。改成查表后，
+# 新命令只在表里加一行、位置随意，整张表还能被 test_routing.py 逐条打一遍。
+# 行为保持不变：按 showId 精确匹配，未命中的仍落到 `{"value": "ok"}` 空信封兜底。
+# ---------------------------------------------------------------------------
+_SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
+    # 账号 / 角色 / 背包 / 商店 / 装备
+    "510": _player_info,
+    "2": partial(_player_info, command_id=2),
+    "3": _player_detail_social,
+    "22": _player_inventory,
+    "37": _player_on_equip,
+    "39": _player_equipment_detail,
+    "50": _player_use_goods,
+    "68": _player_sale_info,
+    "69": _player_sale_goods,
+    "27": _shop_list,
+    "28": _shop_goods_detail,
+    "29": _shop_buy,
+    "502": _function_flags,
+    "1": _own_info,
+    "300": _gold_exchange,
+    # 任务 / 图鉴 / 成就
+    "46": _player_task_info,
+    "47": _player_task_reward,
+    "511": _player_tasks,
+    "25": _pic_list,
+    "26": _pic_info,
+    "48": _picstep_info,
+    "49": _picstep_reward,
+    "107": _achievement_list,
+    # 41 (SHOW_MORE_INFO) 没有真实实现，但 InfoUI.as:232 无判空直接读 param2.list,
+    # 兜底的 {"value":"ok"} 会让页面抛 TypeError 卡住，所以这里回形状正确的空载荷。
+    "41": lambda database_path: _protocol_response(41, {"list": [], "value": "ok"}),
+    # 宠物
+    "11": _player_pets,
+    "12": _player_pet_detail,
+    "13": _player_pet_full_detail,
+    "14": _pet_evolve,
+    "15": _pet_release,
+    "18": _pet_change_name,
+    "19": _pet_flush_grow,
+    "20": _pet_flush_nature,
+    "21": _pet_forget_skill,
+    "40": _pet_expand_capacity,
+    "55": _pet_toggle_lock,
+    "84": _pet_add_generation,
+    "85": _pet_forget_buff,
+    "114": _pet_divide_pro,
+    "42": _choose_pet_list,
+    "44": _choose_battle_pet,
+    "45": _choose_rest_pet,
+    "62": lambda database_path: _pet_synthesis_pick(database_path, 62),
+    "63": lambda database_path: _pet_synthesis_pick(database_path, 63),
+    "65": _pet_synthesis,
+    # 养成 / 训练
+    "504": _training_overview,
+    "505": _training_list,
+    "9": _training_detail,
+    "10": _training_action,
+    # 狩猎 / 探索
+    "4": _hunter_list,
+    "5": _hunter_task,
+    "6": _hunter_fight,
+    "7": _hunter_catch,
+    "98": _explore_list,
+    "99": _explore_detail,
+    "103": _explore_start,
+    "100": _explore_equip_list,
+    "101": _explore_equip_info,
+    "102": _explore_rent,
+    "104": _explore_hire_list,
+    "105": _explore_stop,
+    "106": _explore_add_slot,
+    # 擂台 / 副本
+    "24": _arena_battle,
+    "506": _arena_fighter,
+    "507": _arena_rank,
+    "82": _arena_star_info,
+    "83": _arena_star_reward,
+    "97": _rage_reward,
+    "73": _copy_list,
+    "74": _copy_battle,
+    # 铁匠 / 合成
+    "32": _forge_list,
+    "33": _forge_detail,
+    "34": _forge_make,
+    "35": _forge_refine,
+    "36": _forge_enchant,
+    "77": _synthesis_candidates,
+    "78": lambda database_path: _synthesis_candidates(database_path, exclude=-1),
+    "79": _equip_synthesis_confirm,
+    "80": _equip_synthesis_perform,
+    # 社交 / 公会
+    "51": _friend_list,
+    "52": _friend_detail,
+    "512": _friend_request,
+    "513": _friend_request,
+    "86": _guild_own,
+    "88": _guild_list,
+    "89": _guild_change_name,
+    "90": _quit_guild,
+    "91": _guild_members,
+    "92": _create_guild,
+    "94": _guild_battle,
+    # 称号 / 转职（70/71 已实现，72 转职在 T04 里补）
+    "70": _job_list,
+    "71": _job_detail,
+}
+
+
 def create_app(config: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping(
@@ -7214,195 +7329,10 @@ def create_app(config: dict | None = None) -> Flask:
             return _register_account_player(current_app.config["DATABASE"])
         if command == "autoReg":
             return _auto_register_player(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "510":
-            return _player_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "2":
-            return _player_info(current_app.config["DATABASE"], command_id=2)
-        if command == "show" and _request_value("showId") == "22":
-            return _player_inventory(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "39":
-            return _player_equipment_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "27":
-            return _shop_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "28":
-            return _shop_goods_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "29":
-            return _shop_buy(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "50":
-            return _player_use_goods(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "37":
-            return _player_on_equip(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "68":
-            return _player_sale_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "69":
-            return _player_sale_goods(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "103":
-            return _explore_start(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "70":
-            return _job_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "71":
-            return _job_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "25":
-            return _pic_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "26":
-            return _pic_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "48":
-            return _picstep_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "107":
-            return _achievement_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "86":
-            return _guild_own(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "88":
-            return _guild_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "91":
-            return _guild_members(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "89":
-            return _guild_change_name(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "90":
-            return _quit_guild(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "92":
-            return _create_guild(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "94":
-            return _guild_battle(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "3":
-            return _player_detail_social(current_app.config["DATABASE"])
-        # 41 (SHOW_MORE_INFO) and 107 (ACHIEVEMENT_LIST) are not implemented yet,
-        # but their screens dereference the payload WITHOUT a null guard:
-        #   InfoUI.as:232        var _loc8_:Array = param2.list; _loc8_.length
-        #   ArtifactListUI.as:365 _list = param2.pics; _list.length
-        # The generic {"value":"ok"} fallback therefore threw a TypeError and froze
-        # the page. Answer with correctly-shaped empty payloads instead.
-        if command == "show" and _request_value("showId") == "41":
-            return _protocol_response(41, {"list": [], "value": "ok"})
-        if command == "show" and _request_value("showId") == "107":
-            return _protocol_response(107, {"id": 0, "need_money": 0,
-                                            "pics": [], "list": [], "is_reward": 0})
-        if command == "show" and _request_value("showId") == "51":
-            return _friend_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "52":
-            return _friend_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") in ("512", "513"):
-            return _friend_request(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "4":
-            return _hunter_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "5":
-            return _hunter_task(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "6":
-            return _hunter_fight(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "7":
-            return _hunter_catch(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "98":
-            return _explore_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "99":
-            return _explore_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "49":
-            return _picstep_reward(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "82":
-            return _arena_star_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "83":
-            return _arena_star_reward(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "97":
-            return _rage_reward(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "1":
-            return _own_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "300":
-            return _gold_exchange(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "506":
-            return _arena_fighter(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "507":
-            return _arena_rank(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "42":
-            return _choose_pet_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "104":
-            return _explore_hire_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "100":
-            return _explore_equip_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "101":
-            return _explore_equip_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "102":
-            return _explore_rent(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "105":
-            return _explore_stop(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "106":
-            return _explore_add_slot(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "24":
-            return _arena_battle(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "73":
-            return _copy_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "74":
-            return _copy_battle(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "44":
-            return _choose_battle_pet(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "45":
-            return _choose_rest_pet(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "504":
-            return _training_overview(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "505":
-            return _training_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "9":
-            return _training_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "10":
-            return _training_action(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "62":
-            return _pet_synthesis_pick(current_app.config["DATABASE"], 62)
-        if command == "show" and _request_value("showId") == "63":
-            return _pet_synthesis_pick(current_app.config["DATABASE"], 63)
-        if command == "show" and _request_value("showId") == "65":
-            return _pet_synthesis(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "35":
-            return _forge_refine(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "36":
-            return _forge_enchant(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "77":
-            return _synthesis_candidates(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "78":
-            return _synthesis_candidates(current_app.config["DATABASE"], exclude=-1)
-        if command == "show" and _request_value("showId") == "79":
-            return _equip_synthesis_confirm(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "80":
-            return _equip_synthesis_perform(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "32":
-            return _forge_list(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "33":
-            return _forge_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "34":
-            return _forge_make(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "502":
-            return _function_flags(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "46":
-            return _player_task_info(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "47":
-            return _player_task_reward(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "11":
-            return _player_pets(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "12":
-            return _player_pet_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "13":
-            return _player_pet_full_detail(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "14":
-            return _pet_evolve(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "15":
-            return _pet_release(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "18":
-            return _pet_change_name(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "19":
-            return _pet_flush_grow(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "20":
-            return _pet_flush_nature(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "21":
-            return _pet_forget_skill(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "84":
-            return _pet_add_generation(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "85":
-            return _pet_forget_buff(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "114":
-            return _pet_divide_pro(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "40":
-            return _pet_expand_capacity(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "55":
-            return _pet_toggle_lock(current_app.config["DATABASE"])
-        if command == "show" and _request_value("showId") == "511":
-            return _player_tasks(current_app.config["DATABASE"])
+        if command == "show":
+            handler = _SHOW_HANDLERS.get(_request_value("showId"))
+            if handler is not None:
+                return handler(current_app.config["DATABASE"])
         # Fallback for commands the client sends but this server has not
         # implemented yet (48 of them at the time of writing).
         #

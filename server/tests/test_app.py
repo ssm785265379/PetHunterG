@@ -9,22 +9,7 @@ import pytest
 from pet_hunter_server import create_app
 from pet_hunter_server import config_tables, seed_items
 from pet_hunter_server.app import LOCAL_DEFAULT_BAG_CAPACITY
-
-
-@pytest.fixture(autouse=True)
-def _deterministic_encounters(monkeypatch):
-    """Turn the random elite encounter off unless a test asks for it.
-
-    Elite fights double the payout (LOCAL_ELITE_REWARD_MULT), so a test that checks
-    an exact reward figure would fail roughly one run in seven. Tests that care
-    about elites assign the attribute themselves and restore it afterwards.
-    """
-    from pet_hunter_server import app as _app
-
-    monkeypatch.setattr(_app, "LOCAL_ELITE_CHANCE", 0.0, raising=False)
-    # 探险现在按 events/eventProbability 抽事件（约 43% 是非战斗）。
-    # 测试默认钉成"战斗"，需要休整/灾难的用例自己 monkeypatch。
-    monkeypatch.setattr(_app, "_explore_roll_event", lambda gid: 1, raising=False)
+from support import _create_local_player, _envelope
 
 
 def test_health_check_is_available_to_local_client():
@@ -1953,18 +1938,6 @@ def test_function_flags_returns_a_parseable_envelope(tmp_path: Path):
     command, payload = _envelope(response)
     assert command == 502
     assert payload == {"value": ""}
-
-
-def _create_local_player(client, nick: str) -> str:
-    created = client.post(
-        "/flash.do", data={"m": "autoReg", "nick": nick, "sex": "1"}
-    )
-    return json.loads(created.get_data(as_text=True).split("\t", 1)[1])["value"]
-
-
-def _envelope(response):
-    command, payload = response.get_data(as_text=True).split("\t", 1)
-    return int(command), json.loads(payload)
 
 
 def test_config_tables_load_shipped_equipment():
