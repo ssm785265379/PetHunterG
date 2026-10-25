@@ -230,7 +230,7 @@
             "index1":_loc3_,
             "num":_loc4_
          });
-         flash.utils.setTimeout(function() : void
+         setTimeout(function() : void
          {
             request();
          },500);

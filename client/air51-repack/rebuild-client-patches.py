@@ -201,7 +201,8 @@ def main() -> int:
         "   import flash.display.BitmapData;\n   import flash.events.MouseEvent;",
         "   import flash.display.BitmapData;\n   import flash.display.Shape;\n"
         "   import flash.events.Event;\n   import flash.events.MouseEvent;\n"
-        "   import flash.geom.Rectangle;\n   import flash.text.TextFormat;",
+        "   import flash.geom.Rectangle;\n   import flash.text.TextFormat;\n"
+        "   import flash.utils.setTimeout;",
         "imports",
     )
     patch_once(
