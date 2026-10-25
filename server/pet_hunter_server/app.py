@@ -174,10 +174,15 @@ def hunter_exp_to_next(lv: int) -> int:
     return LOCAL_HERO_EXP_BASE + LOCAL_HERO_EXP_GROWTH * (max(1, int(lv)) - 1)
 
 
-def hero_battle_exp(reference_lv: int) -> int:
-    """LOCAL DEFAULT 一场战斗给的人物经验，按对手参考等级增长。"""
+def hero_battle_exp(level: int) -> int:
+    """LOCAL DEFAULT 一场战斗给的人物经验，按**人物自己的等级**算。
+
+    四个入口（狩猎 6 / 探险 103 / 擂台 24 / 副本 74）必须用同一个口径：
+    人物等级贯穿始终。不要改成怪物/关卡/队伍等级——那样高级人物刷低级图
+    几乎没有收益，等级就不再是成长主轴。
+    """
     return LOCAL_HERO_BATTLE_EXP_BASE + LOCAL_HERO_BATTLE_EXP_PER_REF * max(
-        0, int(reference_lv)
+        0, int(level)
     )
 
 
@@ -3529,10 +3534,9 @@ def _hunter_fight(database_path: Path) -> Response:
         # The pets that actually fought gain the battle exp, so levelling (and the
         # evolution level gates) can advance through normal play.
         pet_exp=_grant_pet_exp(c,[r["index"] for r in rows],exp_reward)
-        # 人物经验与宠物分开记：按本场怪物的最高等级给，失败只给十分之一。
+        # 人物经验与宠物分开记：按人物自身等级给，失败只给十分之一。
         # LOCAL DEFAULT 数值，见 hero_battle_exp。
-        hero_ref = max((int(monster["lv"] or 1) for monster in monsters), default=1)
-        hero_exp = hero_battle_exp(hero_ref)
+        hero_exp = hero_battle_exp(int(p["lv"] or 1))
         _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # Only the entries unlocked by THIS hunt may pop the 图鉴 banner; the
@@ -4359,8 +4363,8 @@ def _explore_start(database_path: Path) -> Response:
             if is_win
             else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
         )
-        # 探险战斗也练人物；参考等级是本场实际出场的 reference_lv，失败十分之一。
-        hero_exp = hero_battle_exp(reference_lv)
+        # 探险战斗也练人物；同样按人物自身等级给，失败十分之一。
+        hero_exp = hero_battle_exp(int(p["lv"] or 1))
         _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         progress = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
@@ -5195,7 +5199,7 @@ def _arena_battle(database_path: Path) -> Response:
     # one-sided win. Rubber-band the rival to the challenger's own squad instead,
     # using the same helper as the hunt/dungeon sides.
     with _connect_database(database_path) as c:
-        p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
+        p = c.execute("SELECT id,lv,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
             return _pet_error(103)
         squad_lv = c.execute(
@@ -5211,7 +5215,7 @@ def _arena_battle(database_path: Path) -> Response:
     att_list, def_list, record = parts
     is_win = _record_is_win(record)
     with _connect_database(database_path) as c:
-        p = c.execute("SELECT id,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
+        p = c.execute("SELECT id,lv,arena_ap,max_arena_ap FROM players WHERE uid=?", (uid,)).fetchone()
         if p is None:
             return _pet_error(103)
         ap = max(0, (p["arena_ap"] or 0) - 1)
@@ -5231,8 +5235,8 @@ def _arena_battle(database_path: Path) -> Response:
         ).fetchone()[0]
         arena_exp = _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
         _grant_pet_exp(c, arena_pets, arena_exp if is_win else arena_exp // 10)
-        # 擂台同样给人物经验；对手参考等级 = max(擂台保底等级, 队伍等级)。
-        hero_exp = hero_battle_exp(max(LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv)))
+        # 擂台同样给人物经验；按人物自身等级，不按擂台对手等级。
+        hero_exp = hero_battle_exp(int(p["lv"] or 1))
         _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
@@ -5308,7 +5312,7 @@ def _copy_battle(database_path: Path) -> Response:
     att_list, def_list, record = parts
     is_win = _record_is_win(record)
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute("SELECT id,lv FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
         # 深渊奖励随层数递增（×1 / ×1.5 / ×2 / ×3），越深越值得打。
@@ -5322,8 +5326,8 @@ def _copy_battle(database_path: Path) -> Response:
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
         copy_exp = int(_battle_exp(stage_level, LOCAL_COPY_EXP_SHARE) * copy_mult)
         _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
-        # 副本按层参考等级给人物经验，失败十分之一。
-        hero_exp = hero_battle_exp(stage_level)
+        # 副本按人物自身等级给人物经验，失败十分之一。
+        hero_exp = hero_battle_exp(int(player["lv"] or 1))
         _grant_hero_exp(c, player["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # 记通关，73 才能显示完成度并解锁下一层（同层重复通关不重复推进）。
