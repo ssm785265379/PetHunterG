@@ -2665,7 +2665,8 @@ def test_pet_stats_come_from_pet_txt_not_a_two_entry_hardcode(tmp_path: Path):
             "SELECT id FROM pets WHERE player_id = 1 ORDER BY id LIMIT 1"
         ).fetchone()[0]
         connection.execute(
-            "UPDATE pets SET pet_id = 5001, icon = 5001, lv = 3 WHERE id = ?", (pet_index,)
+            # lv 用 1：等级乘区是阶段 3 新增口径；本用例只证明六维来自 pet.txt。
+            "UPDATE pets SET pet_id = 5001, icon = 5001, lv = 1 WHERE id = ?", (pet_index,)
         )
         connection.commit()
 
