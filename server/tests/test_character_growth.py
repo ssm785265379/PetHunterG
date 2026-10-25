@@ -195,10 +195,6 @@ def test_lost_arena_battle_grants_a_tenth_of_the_hero_exp(
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = create_local_player(client, "HeroLs")
-    with sqlite3.connect(database) as connection:
-        squad_lv = connection.execute(
-            "SELECT COALESCE(MAX(lv), 1) FROM pets WHERE player_id=1"
-        ).fetchone()[0]
     monkeypatch.setattr(A, "_record_is_win", lambda record: False)
 
     _, result = envelope(
@@ -206,11 +202,51 @@ def test_lost_arena_battle_grants_a_tenth_of_the_hero_exp(
     )
     assert result["is_win"] == 0
 
-    expected = (
-        A.hero_battle_exp(max(A.LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv))) // 10
-    )
+    expected = A.hero_battle_exp(1) // 10
     profile = _profile(client, uid)
     assert (profile["lv"], profile["exp"]) == (1, expected)
+
+
+def test_hero_exp_uses_the_hunter_level_in_every_battle_mode(
+    tmp_path: Path, monkeypatch
+):
+    """人物等级贯穿所有玩法：四类战斗都用玩家自己的 lv 算经验，而不是怪物/关卡等级。"""
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroLv")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET lv=100, exp=0 WHERE uid=?", (uid,))
+        connection.commit()
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+    # 探险先打开地图（99 不打架、不给经验）。
+    envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": 1})
+    )
+    actions = {
+        "hunt": lambda: client.post(
+            "/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1}
+        ),
+        "explore": lambda: client.post(
+            "/flash.do", data={"m": "show", "showId": "103", "uid": uid}
+        ),
+        "arena": lambda: client.post(
+            "/flash.do", data={"m": "show", "showId": "24", "uid": uid}
+        ),
+        "copy": lambda: client.post(
+            "/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": 1001}
+        ),
+    }
+    for label, action in actions.items():
+        before_profile = _profile(client, uid)
+        before = _hero_total_exp(before_profile)
+        action()
+        after = _hero_total_exp(_profile(client, uid))
+        expected = A.hero_battle_exp(before_profile["lv"])
+        assert after - before == expected, (
+            f"{label} 应按当前人物等级 {before_profile['lv']} 给经验"
+        )
 
 
 def test_hero_stats_grow_with_level_and_job_and_match_combat(tmp_path: Path):
