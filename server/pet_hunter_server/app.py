@@ -701,6 +701,22 @@ def _initialize_database(database_path: Path) -> None:
             )
             """
         )
+        # 擂台防守快照：PvE 换装/换宠不影响它。只存实例 id，读取时再校验归属。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_loadouts (
+                player_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                weapon_inv_id INTEGER NOT NULL DEFAULT 0,
+                clothes_inv_id INTEGER NOT NULL DEFAULT 0,
+                hat_inv_id INTEGER NOT NULL DEFAULT 0,
+                pet1_id INTEGER NOT NULL DEFAULT 0,
+                pet2_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (player_id, kind)
+            )
+            """
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -1449,6 +1465,77 @@ def _worn_equipment(connection: sqlite3.Connection, player_id: int) -> dict[int,
         if slot in EQUIP_SLOT_FIELD:
             worn[slot] = row
     return worn
+
+
+_LOADOUT_SLOT_COLUMNS = {
+    1: "weapon_inv_id",
+    2: "clothes_inv_id",
+    3: "hat_inv_id",
+}
+_LOADOUT_PET_COLUMNS = ("pet1_id", "pet2_id")
+
+
+def _loadout_row(connection: sqlite3.Connection, player_id: int, kind: str):
+    if kind != "arena_defense":
+        return None
+    return connection.execute(
+        "SELECT * FROM player_loadouts WHERE player_id=? AND kind=?",
+        (player_id, kind),
+    ).fetchone()
+
+
+def _loadout_equipment(
+    connection: sqlite3.Connection, player_id: int, kind: str = "pve"
+) -> dict[int, sqlite3.Row]:
+    """kind='pve' 读当前穿着；kind='arena_defense' 读防守快照，缺行时回退 PvE。"""
+    if kind != "arena_defense":
+        return _worn_equipment(connection, player_id)
+    row = _loadout_row(connection, player_id, kind)
+    if row is None:
+        return _worn_equipment(connection, player_id)
+    worn: dict[int, sqlite3.Row] = {}
+    for slot, column in _LOADOUT_SLOT_COLUMNS.items():
+        inv_id = int(row[column] or 0)
+        if not inv_id:
+            continue
+        item = connection.execute(
+            "SELECT id, item_id, item_type, icon, level, star, hp, speed,"
+            " phy_att, mag_att, phy_def, mag_def"
+            " FROM inventory WHERE id=? AND player_id=? AND team=3",
+            (inv_id, player_id),
+        ).fetchone()
+        if item is None:
+            continue
+        record = config_tables.equip_record(item["item_id"])
+        item_slot = config_tables.equip_slot(record) if record else item["item_type"]
+        if item_slot == slot:
+            worn[slot] = item
+    return worn
+
+
+def _loadout_pets(
+    connection: sqlite3.Connection, player_id: int, kind: str = "pve"
+):
+    """kind='pve' 读 squad_slot；kind='arena_defense' 读快照宠物，缺行时回退 PvE。"""
+    columns = "id AS 'index', pet_id AS id, icon, name, lv, skills"
+    if kind != "arena_defense":
+        return _squad_pet_rows(connection, player_id, columns)
+    row = _loadout_row(connection, player_id, kind)
+    if row is None:
+        return _squad_pet_rows(connection, player_id, columns)
+    pets = []
+    for column in _LOADOUT_PET_COLUMNS:
+        pet_id = int(row[column] or 0)
+        if not pet_id:
+            continue
+        pet = connection.execute(
+            f"SELECT {columns} FROM pets WHERE id=? AND player_id=?"
+            f" AND is_locked=0 AND {PET_READY_SQL}",
+            (pet_id, player_id),
+        ).fetchone()
+        if pet is not None:
+            pets.append(pet)
+    return pets
 
 
 def _role_skin_string(worn: dict[int, sqlite3.Row], sex: int = 1) -> str:
@@ -2440,6 +2527,31 @@ def _sale_price(item_id: int) -> int | None:
     return LOCAL_SELL_PRICES.get(item_id)
 
 
+def _player_unequip(database_path: Path, uid: str) -> Response:
+    """37&action=off&slot=n：只卸下该槽，不删行、不退钱。"""
+    try:
+        slot = int(_request_value("slot", ""))
+    except ValueError:
+        return _pet_error(100)
+    if slot not in EQUIP_SLOT_FIELD:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        connection.execute(
+            "UPDATE inventory SET equipped=0"
+            " WHERE player_id=? AND team=3 AND item_type=? AND equipped=1",
+            (player["id"], slot),
+        )
+        player_row = connection.execute(_PLAYER_ROW_SQL, (uid,)).fetchone()
+        payload = _player_payload(connection, player_row)
+    payload["value"] = "ok"
+    return _protocol_response(37, payload)
+
+
 def _player_on_equip(database_path: Path) -> Response:
     """ON_EQUIP (37): wear the equipment row and refresh the home screen.
 
@@ -2451,6 +2563,8 @@ def _player_on_equip(database_path: Path) -> Response:
     shape as command 2, not {"value":"ok"}.
     """
     uid = _request_value("uid")
+    if _request_value("action") == "off":
+        return _player_unequip(database_path, uid)
     try:
         item_index = int(_request_value("index", ""))
     except ValueError:
@@ -5805,6 +5919,111 @@ def _explore_add_slot(database_path: Path) -> Response:
     })
 
 
+def _arena_loadout_info(database_path: Path) -> Response:
+    """515 — 读擂台防守快照；没有快照时回退当前 PvE 并标 is_default。"""
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _loadout_row(c, player["id"], "arena_defense")
+        worn = _loadout_equipment(c, player["id"], "arena_defense")
+        pets = _loadout_pets(c, player["id"], "arena_defense")
+    payload: dict[str, object] = {
+        "kind": "arena_defense",
+        "is_default": 0 if row else 1,
+        "updated_at": str(row["updated_at"] or "") if row else "",
+        "pets": [dict(pet) for pet in pets],
+    }
+    for slot, field in EQUIP_SLOT_FIELD.items():
+        item = worn.get(slot)
+        payload[field] = item["item_id"] if item else 0
+        payload[f"{field}_index"] = item["id"] if item else 0
+    return _protocol_response(515, payload)
+
+
+def _arena_loadout_save(database_path: Path) -> Response:
+    """516 — 保存擂台防守快照。
+
+    请求里的装备/宠物参数都是实例 id（inventory.id / pets.id），0 表示空槽；
+    只写 player_loadouts，不动 inventory.equipped / pets.squad_slot。
+    """
+    uid = _request_value("uid")
+
+    def parse_id(name: str) -> int | None:
+        raw = _request_value(name, "0").strip() or "0"
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+
+    values: dict[str, object] = {}
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        for slot, column, name in (
+            (1, "weapon_inv_id", "weapon"),
+            (2, "clothes_inv_id", "clothes"),
+            (3, "hat_inv_id", "hat"),
+        ):
+            inv_id = parse_id(name)
+            if inv_id is None:
+                return _pet_error(100)
+            if inv_id:
+                item = c.execute(
+                    "SELECT item_id, item_type FROM inventory"
+                    " WHERE id=? AND player_id=? AND team=3",
+                    (inv_id, player["id"]),
+                ).fetchone()
+                if item is None:
+                    return _pet_error(100)
+                record = config_tables.equip_record(item["item_id"])
+                item_slot = (
+                    config_tables.equip_slot(record) if record else item["item_type"]
+                )
+                if item_slot != slot:
+                    return _pet_error(100)
+            values[column] = inv_id
+        for column, name in (("pet1_id", "pet1"), ("pet2_id", "pet2")):
+            pet_id = parse_id(name)
+            if pet_id is None:
+                return _pet_error(100)
+            if pet_id:
+                pet = c.execute(
+                    "SELECT 1 FROM pets WHERE id=? AND player_id=?"
+                    f" AND is_locked=0 AND {PET_READY_SQL}",
+                    (pet_id, player["id"]),
+                ).fetchone()
+                if pet is None:
+                    return _pet_error(100)
+            values[column] = pet_id
+        updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        c.execute(
+            "INSERT INTO player_loadouts (player_id, kind, weapon_inv_id,"
+            " clothes_inv_id, hat_inv_id, pet1_id, pet2_id, updated_at)"
+            " VALUES (?, 'arena_defense', ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(player_id, kind) DO UPDATE SET"
+            " weapon_inv_id=excluded.weapon_inv_id,"
+            " clothes_inv_id=excluded.clothes_inv_id,"
+            " hat_inv_id=excluded.hat_inv_id,"
+            " pet1_id=excluded.pet1_id,"
+            " pet2_id=excluded.pet2_id,"
+            " updated_at=excluded.updated_at",
+            (
+                player["id"],
+                values["weapon_inv_id"],
+                values["clothes_inv_id"],
+                values["hat_inv_id"],
+                values["pet1_id"],
+                values["pet2_id"],
+                updated_at,
+            ),
+        )
+    return _protocol_response(516, {"value": "ok", "updated_at": updated_at})
+
+
 def _arena_fighter(database_path: Path) -> Response:
     """506 (REQUEST_ARENA_FIGHTER_KEY).
 
@@ -7707,6 +7926,8 @@ _SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
     # 擂台 / 副本
     "24": _arena_battle,
     "506": _arena_fighter,
+    "515": _arena_loadout_info,
+    "516": _arena_loadout_save,
     "507": _arena_rank,
     "82": _arena_star_info,
     "83": _arena_star_reward,
