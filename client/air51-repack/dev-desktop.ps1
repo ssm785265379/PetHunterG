@@ -39,6 +39,9 @@ param(
     [int]$Port = 8080,
     [string]$Label = "main",
     [string]$DevDir = "",
+    # 资源目录：默认本仓库 src\data。lane 必须传自己 worktree 的 src\data ——
+    # 目录联接一旦指进主仓库，删 worktree 时的递归删除会跟穿，把主仓库的资产清空。
+    [string]$DataDir = "",
     [switch]$NoKill,
     [int]$WaitSeconds = 15
 )
@@ -62,6 +65,11 @@ if ([string]::IsNullOrWhiteSpace($DevDir)) {
 }
 $title = "PetHunterG preview [$safeLabel]"
 
+$dataSource = if ([string]::IsNullOrWhiteSpace($DataDir)) { Join-Path $src 'data' } else {
+    if ([System.IO.Path]::IsPathRooted($DataDir)) { $DataDir } else { Join-Path $repack $DataDir }
+}
+if (-not (Test-Path $dataSource)) { throw "data dir not found: $dataSource" }
+
 if (-not (Test-Path $adl)) { throw "ADL not found: $adl" }
 if (-not (Test-Path $src)) { throw "src not found: $src" }
 
@@ -75,8 +83,13 @@ if ($Build) {
 New-Item -ItemType Directory -Force -Path $dev | Out-Null
 
 $dataLink = Join-Path $dev 'data'
+$linkItem = Get-Item $dataLink -Force -ErrorAction SilentlyContinue
+if ($linkItem -and $linkItem.LinkType -eq 'Junction' -and -not ($linkItem.Target -contains $dataSource)) {
+    # 指向别处的旧联接先拆掉（rmdir 只删联接本身，不会碰目标目录）。
+    cmd /c rmdir "$dataLink" | Out-Null
+}
 if (-not (Test-Path $dataLink)) {
-    cmd /c mklink /J "$dataLink" "$(Join-Path $src 'data')" | Out-Null
+    cmd /c mklink /J "$dataLink" "$dataSource" | Out-Null
 }
 
 # pick source SWF

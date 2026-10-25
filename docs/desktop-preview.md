@@ -122,6 +122,7 @@ pwsh tools\lane.ps1 remove b1 [-Force]             # 删 worktree（分支保留
 | 按钮/弹窗位置和真机不一致 | 确认窗口是 640×960（SWF 原生舞台） |
 | 连不上服务器 | 先 `curl http://127.0.0.1:8080/health`；再看脚本输出里是否提示"未知服务器基址，未改写" |
 | 命令打完了却不返回 | `adl64` 长驻，继承了调用方的 stdout 句柄。用 `lane.ps1 start`（内部已 `Start-Process` 分离），或从 agent 终端用后台任务启动，别用 `& pwsh ...dev-desktop.ps1` 等它 |
+| 删 worktree 后主仓库资产没了 | `data` 是目录联接，`git worktree remove` 的递归删除会跟穿到目标目录（2026-10-25 曾把主仓库 `src/data` 37 个文件清空，`git restore` 恢复）。`lane.ps1 remove` 现在先用 `rmdir` 拆联接；手工删 worktree 也必须先 `cmd /c rmdir <worktree>\client\air51-repack\build\desktop-dev-*\data` |
 
 ## 已验证记录
 

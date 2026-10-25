@@ -117,7 +117,8 @@ function Invoke-Adl([string]$laneName, [int]$listenPort, [string]$laneDir) {
     $arguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $devDesktop,
         '-Label', $laneName, '-Port', "$listenPort", '-Swf', $swf,
-        '-DevDir', (Join-Path $laneDir "client\air51-repack\build\desktop-dev-$laneName")
+        '-DevDir', (Join-Path $laneDir "client\air51-repack\build\desktop-dev-$laneName"),
+        '-DataDir', (Join-Path $laneDir 'client\air51-repack\src\data')
     )
     if ($Build) { $arguments += '-Build' }
 
@@ -301,6 +302,13 @@ switch ($Command) {
 
         $lanes = Read-Lanes
         $branch = $info.branch
+        $dataLink = Join-Path $devDir 'data'
+        $linkItem = Get-Item $dataLink -Force -ErrorAction SilentlyContinue
+        if ($linkItem -and $linkItem.LinkType -eq 'Junction') {
+            # 必须先用 rmdir 拆掉联接本身：`git worktree remove` 的递归删除会跟着
+            # 联接进目标目录，曾把主仓库 client/air51-repack/src/data 清空。
+            cmd /c rmdir "$dataLink" | Out-Null
+        }
         & git -C $root worktree remove $laneDir --force
         if ($LASTEXITCODE -ne 0) { throw "git worktree remove failed (exit $LASTEXITCODE)" }
         $lanes.Remove($Name)
