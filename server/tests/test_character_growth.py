@@ -111,3 +111,101 @@ def test_hunt_win_grants_hero_exp_and_levels_the_hunter(tmp_path: Path, monkeypa
     )
     assert profile["lv"] > 1, "一场胜利的人物经验应足够升到 2 级"
     assert profile["exp"] >= 0
+
+
+def _hero_total_exp(profile: dict) -> int:
+    """把当前等级内的 exp 折算成从 1 级起的累计经验，便于比较"有没有涨"。"""
+    from pet_hunter_server import app as A
+
+    return sum(A.hunter_exp_to_next(lv) for lv in range(1, profile["lv"])) + profile[
+        "exp"
+    ]
+
+
+def _profile(client, uid: str) -> dict:
+    _, payload = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "510", "uid": uid})
+    )
+    return payload
+
+
+def test_explore_battle_grants_hero_exp(tmp_path: Path, monkeypatch):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroEx")
+    before = _hero_total_exp(_profile(client, uid))
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+
+    envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": 1})
+    )
+    _, result = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
+    )
+    assert result.get("event_type") == 1
+
+    assert _hero_total_exp(_profile(client, uid)) > before
+
+
+def test_arena_battle_grants_hero_exp(tmp_path: Path, monkeypatch):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroAr")
+    before = _hero_total_exp(_profile(client, uid))
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+
+    _, result = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "24", "uid": uid})
+    )
+    assert result["is_win"] == 1
+
+    assert _hero_total_exp(_profile(client, uid)) > before
+
+
+def test_copy_battle_grants_hero_exp(tmp_path: Path, monkeypatch):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroCp")
+    before = _hero_total_exp(_profile(client, uid))
+    monkeypatch.setattr(A, "_record_is_win", lambda record: True)
+
+    _, result = envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "74", "uid": uid, "hid": 1001}
+        )
+    )
+    assert result["is_win"] == 1
+
+    assert _hero_total_exp(_profile(client, uid)) > before
+
+
+def test_lost_arena_battle_grants_a_tenth_of_the_hero_exp(
+    tmp_path: Path, monkeypatch
+):
+    from pet_hunter_server import app as A
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "HeroLs")
+    with sqlite3.connect(database) as connection:
+        squad_lv = connection.execute(
+            "SELECT COALESCE(MAX(lv), 1) FROM pets WHERE player_id=1"
+        ).fetchone()[0]
+    monkeypatch.setattr(A, "_record_is_win", lambda record: False)
+
+    _, result = envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "24", "uid": uid})
+    )
+    assert result["is_win"] == 0
+
+    expected = (
+        A.hero_battle_exp(max(A.LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv))) // 10
+    )
+    profile = _profile(client, uid)
+    assert (profile["lv"], profile["exp"]) == (1, expected)

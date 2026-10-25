@@ -4216,6 +4216,9 @@ def _explore_start(database_path: Path) -> Response:
             if is_win
             else _battle_exp(squad_lv, LOCAL_EXPLORE_EXP_SHARE) // 10,
         )
+        # 探险战斗也练人物；参考等级是本场实际出场的 reference_lv，失败十分之一。
+        hero_exp = hero_battle_exp(reference_lv)
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
         progress = c.execute(
             "SELECT discover_rate FROM explore_progress WHERE player_id=? AND map_id=?",
             (p["id"], gid),
@@ -5085,6 +5088,9 @@ def _arena_battle(database_path: Path) -> Response:
         ).fetchone()[0]
         arena_exp = _battle_exp(squad_lv, LOCAL_ARENA_EXP_SHARE)
         _grant_pet_exp(c, arena_pets, arena_exp if is_win else arena_exp // 10)
+        # 擂台同样给人物经验；对手参考等级 = max(擂台保底等级, 队伍等级)。
+        hero_exp = hero_battle_exp(max(LOCAL_ARENA_RIVAL_LEVEL, int(squad_lv)))
+        _grant_hero_exp(c, p["id"], hero_exp if is_win else hero_exp // 10)
     # LOCAL DEFAULT outcome, rewards and rank; the originals are not recoverable.
     return _protocol_response(24, {
         "is_win": 1 if is_win else 0, "arena_ap": ap, "max_arena_ap": max_ap,
@@ -5173,6 +5179,9 @@ def _copy_battle(database_path: Path) -> Response:
         # not hand a lv-1 pet ten levels and stage 1004 is not worthless.
         copy_exp = int(_battle_exp(stage_level, LOCAL_COPY_EXP_SHARE) * copy_mult)
         _grant_pet_exp(c, copy_pets, copy_exp if is_win else copy_exp // 10)
+        # 副本按层参考等级给人物经验，失败十分之一。
+        hero_exp = hero_battle_exp(stage_level)
+        _grant_hero_exp(c, player["id"], hero_exp if is_win else hero_exp // 10)
         if is_win:
             # 记通关，73 才能显示完成度并解锁下一层（同层重复通关不重复推进）。
             c.execute(
