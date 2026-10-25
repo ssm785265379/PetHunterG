@@ -6,8 +6,8 @@ tables are the only trustworthy record of what an item *is*. Numeric gameplay
 rules (prices, AP costs, refine fees) are NOT in these files and remain local
 defaults declared in app.py.
 
-Only ``prop.txt``/``equip.txt``/``skin.txt``/``pet.txt`` are needed here; they are
-tab separated with a header row.
+Only ``prop.txt``/``equip.txt``/``skin.txt``/``pet.txt``/``equipEnchant.txt`` are
+needed here; they are tab separated with a header row.
 """
 
 from __future__ import annotations
@@ -101,6 +101,93 @@ def prop_table() -> dict[int, dict[str, str]]:
 
 def skin_table() -> dict[int, dict[str, str]]:
     return _skin_table()
+
+
+@lru_cache(maxsize=1)
+def _equip_enchant_table() -> dict[int, dict[str, str]]:
+    """equipEnchant.txt, keyed by the *equipment* id (20031 == equip.txt 20031).
+
+    The shipped file's header ends with a leading space (``" rate"``), so the
+    column keys are stripped here; ``_table`` keeps its raw cache untouched.
+    Cells are decoded by the helpers below because ``extSkills``/``rate`` are
+    parallel comma/colon lists, not single numbers.
+    """
+    return {
+        item_id: {str(column).strip(): value for column, value in record.items()}
+        for item_id, record in _table("equipEnchant.txt").items()
+    }
+
+
+def equip_enchant_table() -> dict[int, dict[str, str]]:
+    return _equip_enchant_table()
+
+
+def equip_enchant_record(item_id: int) -> dict[str, str] | None:
+    """REAL equipEnchant.txt row for one equipment id, or None if the piece has
+    no enchant slot at all (the 18 starter-tier equips 20001-20026 are absent)."""
+    return _equip_enchant_table().get(item_id)
+
+
+def equip_enchant_max_count(record: dict[str, str]) -> int:
+    """`maxCount` = how many traits the piece may carry (remark: "N个M等级特性")."""
+    return max(0, _number(record, "maxCount"))
+
+
+def equip_enchant_need(record: dict[str, str]) -> dict[str, int]:
+    """`needMoney`/`needPoint`/`needCrystal`; all three are single cells."""
+    return {
+        "money": _number(record, "needMoney"),
+        "point": _number(record, "needPoint"),
+        "crystal": _number(record, "needCrystal"),
+    }
+
+
+def _id_num_pairs(raw: str) -> list[tuple[int, int]]:
+    """Parse ``"10032:1,10033:2"`` (needGoods / rewardGoods shape); "0" is empty."""
+    pairs: list[tuple[int, int]] = []
+    for chunk in str(raw or "").split(","):
+        gid, _, num = chunk.strip().partition(":")
+        if gid.isdigit() and num.isdigit() and int(num) > 0:
+            pairs.append((int(gid), int(num)))
+    return pairs
+
+
+def equip_enchant_goods(record: dict[str, str]) -> list[tuple[int, int]]:
+    """`needGoods` (prop id, count) pairs; e.g. artifacts charge one 10032."""
+    return _id_num_pairs(record.get("needGoods", ""))
+
+
+def equip_enchant_ext_skills(record: dict[str, str]) -> list[tuple[int, int, int]]:
+    """`extSkills` decoded to (level-1 skill id, min level, max level).
+
+    The table writes ``"12101:1-2"``: 12101 is skill.txt id 12101
+    ``1级火系专精``, i.e. the *level 1* id of the family, and the shipped families
+    are contiguous, so level L is ``base + L - 1`` (12110 is ``10级火系专精``).
+    """
+    out: list[tuple[int, int, int]] = []
+    for chunk in str(record.get("extSkills", "") or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        base, _, level_range = chunk.partition(":")
+        low, _, high = level_range.partition("-")
+        base = base.strip()
+        if not base.isdigit():
+            continue
+        low_lv = int(low) if low.strip().isdigit() else 1
+        high_lv = int(high) if high.strip().isdigit() else low_lv
+        out.append((int(base), low_lv, max(low_lv, high_lv)))
+    return out
+
+
+def equip_enchant_rates(record: dict[str, str]) -> list[int]:
+    """`rate` decoded to one weight per extSkills entry (the table uses 万分比:
+    every shipped row sums to 10000)."""
+    weights: list[int] = []
+    for chunk in str(record.get("rate", "") or "").split(":"):
+        chunk = chunk.strip()
+        weights.append(int(chunk) if chunk.isdigit() else 0)
+    return weights
 
 
 @lru_cache(maxsize=1)
@@ -278,5 +365,8 @@ def up_role_table() -> dict[int, dict[str, str]]:
 
 
 def clear_caches() -> None:
-    for fn in (_equip_table, _prop_table, _skin_table, up_role_table, _table):
+    for fn in (
+        _equip_table, _prop_table, _skin_table, up_role_table, _table,
+        _equip_enchant_table,
+    ):
         fn.cache_clear()

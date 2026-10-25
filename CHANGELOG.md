@@ -4,6 +4,8 @@
 
 ## 2026-10-25
 
+- `3cf81bd` 10-25 18:33 — merge: 铁匠 P2/P3（`feat/blacksmith-p2`）——**附魔 36** 按 `equipEnchant.txt` 扣 `needCrystal/needGoods`、按 `rate` 万分比抽族（族内等级本地均匀）、写 `inventory.buffs` 并计 `maxCount`；**神器强化 35** 等级 +1、六项每级 +5%、金币 500×等级 + 11024 紫钻、上限 10 级（LOCAL DEFAULT）；**转换熔合 77–80** 按 `help.txt` 7 重写（金币装备 / 同 type / 未装备；同级收 20% 价值、升级收差额、产物取更高一档、两件原装备删除、特性转移并按产物槽位截断；费用 10032 蓝晶石），错误码 9/406/407/408/423/424/425/426；235 → **256 passed**
+- `8e75bbf` 10-25 18:32 — fix(铁匠): 熔合用特性合并改名 `_merge_equipment_traits`——与宠物特性 `_merge_traits` 重名，合并后 6 条测试 `TypeError`
 - `440c740` + `693cbc9` 10-25 18:20 — fix(图鉴): **图鉴列表/弹窗/入口三处**——`25/26` 改用 `pic.txt` 全量目录（1宠物342 / 2装备936 / 3道具97 / 4发现42，按 `sort` 分页；`is_reward` 承载「已登记」，`finish_rate` = 已登记/总数，非零时最少给 1%）；`GetPicItem` 缺 `p<icon>` 符号时不再 `new null` 崩（跳过立绘、继续画名字与奖励）、奖励行距 192 改横排 72/64、`【图鉴奖励】` 无奖励时隐藏；主界面第 3 个（书）图标从 `48`（单条里程碑页）改指图鉴总览 `CITY_UNION_ILLUSTRATION`；231 → **235 passed**；**画面待截图**（S11/S12/S13）
 - `8085035` 10-25 17:58 — merge: 515 返回可渲染的防守资料（`feat/loadout-profile` `ff7957f`）——`name/lv/job/sex/img/pic_num/skills/buffs` + 六维 + `weapon/clothes/hat`（含 `*_level`/`*_index`）+ 防守宠物列表 + `is_default/updated_at`；无快照回退 PvE；客户端防守页可只靠 515 渲染，不必先发 510；234 → **235 passed**
 - `724cae5` 10-25 17:50 — merge: 擂台防守页服务端（`feat/loadout-server` `af06548`）——`22` 装备 tab 支持 `slot=1/2/3`（按 `equip.txt type` 过滤后分页，`bag_size` 同口径）；`44/45` 新增 `ttype=3` 只写 `player_loadouts(kind='arena_defense')`，**不改** `pets.squad_slot`；`ttype=1/2` 保持 PvE 语义；232 → **234 passed**
