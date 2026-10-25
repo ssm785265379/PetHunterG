@@ -499,3 +499,54 @@ def test_old_save_with_exp_zero_and_job_one_keeps_its_level(tmp_path: Path):
         A.ROLE_BASE_STATS["hp"] * (1 + A.LOCAL_HERO_LEVEL_STAT_STEP * 49)
     )
     assert profile["hp"] > A.ROLE_BASE_STATS["hp"]
+
+
+def test_battle_replay_uses_each_actors_own_skill(tmp_path: Path):
+    """战斗回放不能所有人生搬 101：猎人用装备技能，宠物用自己的技能。"""
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "SkillBt")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE inventory SET equipped=1 WHERE player_id=1 AND item_id=20001"
+        )
+        pet_ids = [row[0] for row in connection.execute(
+            "SELECT id FROM pets WHERE player_id=1 ORDER BY id LIMIT 2"
+        )]
+        connection.execute(
+            "UPDATE pets SET skills='103:5101' WHERE id=?", (pet_ids[0],)
+        )
+        connection.execute(
+            "UPDATE pets SET skills='102:5101' WHERE id=?", (pet_ids[1],)
+        )
+        connection.commit()
+
+    _, result = envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1}
+        )
+    )
+    record = result["record"]
+    hunter_skills = {
+        step["att"]["skill"]["id"]
+        for step in record
+        if step["att"]["team"] == 1 and step["att"]["code"] == 0
+    }
+    pet_skills = {
+        step["att"]["skill"]["id"]
+        for step in record
+        if step["att"]["team"] == 1 and step["att"]["code"] != 0
+    }
+    monster_skills = {
+        step["att"]["skill"]["id"]
+        for step in record
+        if step["att"]["team"] == 2
+    }
+
+    # 20001 的技能是 101:5101；宠物被改成 103 / 102，战斗里必须跟着变。
+    assert hunter_skills and hunter_skills <= {101, 5101}
+    assert pet_skills, "宠物应该出手"
+    assert pet_skills <= {102, 103}, f"宠物用了错误技能: {pet_skills}"
+    assert monster_skills, "怪物应该反击"
+    known = config_tables._table("skill.txt")
+    assert (hunter_skills | pet_skills | monster_skills) <= set(known)
