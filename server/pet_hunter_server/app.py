@@ -5373,6 +5373,8 @@ LOCAL_TRAIN_SECONDS = 600
 # prop.txt 10505's remark states a single reinforcement tops out around 1000.
 LOCAL_PRO_CAP = 1000
 # LOCAL DESIGN: 技能合成的"追加"概率 —— 副宠独有的技能族按此概率并入主宠。
+LOCAL_TRAIT_LEVEL_CAP = 25   # §4.7：skill.txt team=2 的数据上限（help 10 说的 30 不存在）
+LOCAL_TRAIT_UPGRADE_CHANCE = 0.30  # §4.7 R1：合成时特性有 30% 概率 +1 级（LOCAL）
 LOCAL_SKILL_ADD_CHANCE = 0.5
 # LOCAL DEFAULT gains per training type; the original duration/gain tables are
 # not recoverable. Keys match DevelopPetInfoUI's three buttons (ttype 1/2/3).
@@ -7958,59 +7960,83 @@ def _skill_cap(star: int, generation: int) -> int:
     return max(1, min(12, 3 + star // 2 + generation // 2))
 
 
-def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
-    """Skill synthesis (command 65 with ttype=1).
+def _trait_family_level(entry: int) -> tuple[int, int]:
+    """trait id 的编码：family*100 + level（skill.txt team=2，如 10003 = 原系抗性 L3）。"""
+    entry = int(entry)
+    return entry // 100, max(1, entry % 100)
 
-    LOCAL DESIGN — the client ships no rule text for this, only help.txt's one line
-    about "skills being recombined". The rule implemented here:
-      * the pool is the union of both pets' skills,
-      * one skill per family (highest level wins, so breeding never downgrades),
-      * each surviving family has a chance to gain one level,
-      * the cap comes from the pet's rarity (`_skill_cap`), not a flat four.
+
+def _merge_traits(
+    main_buffs: str, vice_buffs: str, cap_count: int, cap_level: int
+) -> str:
+    """特性合成（ttype=2）：**累加 + 同族取高等级**（规格 §4.7 的 R1）。
+
+    特性是**集合**，不是替换：
+      * 副宠有、主宠没有的族 → 追加（一直累加到 cap_count 为止）；
+      * 同族 → 等级取 max（只升不降），再给 30% 概率 +1 级（LOCAL，封顶 cap_level）；
+      * 等级编码在 id 里，所以合并就是把 id 换成同族更高等级的 id。
+
+    数量上限 = min(30, isqrt(世代)+1)；等级上限 = min(25, isqrt(世代)+1)，
+    25 是 `skill.txt` team=2 的数据上限。
     """
-    index = _skill_family_index()
-    by_id = config_tables._table("skill.txt")
-
-    def families(text: str) -> dict[str, int]:
-        found: dict[str, int] = {}
+    levels: dict[int, int] = {}
+    for text in (main_buffs, vice_buffs):
         for token in str(text or "").split(":"):
             if not token.isdigit():
                 continue
-            record = by_id.get(int(token))
-            if record is None:
-                continue
-            name = str(record.get("name", "") or "")
-            family = name.split("级", 1)[-1].strip() if "级" in name else name
-            if not family:
-                continue
-            level = int(str(record.get("level", "1") or 1) or 1)
-            found[family] = max(found.get(family, 0), level)
-        return found
+            family, level = _trait_family_level(int(token))
+            levels[family] = max(levels.get(family, 0), level)
 
-    # 替换/升级：两宠共有的族取最高级；追加：副宠独有的族按概率并入。
-    levels = families(main_skills)
-    for family, level in families(vice_skills).items():
-        if family in levels:
-            levels[family] = max(levels[family], level)
-        elif random.random() < LOCAL_SKILL_ADD_CHANCE:
-            levels[family] = level
+    limit = max(1, min(int(cap_count or 1), 30))
+    ceiling = max(1, min(int(cap_level or 1), LOCAL_TRAIT_LEVEL_CAP))
+    entries: list[tuple[int, int]] = []
+    for family, level in levels.items():
+        if random.random() < LOCAL_TRAIT_UPGRADE_CHANCE:
+            level += 1
+        entries.append((family, min(ceiling, level)))
+    # 数量封顶：先留高等级特性（同等级按族号，保证可复现）
+    entries.sort(key=lambda item: (-item[1], item[0]))
+    entries = entries[:limit]
+    entries.sort(key=lambda item: item[0])
+    return ":".join(str(family * 100 + level) for family, level in entries)
 
-    merged: list[int] = []
-    for family, level in sorted(levels.items()):
-        available = index.get(family, {})
-        if not available:
-            continue
-        # LOCAL DESIGN: 30% chance to inherit one level higher, capped by the family.
-        if random.random() < 0.30:
-            level = min(max(available), level + 1)
-        level = max(min(available), min(max(available), level))
-        merged.append(available[level])
-    merged.sort(key=lambda sid: (
-        int(str(by_id.get(sid, {}).get("level", "0") or 0)),
-        int(str(by_id.get(sid, {}).get("damage", "0") or 0)),
-    ), reverse=True)
-    keep = max(1, min(12, int(cap or 4), len(merged)))
-    return ":".join(str(sid) for sid in merged[:keep])
+
+def _merge_skills(main_skills: str, vice_skills: str, cap: int = 4) -> str:
+    """技能合成（ttype=1）：**随机替换 / 重组**（规格 §4.2.5）。
+
+    池 = 双方技能条目（同族只留等级最高的那条，**等级随条目原样保留**）；
+    `|池| ≤ cap` → 全保留；`|池| > cap` → **随机**保留 cap 条（不按等级/威力排序）。
+
+    不做 30% 升级、不重算等级：技能等级由宠物星级决定（§4.2.6），合成只换条目。
+    所以"弱宠变强"的唯一路径是拿高星副宠当素材，赌它那条高阶技能被抽中并留下。
+    """
+    table = config_tables._table("skill.txt")
+
+    def level_of(skill_id: int) -> int:
+        raw = str(table.get(skill_id, {}).get("level", "0") or 0).strip()
+        return int(raw) if raw.isdigit() else 0
+
+    pool: dict[str, int] = {}
+    for text in (main_skills, vice_skills):
+        for token in str(text or "").replace(";", ":").split(":"):
+            token = token.strip()
+            if not token.isdigit():
+                continue
+            skill_id = int(token)
+            record = table.get(skill_id)
+            if not record or str(record.get("team", "")).strip() != "1":
+                continue
+            family = _skill_family_name(record)
+            current = pool.get(family)
+            if current is None or level_of(skill_id) > level_of(current):
+                pool[family] = skill_id
+
+    entries = list(pool.values())
+    limit = max(1, min(12, int(cap or 4)))
+    if len(entries) > limit:
+        entries = random.sample(entries, limit)
+    entries.sort(key=lambda sid: (-level_of(sid), sid))
+    return ":".join(str(sid) for sid in entries)
 
 
 def _pet_synthesis(database_path: Path) -> Response:
@@ -8084,8 +8110,8 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (current + step, main_index),
             )
         if ttype == 1:
-            # 技能合成（ttype=1）：并集去重、按族取最高级、有概率再升一级，
-            # 槽位上限按"星级 + 世代"给（稀有宠带得更多）。
+            # 技能合成（ttype=1）：**随机替换 / 重组**（§4.2.5）——池 = 双方技能条目，
+            # 超出槽位就随机保留，等级随条目走、不升级；槽位上限按"星级 + 世代"给。
             main_skill_count = len([t for t in str(main_row["skills"] or "").split(":") if t.isdigit()])
             skill_cap = max(main_skill_count, _skill_cap(main_row["star"], generation))
             connection.execute(
@@ -8093,13 +8119,16 @@ def _pet_synthesis(database_path: Path) -> Response:
                 (_merge_skills(main_row["skills"], vice_row["skills"], skill_cap), main_index),
             )
         if ttype == 2:
-            # 特性合成：副宠特性并入主宠，数量受世代上限 floor(sqrt(世代))+1 约束。
-            cap = min(30, math.isqrt(generation) + 1)
-            merged = [token for token in str(main_row["buffs"] or "").split(":") if token.isdigit()]
-            for token in str(vice_row["buffs"] or "").split(":"):
-                if token.isdigit() and token not in merged and len(merged) < cap:
-                    merged.append(token)
-            connection.execute("UPDATE pets SET buffs=? WHERE id=?", (":".join(merged), main_index))
+            # 特性合成（§4.7 R1）：累加 + 同族取高等级 + 30% 升一级；
+            # 数量上限 min(30, isqrt(gen)+1)、等级上限 min(25, isqrt(gen)+1)。
+            cap_count = min(30, math.isqrt(generation) + 1)
+            cap_level = min(25, math.isqrt(generation) + 1)
+            merged_buffs = _merge_traits(
+                main_row["buffs"], vice_row["buffs"], cap_count, cap_level
+            )
+            connection.execute(
+                "UPDATE pets SET buffs=? WHERE id=?", (merged_buffs, main_index)
+            )
         connection.execute("UPDATE pets SET generation=? WHERE id=?", (generation, main_index))
         connection.execute("DELETE FROM pets WHERE id=?", (vice_index,))
         updated = connection.execute(

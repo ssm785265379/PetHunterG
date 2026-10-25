@@ -4106,7 +4106,7 @@ def test_skill_slots_scale_with_rarity(tmp_path: Path):
     tight = _merge_skills(pool, "", 4).split(":")
     assert len(tight) <= 4, "the cap argument must still be honoured"
 
-    # A high-star main keeps every skill it already had, even with a big pool.
+    # 65 ttype=1 只做随机替换/重组：结果必须是双方池的子集，且不超过槽位上限。
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "SkillCap")
@@ -4773,46 +4773,73 @@ def test_starter_pets_are_born_with_traits(tmp_path: Path):
     assert payload["pet"]["buffs"], "the trait list must not be empty"
 
 
-def test_skill_synthesis_merges_families_and_keeps_the_highest_level():
-    # Command 65 with ttype=1 used to leave `skills` untouched, which is why
-    # 技能合成 felt like it did nothing. Rule (LOCAL DESIGN, the client ships none):
-    # union of both pools, one per family at the higher level, at most four, with a
-    # 30% chance of one extra level.
+def test_skill_synthesis_replaces_and_never_upgrades():
+    # §4.2.5：技能是**定长槽位**，合成 = 随机替换/重组；等级随条目走、合成不改等级。
     from pet_hunter_server import app as A
     from pet_hunter_server import config_tables as tables
 
     catalog = tables._table("skill.txt")
 
-    def family_of(skill_id: int) -> str:
-        name = str(catalog[skill_id].get("name", "") or "")
-        return name.split("级", 1)[-1].strip() if "级" in name else name
-
     def level_of(skill_id: int) -> int:
         raw = str(catalog[skill_id].get("level", "0") or 0).strip()
         return int(raw) if raw.isdigit() else 0
 
-    main, vice = "101:5101", "102:5201"
-    for _ in range(5):  # the 30% upgrade makes any single run non-deterministic
-        ids = [int(token) for token in A._merge_skills(main, vice).split(":") if token.isdigit()]
-        assert ids, "synthesis must yield skills"
-        assert len(ids) <= 4, ids
-        assert len(ids) == len(set(ids)), f"duplicate skills: {ids}"
-        assert all(skill_id in catalog for skill_id in ids), ids
-        families = [family_of(skill_id) for skill_id in ids]
-        assert len(families) == len(set(families)), f"two skills from one family: {ids}"
+    def family_of(skill_id: int) -> str:
+        name = str(catalog[skill_id].get("name", "") or "")
+        return name.split("级", 1)[-1].strip() if "级" in name else name
 
-        expected = {family_of(int(s)): level_of(int(s)) for s in main.split(":")}
-        expected.update({family_of(int(s)): level_of(int(s)) for s in vice.split(":")})
-        for skill_id in ids:
-            family = family_of(skill_id)
-            assert family in expected, f"unexpected family {family}"
-            assert level_of(skill_id) >= expected[family], (
-                "a merge must never downgrade a family", family, skill_id, expected[family]
-            )
-
-    # A same-family merge keeps the stronger one (or upgrades it), never the weaker.
+    # 同族合并：留下等级高的那条，且**不会**被升到更高等级（30% 升级是特性的规则）
     merged = [int(t) for t in A._merge_skills("103", "101").split(":") if t.isdigit()]
-    assert merged == [103] or level_of(merged[0]) >= 3
+    assert merged == [103], merged
+
+    # 池子没超槽位：两支都留；超了就随机丢（不按等级排序）
+    # 101/102 同族（烈焰之刃 L1/L2），去重后只剩高等级那条；换成两个不同族才是 4 条
+    same = [int(t) for t in A._merge_skills("101", "102", 4).split(":") if t.isdigit()]
+    assert same == [102], same
+    tight = [int(t) for t in A._merge_skills("101:5101", "201:5201", 4).split(":") if t.isdigit()]
+    assert sorted(tight) == [101, 201, 5101, 5201], tight
+
+    # 一个族有 15 级（101..115 都是烈焰之刃），所以池子要按"族"取不同 id
+    pool_ids: list[int] = []
+    seen_families: set[str] = set()
+    for sid, record in sorted(catalog.items()):
+        if str(record.get("team", "")).strip() != "1":
+            continue
+        family = family_of(sid)
+        if family in seen_families:
+            continue
+        seen_families.add(family)
+        pool_ids.append(sid)
+        if len(pool_ids) == 6:
+            break
+    assert len(pool_ids) == 6
+    pool = ":".join(str(sid) for sid in pool_ids)
+    seen = set()
+    for _ in range(40):
+        picked = [int(t) for t in A._merge_skills(pool, "", 4).split(":") if t.isdigit()]
+        assert len(picked) == 4, picked
+        assert len(set(map(family_of, picked))) == 4, f"同族重复：{picked}"
+        assert all(level_of(sid) == 1 for sid in picked), f"合成给技能升级了：{picked}"
+        seen.add(tuple(sorted(picked)))
+    assert len(seen) > 1, "满槽后必须是随机替换，而不是固定留最强的几条"
+
+
+def test_trait_synthesis_accumulates_and_takes_the_higher_level(monkeypatch):
+    # §4.7 R1：特性是**集合**——累加、同族取高等级、30% 再 +1 级（本用例关掉随机）。
+    from pet_hunter_server import app as A
+
+    monkeypatch.setattr(A, "LOCAL_TRAIT_UPGRADE_CHANCE", 0.0)
+    # 同族：10001(L1) + 10003(L3) → 10003（取高等级）
+    assert A._merge_traits("10001", "10003", 3, 25) == "10003"
+    # 不同族：主宠 1 条 + 副宠 1 条 → 累加到 2 条
+    assert A._merge_traits("10001", "20002", 3, 25) == "10001:20002"
+    # 数量封顶：cap_count=2 → 只留 2 条
+    assert len(A._merge_traits("10001:20001", "30001:40001", 2, 25).split(":")) == 2
+    # 等级封顶：cap_level=2 时 L5 被压到 L2（trait id = 族×100 + 等级）
+    assert A._merge_traits("10005", "", 3, 2) == "10002"
+    # 30% 升级是单调的：打开后结果等级不会低于原始等级
+    monkeypatch.setattr(A, "LOCAL_TRAIT_UPGRADE_CHANCE", 1.0)
+    assert A._merge_traits("10003", "", 3, 25) == "10004"
 
 
 def test_flush_grow_rerolls_instead_of_rotating(tmp_path: Path):
