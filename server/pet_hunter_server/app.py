@@ -6999,7 +6999,7 @@ def _with_trait(traits: list[int], new_id: int) -> list[int]:
     return traits
 
 
-def _merge_traits(first: list[int], second: list[int], cap: int | None = None) -> list[int]:
+def _merge_equipment_traits(first: list[int], second: list[int], cap: int | None = None) -> list[int]:
     merged: list[int] = []
     for trait_id in list(first) + list(second):
         _with_trait(merged, trait_id)
@@ -7448,7 +7448,7 @@ def _synthesis_merge(main_row, vice_row) -> dict:
         "item_type": config_tables.equip_slot(target_record),
         "use_type": _forge_record_number(target_record, "useType"),
         "stats": stats,
-        "buffs": _merge_traits(
+        "buffs": _merge_equipment_traits(
             _trait_ids(main_row["buffs"]), _trait_ids(vice_row["buffs"]), cap
         ),
         "buff_cap": cap,
@@ -7627,7 +7627,7 @@ def _equip_synthesis_perform(database_path: Path) -> Response:
             if existing is not None:
                 # inventory is UNIQUE(player_id,item_id)：已经拥有同一件产物时叠加，
                 # 特性按产物上限合并（LOCAL DEFAULT：保留原有属性/等级）。
-                merged = _merge_traits(
+                merged = _merge_equipment_traits(
                     _trait_ids(existing["buffs"]), plan["buffs"], plan["buff_cap"]
                 )
                 c.execute(
