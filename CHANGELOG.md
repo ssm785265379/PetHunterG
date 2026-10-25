@@ -4,6 +4,12 @@
 
 ## 2026-10-25
 
+- `c239439` 10-25 14:46 — docs: 更正阶段 3 规格状态——T05 的第二个提交把 Q1–Q8 误写成"用户已同意"，实际用户尚未表态；状态改回"待你确认"，第十节标题改为"建议默认值"，并加显式更正说明
+- `90fe2c4` 10-25 14:40 — merge: 阶段 3 规格的评审结论草稿（Q1–Q8 建议默认值 + §10.1 实施期取证清单）
+- `422dc9c` 10-25 14:32 — docs: 阶段 3 规格评审结论草稿——Q1–Q8 逐条给"建议值 / 落地要点 / 改主意代价"、新增 §10.1「仍需在实施中拿证据」4 条；**该提交的"用户已同意"表述不实**，见 `c239439` 更正
+- `f666728` 10-25 14:35 — merge: 阶段 3 宠物数值/技能/PvP 规格（`docs/pet-combat-spec` → main）；合并后 179 passed
+- `ba4edc4` 10-25 14:32 — docs: 阶段 3 宠物数值/技能/PvP 规格（921 行）——pet.txt/skill.txt/nature.txt/monster.txt 列→公式映射、`base × lvf × gwf × prof × naturef` 统一口径、技能/特性回合时序、擂台改异步镜像 + Elo、P1–P4 分阶段与回滚开关、22 条 pytest + 7 张桌面截图验收、8 个待用户拍板问题；纯文档，未改 `.py`、未起服务
+- `a85a34f` 10-25 14:22 — fix(工具): `lane.ps1 start` 改为分离进程 + 等 `adl.pid`——`adl64` 会继承调用方 stdout 句柄，同步等待会让命令在打完全部输出后挂住；实测三窗口并存、`stop b2` 只关 b2
 - `5f20884` 10-25 14:05 — refactor(服务): `/flash.do` 的 100 多条 `showId` if 链换成 `_SHOW_HANDLERS` 路由表——两个并行 lane 加命令不再抢同一段；测试 helper 抽到 `tests/support.py`、autouse fixture 抽到 `tests/conftest.py`，新测试可按主题独立成文件；新增 `test_routing.py` 逐条打表（不 5xx、成功回包 echo showId、错误体仍是 `-1\t-1:<id>`、未命中落到空信封）；**179 passed**
 - `403a7fb` 10-25 13:58 — feat(工具): lane 脚手架 `tools/lane.ps1`——`new/start/shoot/stop/list/remove` 一条命令管 worktree + 分支 + 端口(8081–8089) + 独立存档 + 独立窗口；`-CopySave` 复制主库存档（运行中拒绝覆盖）；`stop` 只停该端口与该窗口；实测 b1(8081)/b2(8082) 同时 `/health` 200、互不串库
 - `55d1a1c` 10-25 13:50 — feat(工具): 桌面预览按 lane 开窗口——`dev-desktop.ps1` 新增 `-Label/-Port/-DevDir/-NoKill`，只重启自己那个窗口（`<DevDir>\adl.pid`）；每个 lane 独立 app id（ADL 按 app id 单实例，同 id 第二个进程只会转发启动后退出）；`preview-shot.ps1` 新增 `-Width/-Height`，把 150% 缩放下抓到的 960×1440 缩回 640×960。实测 [main]/[b1] 两窗口并存
