@@ -181,7 +181,7 @@ def test_unimplemented_show_id_never_returns_a_transport_error(tmp_path: Path):
     # rather than an HTTP failure.
     refused = client.post("/flash.do", data={"m": "show", "showId": "300", "uid": uid})
     assert refused.status_code == 200
-    assert refused.get_data(as_text=True).startswith("-1:")
+    assert refused.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_account_registration_hashes_password_and_returns_registration_envelope(tmp_path: Path):
@@ -222,9 +222,9 @@ def test_duplicate_registration_does_not_replace_existing_password(tmp_path: Pat
     )
 
     assert first.get_data(as_text=True) == '4097\t{"value":"ok"}'
-    assert duplicate.get_data(as_text=True).startswith("-1:")
+    assert duplicate.get_data(as_text=True).startswith("-1\t-1:")
     assert old_password.get_data(as_text=True) == '4096\t{"value":"reg"}'
-    assert new_password.get_data(as_text=True).startswith("-1:")
+    assert new_password.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_login_of_registered_account_without_character_requests_character_creation(tmp_path: Path):
@@ -293,7 +293,7 @@ def test_account_cannot_create_a_second_character_with_a_different_nickname(tmp_
     )
 
     uid = json.loads(first.get_data(as_text=True).split("\t", 1)[1])["value"]
-    assert second.get_data(as_text=True).startswith("-1:")
+    assert second.get_data(as_text=True).startswith("-1\t-1:")
     assert client.post(
         "/flash.do", data={"m": "login", "acct": "testuser", "pwd": "pass123"}
     ).get_data(as_text=True) == f'4096\t{{"value":"{uid}"}}'
@@ -348,7 +348,7 @@ def test_auto_login_rejects_wrong_password(tmp_path: Path):
         "/flash.do", data={"m": "autoLogin", "uid": uid, "pwd": "wrongpw"}
     )
 
-    assert response.get_data(as_text=True).startswith("-1:")
+    assert response.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_login_rejects_wrong_password_without_disclosing_which_field_failed(tmp_path: Path):
@@ -366,7 +366,7 @@ def test_login_rejects_wrong_password_without_disclosing_which_field_failed(tmp_
     )
 
     assert response.status_code == 200
-    assert response.get_data(as_text=True).startswith("-1:")
+    assert response.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_auto_registration_returns_protocol_envelope_and_reuses_local_player(tmp_path: Path):
@@ -424,7 +424,7 @@ def test_task_list_requires_an_known_player(tmp_path: Path):
     )
 
     assert response.status_code == 200
-    assert response.get_data(as_text=True) == "-1:103"
+    assert response.get_data(as_text=True) == "-1\t-1:103"
 
 
 def test_task_list_offers_seeded_quests_with_live_progress(tmp_path: Path):
@@ -479,8 +479,8 @@ def test_task_info_rejects_unknown_and_missing_ids(tmp_path: Path):
     )
     missing = client.post("/flash.do", data={"m": "show", "showId": "46", "uid": uid})
 
-    assert unknown.get_data(as_text=True) == "-1:211"
-    assert missing.get_data(as_text=True) == "-1:100"
+    assert unknown.get_data(as_text=True) == "-1\t-1:211"
+    assert missing.get_data(as_text=True) == "-1\t-1:100"
 
 
 def test_task_reward_pays_once_and_marks_the_quest_claimed(tmp_path: Path):
@@ -510,7 +510,7 @@ def test_task_reward_pays_once_and_marks_the_quest_claimed(tmp_path: Path):
     second = client.post(
         "/flash.do", data={"m": "show", "showId": "47", "uid": uid, "gid": "1", "ttype": "0"}
     )
-    assert second.get_data(as_text=True) == "-1:211"
+    assert second.get_data(as_text=True) == "-1\t-1:211"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT point FROM players WHERE uid = ?", (uid,)
@@ -528,7 +528,7 @@ def test_task_reward_refuses_an_unfinished_quest(tmp_path: Path):
         data={"m": "show", "showId": "47", "uid": uid, "gid": "1501", "ttype": "20"},
     )
 
-    assert response.get_data(as_text=True) == "-1:107"
+    assert response.get_data(as_text=True) == "-1\t-1:107"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT is_claimed FROM player_tasks WHERE task_id = 1501"
@@ -629,7 +629,7 @@ def test_home_profile_rejects_unknown_player(tmp_path: Path):
     client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
     response = client.post("/flash.do", data={"m": "show", "showId": "2", "uid": "missing"})
     assert response.status_code == 404
-    assert response.get_data(as_text=True).startswith("-1:")
+    assert response.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_empty_inventory_is_persistent_per_player_and_accepts_bag_pages(tmp_path: Path):
@@ -666,7 +666,7 @@ def test_empty_inventory_rejects_unknown_player(tmp_path: Path):
     )
 
     assert response.status_code == 404
-    assert response.get_data(as_text=True).startswith("-1:")
+    assert response.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_new_character_gets_the_local_starter_equipment_in_the_bag(tmp_path: Path):
@@ -760,8 +760,8 @@ def test_equipment_detail_rejects_non_equipment_and_other_players(tmp_path: Path
         "/flash.do", data={"m": "show", "showId": "39", "uid": other, "index": str(index)}
     )
 
-    assert unknown.get_data(as_text=True) == "-1:400"
-    assert cross_player.get_data(as_text=True) == "-1:400"
+    assert unknown.get_data(as_text=True) == "-1\t-1:400"
+    assert cross_player.get_data(as_text=True) == "-1\t-1:400"
 
 
 def test_grant_starter_equipment_is_idempotent_and_keeps_existing_items(tmp_path: Path):
@@ -908,8 +908,8 @@ def test_shop_detail_rejects_unknown_goods_and_mismatched_price_type(tmp_path: P
         data={"m": "show", "showId": "28", "uid": uid, "gid": "10007", "ttype": "2", "loc": "1"},
     )
 
-    assert unknown.get_data(as_text=True) == "-1:400"
-    assert mismatched.get_data(as_text=True) == "-1:400"
+    assert unknown.get_data(as_text=True) == "-1\t-1:400"
+    assert mismatched.get_data(as_text=True) == "-1\t-1:400"
 
 
 def test_shop_buy_deducts_currency_and_stacks_inventory(tmp_path: Path):
@@ -975,10 +975,10 @@ def test_shop_buy_rejects_bad_count_and_insufficient_currency(tmp_path: Path):
         data={"m": "show", "showId": "29", "uid": uid, "gid": "10022", "count": "1", "ttype": "2", "loc": "1"},
     )
 
-    assert too_many.get_data(as_text=True) == "-1:206"
+    assert too_many.get_data(as_text=True) == "-1\t-1:206"
     # 403 = 金币不够, 404 = 银币不够 (client error.txt keys).
-    assert no_money.get_data(as_text=True) == "-1:403"
-    assert no_silver.get_data(as_text=True) == "-1:404"
+    assert no_money.get_data(as_text=True) == "-1\t-1:403"
+    assert no_silver.get_data(as_text=True) == "-1\t-1:404"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM inventory WHERE item_id IN (10007, 10010)"
@@ -994,7 +994,7 @@ def test_shop_list_rejects_unknown_player(tmp_path: Path):
         "/flash.do", data={"m": "show", "showId": "27", "uid": "missing", "ttype": "1"}
     )
 
-    assert response.get_data(as_text=True) == "-1:103"
+    assert response.get_data(as_text=True) == "-1\t-1:103"
 
 
 def _set_currency(client, database: Path, uid: str, **values):
@@ -1052,12 +1052,13 @@ def test_use_goods_restores_hunt_points_and_consumes_one(tmp_path: Path):
         ).fetchone()
     assert row == (1, 7, 1)
 
-    # At full action points the item must not be wasted.
+    # At full action points the item must not be wasted, and the reply says why
+    # (415 =「现在体力充沛，不需要使用」instead of the old 非法操作 100).
     blocked = client.post(
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": str(index), "index1": "0"},
     )
-    assert blocked.get_data(as_text=True) == "-1:100"
+    assert blocked.get_data(as_text=True) == "-1\t-1:415"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT quantity FROM inventory WHERE id = ?", (index,)
@@ -1095,13 +1096,13 @@ def test_use_goods_deletes_row_at_zero_and_rejects_unknown_items(tmp_path: Path)
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": str(unknown_id), "index1": "0"},
     )
-    assert unknown.get_data(as_text=True) == "-1:100"
+    assert unknown.get_data(as_text=True) == "-1\t-1:100"
 
     missing = client.post(
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": "424242", "index1": "0"},
     )
-    assert missing.get_data(as_text=True) == "-1:400"
+    assert missing.get_data(as_text=True) == "-1\t-1:400"
 
 
 def test_experience_curve_is_monotonic_and_capped():
@@ -1138,7 +1139,7 @@ def test_use_goods_pet_exp_levels_target_pet(tmp_path: Path):
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": str(index), "index1": "0"},
     )
-    assert no_target.get_data(as_text=True) == "-1:506"
+    assert no_target.get_data(as_text=True) == "-1\t-1:506"
 
     response = client.post(
         "/flash.do",
@@ -1225,7 +1226,8 @@ def test_home_use_goods_rejects_an_unimplemented_effect_without_eating_it(
 
     HomeUI.as:243-250 opens the bag with `target=0`, so `index1` is 0 there. An
     effect this server cannot apply (10004 宠物名片, prop.txt type=4) must answer
-    -1:100 and leave the stack untouched instead of silently consuming it.
+    -1:417 (该道具不能直接使用) and leave the stack untouched instead of silently
+    consuming it.
     """
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
@@ -1251,7 +1253,7 @@ def test_home_use_goods_rejects_an_unimplemented_effect_without_eating_it(
         "/flash.do",
         data={"m": "show", "showId": "50", "uid": uid, "index": str(unsupported), "index1": "0"},
     )
-    assert rejected.get_data(as_text=True) == "-1:100"
+    assert rejected.get_data(as_text=True) == "-1\t-1:417"
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT quantity FROM inventory WHERE id = ?", (unsupported,)
@@ -1443,9 +1445,9 @@ def test_sale_goods_rejects_wrong_count_team_and_unknown_item(tmp_path: Path):
         data={"m": "show", "showId": "68", "uid": uid, "index": str(unknown_id), "ttype": "2"},
     )
 
-    assert too_many.get_data(as_text=True) == "-1:206"
-    assert wrong_team.get_data(as_text=True) == "-1:400"
-    assert unknown.get_data(as_text=True) == "-1:400"
+    assert too_many.get_data(as_text=True) == "-1\t-1:206"
+    assert wrong_team.get_data(as_text=True) == "-1\t-1:400"
+    assert unknown.get_data(as_text=True) == "-1\t-1:400"
 
 
 def test_sale_goods_sells_stack_partially(tmp_path: Path):
@@ -1632,9 +1634,9 @@ def test_explore_maps_unlock_through_the_progress_chain(tmp_path: Path):
     detail = client.post(
         "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": str(second)}
     )
-    assert detail.get_data(as_text=True).startswith("-1:"), "locked map detail must be refused"
+    assert detail.get_data(as_text=True).startswith("-1\t-1:"), "locked map detail must be refused"
     started = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
-    assert started.get_data(as_text=True).startswith("-1:"), "locked map must not run"
+    assert started.get_data(as_text=True).startswith("-1\t-1:"), "locked map must not run"
 
     # Clear map 1 by reaching its needDiscoverRate, then map 2 opens.
     need = int(str(table[int(page[0]["id"])].get("needDiscoverRate", "0")).strip() or 0)
@@ -1693,7 +1695,7 @@ def test_explore_list_exposes_best_star_and_perfect_state(tmp_path: Path):
     assert perfect["is_perfect"] == 1 and perfect["best_star"] == 5
 
     closed = client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid})
-    assert closed.get_data(as_text=True).startswith("-1:"), "perfect map is closed"
+    assert closed.get_data(as_text=True).startswith("-1\t-1:"), "perfect map is closed"
 
 
 def test_explore_monsters_vary_by_map_and_use_the_map_level():
@@ -2547,9 +2549,9 @@ def test_explore_finish_panel_gets_flags_stars_and_pays_rewards_once(tmp_path: P
     closed_detail = client.post(
         "/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}
     )
-    assert closed_detail.get_data(as_text=True).startswith("-1:")
+    assert closed_detail.get_data(as_text=True).startswith("-1\t-1:")
     closed_start = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
-    assert closed_start.get_data(as_text=True).startswith("-1:")
+    assert closed_start.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_explore_rest_event_can_finish_the_map_and_pay(tmp_path: Path, monkeypatch):
@@ -2673,7 +2675,7 @@ def test_explore_stamina_is_real_and_refills(tmp_path: Path):
         connection.commit()
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": gid}))
     refused = client.post("/flash.do", data={"m": "show", "showId": "103", "uid": uid})
-    assert refused.get_data(as_text=True).startswith("-1:")
+    assert refused.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_pet_stats_come_from_pet_txt_not_a_two_entry_hardcode(tmp_path: Path):
@@ -2752,7 +2754,7 @@ def test_arena_star_prize_is_claimable_once_per_week(tmp_path: Path):
 
     # Second claim this week is refused, and the page reflects it.
     again = client.post("/flash.do", data={"m": "show", "showId": "83", "uid": uid})
-    assert again.get_data(as_text=True) == "-1:504"
+    assert again.get_data(as_text=True) == "-1\t-1:504"
     _, info = _envelope(client.post("/flash.do", data={"m": "show", "showId": "82", "uid": uid}))
     assert info["is_reward"] == 0
 
@@ -2802,7 +2804,7 @@ def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
 
     # Claiming before the milestone is met must be refused, not silently paid.
     early = client.post("/flash.do", data={"m": "show", "showId": "49", "uid": uid})
-    assert early.get_data(as_text=True) == "-1:504"
+    assert early.get_data(as_text=True) == "-1\t-1:504"
 
     # The picture book counts *distinct* creatures, so reach the milestone by
     # hunting the different monster groups rather than re-catching the same pet.
@@ -2856,7 +2858,7 @@ def test_picture_book_milestones_track_catches_and_pay_once(tmp_path: Path):
 
     # A second claim of the same milestone is refused.
     again = client.post("/flash.do", data={"m": "show", "showId": "49", "uid": uid})
-    assert again.get_data(as_text=True) == "-1:504"
+    assert again.get_data(as_text=True) == "-1\t-1:504"
 
 
 def test_arena_rank_ladder_feeds_the_rank_page(tmp_path: Path):
@@ -3169,7 +3171,7 @@ def test_catching_respects_pet_capacity(tmp_path: Path):
         connection.execute("UPDATE players SET pet_capacity = 0 WHERE uid = ?", (uid,))
         connection.commit()
     response = client.post("/flash.do", data={"m": "show", "showId": "7", "uid": uid, "hid": 1})
-    assert response.get_data(as_text=True) == "-1:300"
+    assert response.get_data(as_text=True) == "-1\t-1:300"
 
 
 def test_develop_page_shows_pets_instead_of_star_wands(tmp_path: Path):
@@ -4002,7 +4004,7 @@ def test_use_goods_rejects_the_wrong_usage_context(tmp_path: Path):
         "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
                            "index": str(food), "index1": "0"}
     )
-    assert refused.get_data(as_text=True) == "-1:506"
+    assert refused.get_data(as_text=True) == "-1\t-1:506"
     _, accepted = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "50", "uid": uid,
                                        "index": str(food), "index1": str(pet_id)})
@@ -4015,7 +4017,7 @@ def test_use_goods_rejects_the_wrong_usage_context(tmp_path: Path):
         "/flash.do", data={"m": "show", "showId": "50", "uid": uid,
                            "index": str(bag), "index1": str(pet_id)}
     )
-    assert refused.get_data(as_text=True) == "-1:100"
+    assert refused.get_data(as_text=True) == "-1\t-1:100"
 
 
 def test_hunt_map_progress_accumulates_and_clears(tmp_path: Path):
@@ -4307,7 +4309,7 @@ def test_training_slots_render_pets_instead_of_the_wand_placeholder(tmp_path: Pa
 def test_arena_fighter_rejects_unknown_player(tmp_path: Path):
     client = create_app({"TESTING": True, "DATABASE": tmp_path / "game.sqlite3"}).test_client()
     response = client.post("/flash.do", data={"m": "show", "showId": "506", "uid": "missing"})
-    assert response.get_data(as_text=True) == "-1:103"
+    assert response.get_data(as_text=True) == "-1\t-1:103"
 
 
 def test_pet_lists_resolve_real_names_from_config(tmp_path: Path):
@@ -4408,13 +4410,13 @@ def test_pet_synthesis_rejects_locked_and_self(tmp_path: Path):
         data={"m": "show", "showId": "65", "uid": uid,
               "main": ids[0], "vice": ids[1], "ttype": 1},
     )
-    assert response.get_data(as_text=True) == "-1:524"
+    assert response.get_data(as_text=True) == "-1\t-1:524"
     response = client.post(
         "/flash.do",
         data={"m": "show", "showId": "65", "uid": uid,
               "main": ids[0], "vice": ids[0], "ttype": 1},
     )
-    assert response.get_data(as_text=True) == "-1:100"
+    assert response.get_data(as_text=True) == "-1\t-1:100"
 
 
 def test_pet_flush_grow_consumes_item_and_persists_growth_fields(tmp_path: Path):
@@ -4455,7 +4457,7 @@ def test_pet_forget_skill_rejects_single_skill_pet(tmp_path: Path):
         connection.execute("UPDATE pets SET skills='101' WHERE id=?", (pet_id,))
         connection.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type) VALUES (1,10028,1,1,10028,2,2)")
     response = client.post("/flash.do", data={"m":"show","showId":"21","uid":uid,"index":pet_id})
-    assert response.get_data(as_text=True) == "-1:515"
+    assert response.get_data(as_text=True) == "-1\t-1:515"
 
 
 def test_new_character_gets_the_local_starter_pack_in_the_pet_list(tmp_path: Path):
@@ -4475,7 +4477,9 @@ def test_new_character_gets_the_local_starter_pack_in_the_pet_list(tmp_path: Pat
     assert payload["pet_num"] == 2
     assert payload["max_pet_num"] == 30
     assert payload["add_pet_card_num"] == 1
-    assert payload["own_card_num"] == 1
+    # 新号没有扩建证书：own_card_num 必须是背包里的真实数量（以前写死 1，
+    # 于是没有证书也能点确认扩建，40 号也不扣道具）。
+    assert payload["own_card_num"] == 0
     assert len(payload["pets"]) == 2
     by_id = {pet["id"]: pet for pet in payload["pets"]}
     assert set(by_id) == {1001, 2019}
@@ -4587,9 +4591,9 @@ def test_pet_detail_rejects_unknown_index_and_other_players_pets(tmp_path: Path)
     )
 
     assert unknown.status_code == 404
-    assert unknown.get_data(as_text=True).startswith("-1:")
+    assert unknown.get_data(as_text=True).startswith("-1\t-1:")
     assert cross_player.status_code == 404
-    assert cross_player.get_data(as_text=True).startswith("-1:")
+    assert cross_player.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_pet_list_is_persistent_across_restart_and_rejects_bad_paging(tmp_path: Path):
@@ -4627,7 +4631,7 @@ def test_pet_list_rejects_unknown_player(tmp_path: Path):
     )
 
     assert response.status_code == 404
-    assert response.get_data(as_text=True).startswith("-1:")
+    assert response.get_data(as_text=True).startswith("-1\t-1:")
 
 
 def test_grant_starter_pets_is_idempotent_and_keeps_existing_pets(tmp_path: Path):
@@ -4685,8 +4689,8 @@ def test_pet_rename_persists_and_rejects_invalid_names(tmp_path: Path):
 
     assert _envelope(renamed) == (18, {"value": "ok"})
     assert detail["name"] == "阿火"
-    assert too_long.get_data(as_text=True) == "-1:514"
-    assert blank.get_data(as_text=True) == "-1:514"
+    assert too_long.get_data(as_text=True) == "-1\t-1:514"
+    assert blank.get_data(as_text=True) == "-1\t-1:514"
 
 
 def test_pet_rename_rejects_another_players_pet(tmp_path: Path):
@@ -4701,7 +4705,7 @@ def test_pet_rename_rejects_another_players_pet(tmp_path: Path):
         data={"m": "show", "showId": "18", "uid": other, "index": str(index), "pName": "偷"},
     )
 
-    assert response.get_data(as_text=True) == "-1:506"
+    assert response.get_data(as_text=True) == "-1\t-1:506"
 
 
 def test_pet_lock_toggles_and_is_reported_as_client_strings(tmp_path: Path):
@@ -4750,7 +4754,7 @@ def test_pet_release_deletes_but_refuses_locked_pets(tmp_path: Path):
     )[1]
 
     assert _envelope(locked) == (55, {"value": "true"})
-    assert refused.get_data(as_text=True) == "-1:524"
+    assert refused.get_data(as_text=True) == "-1\t-1:524"
     # 15 also reports the recycle payout: pet.txt `recyclePoint` is "goodsId:num"
     # and PetInfoUI.as:278-285 draws the refund line from these two fields.
     command, released_payload = _envelope(released)
@@ -5009,7 +5013,7 @@ def test_pet_evolve_returns_new_detail_and_enforces_level_and_chain(tmp_path: Pa
         )
     )[1]
 
-    assert too_low.get_data(as_text=True) == "-1:505"
+    assert too_low.get_data(as_text=True) == "-1\t-1:505"
     assert evolved[0] == 14
     assert evolved[1]["id"] == 1002
     assert evolved[1]["icon"] == 1002
@@ -5021,7 +5025,7 @@ def test_pet_evolve_returns_new_detail_and_enforces_level_and_chain(tmp_path: Pa
     end_of_chain = client.post(
         "/flash.do", data={"m": "show", "showId": "14", "uid": uid, "index": str(index)}
     )
-    assert end_of_chain.get_data(as_text=True) == "-1:504"
+    assert end_of_chain.get_data(as_text=True) == "-1\t-1:504"
 
 
 def test_pet_evolve_refuses_a_locked_pet(tmp_path: Path):
@@ -5037,13 +5041,28 @@ def test_pet_evolve_refuses_a_locked_pet(tmp_path: Path):
         "/flash.do", data={"m": "show", "showId": "14", "uid": uid, "index": str(index)}
     )
 
-    assert response.get_data(as_text=True) == "-1:524"
+    assert response.get_data(as_text=True) == "-1\t-1:524"
 
 
 def test_pet_expand_capacity_adds_nine_up_to_the_local_maximum(tmp_path: Path):
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "Expander")
+
+    # 没有扩建证书不能扩建（205 = 需要的证书不够）。
+    refused = client.post("/flash.do", data={"m": "show", "showId": "40", "uid": uid})
+    assert refused.get_data(as_text=True) == "-1\t-1:205"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,10013,1,3,10013,13,0)"
+        )
+        connection.commit()
+    listed_before = _envelope(
+        client.post("/flash.do", data={"m": "show", "showId": "11", "uid": uid})
+    )[1]
+    assert listed_before["own_card_num"] == 3
 
     first = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "40", "uid": uid})
@@ -5052,8 +5071,14 @@ def test_pet_expand_capacity_adds_nine_up_to_the_local_maximum(tmp_path: Path):
         client.post("/flash.do", data={"m": "show", "showId": "11", "uid": uid})
     )[1]
 
-    assert first == (40, {"value": "ok"})
+    assert first == (40, {"value": "ok", "max_pet_num": 39})
     assert listed["max_pet_num"] == 39
+    assert listed["own_card_num"] == 2, "扩建要扣 1 个扩建证书"
+    with sqlite3.connect(database) as connection:
+        left = connection.execute(
+            "SELECT quantity FROM inventory WHERE item_id = 10013"
+        ).fetchone()[0]
+    assert left == 2
 
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE players SET pet_capacity = 90 WHERE uid = ?", (uid,))
@@ -5062,7 +5087,7 @@ def test_pet_expand_capacity_adds_nine_up_to_the_local_maximum(tmp_path: Path):
         client.post("/flash.do", data={"m": "show", "showId": "11", "uid": uid})
     )[1]
 
-    assert at_max.get_data(as_text=True) == "-1:204"
+    assert at_max.get_data(as_text=True) == "-1\t-1:204"
     assert max_list["own_card_num"] == 0
 
 
@@ -5104,7 +5129,7 @@ def test_training_pet_is_hidden_from_pickers_and_battles(tmp_path: Path):
     rejected = client.post(
         "/flash.do", data={"m": "show", "showId": "44", "uid": uid, "index": pet_index}
     )
-    assert rejected.get_data(as_text=True).startswith("-1:")
+    assert rejected.get_data(as_text=True).startswith("-1\t-1:")
 
     _envelope(client.post("/flash.do", data={"m": "show", "showId": "99", "uid": uid, "gid": 1}))
     _, battle = _envelope(client.post(
@@ -5235,3 +5260,212 @@ def test_use_goods_batch_applies_multiple_and_reports_text(tmp_path: Path):
             "SELECT quantity FROM inventory WHERE id=?", (ids[10016],)
         ).fetchone()
     assert left is None, "三个箱子应全部消耗"
+
+
+def _insert_prop_rows(database: Path, rows: list[tuple[int, int, int, int]]) -> dict[int, int]:
+    """把 (item_id, quantity, item_type, use_type) 写进背包并返回 {item_id: 背包行 id}。"""
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type)"
+            " VALUES (1,?,1,?,?,?,?)",
+            [(item_id, qty, item_id, item_type, use_type)
+             for item_id, qty, item_type, use_type in rows],
+        )
+        ids = {
+            item_id: row_id
+            for item_id, row_id in connection.execute(
+                "SELECT item_id, id FROM inventory WHERE player_id = 1 AND item_id IN (%s)"
+                % ",".join("?" * len(rows)),
+                [row[0] for row in rows],
+            )
+        }
+        connection.commit()
+    return ids
+
+
+def test_use_goods_timed_buff_props_are_consumed_and_recorded(tmp_path: Path):
+    # 荣誉勋章(6)/幸运四叶草(18)/狩猎秘籍(19) 以前落到 USE_GOODS 的 default 分支，
+    # 回 -1:100「非法操作」，道具留包里 —— 玩家看到的就是"用了但数量没少"。
+    # 现在它们写 player_buffs（10 天到期）并把 prop.txt 的"狩猎行动值上限+5"累加。
+    import time
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "UseBuff")
+    ids = _insert_prop_rows(database, [
+        (10026, 3, 18, 1),   # 幸运四叶草 value 30
+        (10027, 2, 19, 1),   # 狩猎秘籍 value 1.5
+        (10006, 4, 6, 1),    # 荣誉勋章 value 2
+    ])
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET max_ht_ap = 20, ht_ap = 20, explore_ap = 0")
+        # 一条过期记录：不能算进生效中的增益。
+        connection.execute(
+            "INSERT INTO player_buffs (player_id, kind, value, expire_at) VALUES (1, 19, 1.5, ?)",
+            (int(time.time()) - 10,),
+        )
+        connection.commit()
+        before = int(time.time())
+
+    _, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10026], "index1": 0, "num": 2,
+    }))
+    assert payload["used"] == 2
+    assert "全能力 +30" in payload["text"]
+    assert "上限 +10" in payload["text"]
+
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        left = connection.execute(
+            "SELECT quantity FROM inventory WHERE id = ?", (ids[10026],)
+        ).fetchone()[0]
+        buff = connection.execute(
+            "SELECT value, expire_at FROM player_buffs WHERE player_id = 1 AND kind = 18"
+        ).fetchone()
+        max_ap = connection.execute(
+            "SELECT max_ht_ap FROM players WHERE id = 1"
+        ).fetchone()[0]
+    assert left == 1, "用 2 个要扣 2 个"
+    assert round(float(buff["value"])) == 30
+    assert buff["expire_at"] >= before + 864000, "10 天后到期"
+    assert max_ap == 30, "每个幸运四叶草 +5 上限"
+
+    # 狩猎秘籍 1.5 倍这条路也要能过（value 是小数，旧解析会当成 0 -> None）。
+    _, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10027], "index1": 0, "num": 1,
+    }))
+    assert payload["used"] == 1 and "狩猎经验 ×1.5" in payload["text"]
+
+    _, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10006], "index1": 0, "num": 1,
+    }))
+    assert payload["used"] == 1 and "擂台水晶 ×2" in payload["text"]
+
+    from pet_hunter_server.app import _player_buffs
+
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        active = _player_buffs(connection, 1)
+    assert round(active[18]) == 30 and active[19] == 1.5 and active[6] == 2
+
+
+def test_use_goods_explore_drink_restores_explore_ap(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "UseDrink")
+    ids = _insert_prop_rows(database, [(10504, 2, 26, 1)])  # 探险饮料 +20
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET explore_ap = 0, max_explore_ap = 20")
+        connection.commit()
+
+    _, payload = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10504], "index1": 0,
+    }))
+    assert payload["used"] == 1
+    assert "探险行动值" in payload["text"]
+    with sqlite3.connect(database) as connection:
+        explore_ap, qty = connection.execute(
+            "SELECT (SELECT explore_ap FROM players WHERE id = 1),"
+            " (SELECT quantity FROM inventory WHERE id = ?)", (ids[10504],)
+        ).fetchone()
+    assert (explore_ap, qty) == (20, 1)
+
+    # 体力/探险行动值都在满的时候不能白吃道具（与 7 号体力饮料同口径）。
+    blocked = client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[10504], "index1": 0,
+    })
+    assert blocked.get_data(as_text=True) == "-1\t-1:415"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT quantity FROM inventory WHERE id = ?", (ids[10504],)
+        ).fetchone()[0] == 1
+
+
+def test_hunt_exp_buff_multiplies_the_hunt_payout(tmp_path: Path, monkeypatch):
+    from pet_hunter_server import app as app_module
+
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "ExpBuff")
+    fixed = dict(app_module._pick_monster(1))
+    fixed.update({"exp": 1000, "lv": 1})
+    monkeypatch.setattr(app_module, "_monsters_for_map", lambda hid: [fixed])
+    with sqlite3.connect(database) as connection:
+        # 练高一队宠物，保证两场都赢（输一场只赔 1/10 经验）。
+        connection.execute("UPDATE pets SET lv = 300")
+        connection.execute("UPDATE players SET ht_ap = 20, max_ht_ap = 20")
+        connection.commit()
+
+    _, plain = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1}
+    ))
+    assert plain["is_win"] == 1
+    base_exp = plain["reward_exp"]
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO player_buffs (player_id, kind, value, expire_at)"
+            " VALUES (1, 19, 1.5, ?)", (4102444800,)  # 2100 年，肯定没过期
+        )
+        connection.execute("UPDATE players SET ht_ap = 20")
+        connection.commit()
+
+    _, boosted = _envelope(client.post(
+        "/flash.do", data={"m": "show", "showId": "6", "uid": uid, "hid": 1}
+    ))
+    assert boosted["is_win"] == 1
+    assert boosted["reward_exp"] == round(base_exp * 1.5), "狩猎秘籍 1.5 倍经验"
+    assert boosted["pet_exp"][0]["add"] == round(base_exp * 1.5)
+
+
+def test_egg_box_hands_back_the_new_pet_and_full_roster_says_so(tmp_path: Path):
+    # 开蛋成功时 50 的响应不一定路由回背包页，所以 22 号要带回 notice_box：
+    # 里面有新宠物的 pets.id，客户端拿它弹"获得宠物"并能点进宠物面板。
+    # 宠物栏满时回 500「宠物数量已达最大」，不能再用 300「背包已满」误导。
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = _create_local_player(client, "EggBox")
+    ids = _insert_prop_rows(database, [(12001, 3, 15, 1)])  # 4级宠物蛋
+
+    # 一次开 2 个蛋：两只宠物都要带回去（客户端一次列出多只）。
+    _, opened = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[12001], "index1": 0,
+        "num": 2,
+    }))
+    assert opened["used"] == 2
+    assert "获得宠物" in opened["text"]
+    box = opened["value"]
+    assert box["box_type"] == 2 and box["index"] > 0
+
+    _, bag = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "22", "uid": uid, "ttype": 1, "p": 1, "n": 9,
+    }))
+    assert len(bag["notice_box"]) == 2, "两只宠物都要列出来"
+    assert {entry["box_type"] for entry in bag["notice_box"]} == {2}
+    assert {entry["index"] for entry in bag["notice_box"]}.issuperset({box["index"]})
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE id = ?", (box["index"],)
+        ).fetchone()[0] == 1
+
+    # 再拿一次 22：一次性字段已经清空。
+    _, bag_again = _envelope(client.post("/flash.do", data={
+        "m": "show", "showId": "22", "uid": uid, "ttype": 1, "p": 1, "n": 9,
+    }))
+    assert "notice_box" not in bag_again
+
+    with sqlite3.connect(database) as connection:
+        held = connection.execute(
+            "SELECT COUNT(*) FROM pets WHERE player_id = 1"
+        ).fetchone()[0]
+        connection.execute("UPDATE players SET pet_capacity = ? WHERE id = 1", (held,))
+        connection.commit()
+
+    full = client.post("/flash.do", data={
+        "m": "show", "showId": "50", "uid": uid, "index": ids[12001], "index1": 0,
+    })
+    assert full.get_data(as_text=True) == "-1\t-1:500"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT quantity FROM inventory WHERE id = ?", (ids[12001],)
+        ).fetchone()[0] == 1, "开不出来就不能吃道具"

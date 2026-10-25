@@ -18,25 +18,19 @@
          var _loc7_:Number = (_loc3_ - _loc5_) / 2;
          var _loc8_:Number = (_loc4_ - _loc6_) / 2;
          _use_popup = new GameObject();
-         var _loc9_:Shape = new Shape();
-         _loc9_.graphics.beginFill(0,0.55);
-         _loc9_.graphics.drawRect(0,0,_loc3_,_loc4_);
-         _loc9_.graphics.endFill();
+         var _loc9_:Button = popupButton(popupBitmap(4,4,0,0.55,0,0),_loc3_,_loc4_,onUseBackdrop);
          _use_popup.addChild(_loc9_);
-         var _loc10_:Shape = new Shape();
-         _loc10_.graphics.beginFill(0x0B2B4A,0.96);
-         _loc10_.graphics.lineStyle(4,0x59C7F2,1);
-         _loc10_.graphics.drawRoundRect(_loc7_,_loc8_,_loc5_,_loc6_,24);
-         _loc10_.graphics.endFill();
+         var _loc10_:Button = popupButton(popupBitmap(_loc5_,_loc6_,0x0B2B4A,0.96,24,0x59C7F2),_loc5_,_loc6_,null);
+         _loc10_.x = _loc7_;
+         _loc10_.y = _loc8_;
          _use_popup.addChild(_loc10_);
          var _loc11_:Text = new Text();
          _loc11_.type = "text_label_center";
          _loc11_.size = GameUtil.fontsize2;
          _loc11_.bold = true;
          _loc11_.color = 16777215;
-         _loc11_.width = _loc5_ - 60;
          _loc11_.text = "【" + GameUtil.getConfigValue("prop","" + _use_item_id,"name") + "】";
-         _loc11_.x = _loc7_ + 30;
+         _loc11_.x = _loc3_ - _loc11_.width >> 1;
          _loc11_.y = _loc8_ + 24;
          _use_popup.addChild(_loc11_);
          var _loc12_:Text = new Text();
@@ -49,37 +43,62 @@
          _loc12_.x = _loc7_ + 30;
          _loc12_.y = _loc8_ + 92;
          _use_popup.addChild(_loc12_);
+         var _rowY:Number = _loc8_ + 282;
+         var _mid:Number = _loc7_ + _loc5_ / 2;
          var _loc13_:Text = new Text();
-         _loc13_.type = "text_label_center";
+         _loc13_.type = "text_label";
          _loc13_.size = GameUtil.fontsize1;
          _loc13_.color = 16777215;
-         _loc13_.width = 80;
          _loc13_.text = "数量";
-         _loc13_.x = _loc7_ + 60;
-         _loc13_.y = _loc8_ + 300;
          _use_popup.addChild(_loc13_);
-         makePopupButton("img_sub",_loc7_ + 150,_loc8_ + 286,onUseMinus);
+         _use_minus_btn = makePopupButton("img_sub",0,0,onUseMinus);
+         _use_plus_btn = makePopupButton("img_add",0,0,onUsePlus);
+         var _num_gap:Number = 120;
+         var _row_w:Number = _loc13_.width + 34 + _use_minus_btn.width + _num_gap + _use_plus_btn.width;
+         var _row_x:Number = _loc7_ + (_loc5_ - _row_w) / 2;
+         _loc13_.x = Math.round(_row_x);
+         _use_minus_btn.x = Math.round(_row_x + _loc13_.width + 34);
+         _use_plus_btn.x = Math.round(_use_minus_btn.x + _use_minus_btn.width + _num_gap);
+         _use_minus_btn.y = Math.round(_rowY);
+         _use_plus_btn.y = Math.round(_rowY);
+         var _row_h:Number = Math.max(_use_minus_btn.height,_use_plus_btn.height);
+         _loc13_.y = Math.round(_rowY + (_row_h - _loc13_.height) / 2);
          _use_count_txt = new Text();
-         _use_count_txt.type = "text_area_center";
-         _use_count_txt.size = GameUtil.fontsize2;
-         _use_count_txt.bold = true;
-         _use_count_txt.color = 16777215;
-         _use_count_txt.width = 110;
+         _use_count_txt.width = 116;
          _use_count_txt.height = 60;
-         _use_count_txt.text = "1";
-         _use_count_txt.x = _loc7_ + 260;
-         _use_count_txt.y = _loc8_ + 292;
+         var _num_fmt:TextFormat = new TextFormat();
+         _num_fmt.align = "center";
+         _num_fmt.size = GameUtil.fontsize2;
+         _num_fmt.bold = true;
+         _num_fmt.color = 16777215;
+         _use_count_txt.defaultTextFormat = _num_fmt;
+         _use_count_txt.input = true;
+         _use_count_txt.maxChars = 5;
+         _use_count_txt.restrict = "0-9";
+         _use_count_txt.text = "" + _use_count;
+         _use_count_txt.addEventListener("change",onUseCountChange);
+         _use_count_txt.x = Math.round((_use_minus_btn.x + _use_minus_btn.width + _use_plus_btn.x) / 2 - _use_count_txt.width / 2);
+         _use_count_txt.y = Math.round(_rowY + (_row_h - 50) / 2);
          _use_popup.addChild(_use_count_txt);
-         makePopupButton("img_add",_loc7_ + 330,_loc8_ + 286,onUsePlus);
-         var _loc14_:Button = makePopupButton("img_ok",0,0,onUseConfirm);
-         var _loc15_:Button = makePopupButton("img_cancel",0,0,onUseCancel);
-         var _loc16_:Number = Math.max(_loc14_.height,_loc15_.height);
-         var _loc17_:Number = _loc14_.width + 40 + _loc15_.width;
-         var _loc18_:Number = _loc7_ + (_loc5_ - _loc17_) / 2;
-         _loc14_.x = _loc18_;
-         _loc15_.x = _loc18_ + _loc14_.width + 40;
-         _loc14_.y = _loc8_ + 430 + (_loc16_ - _loc14_.height) / 2;
-         _loc15_.y = _loc8_ + 430 + (_loc16_ - _loc15_.height) / 2;
+         var _loc14_:Text = new Text();
+         _loc14_.type = "text_area_center";
+         _loc14_.size = GameUtil.fontsize0;
+         _loc14_.color = 8965358;
+         _loc14_.width = _loc5_ - 40;
+         _loc14_.height = 40;
+         _loc14_.text = "点数字可直接输入（最多 " + _use_max + " 个）";
+         _loc14_.x = _loc7_ + 20;
+         _loc14_.y = Math.round(_rowY + _row_h + 10);
+         _use_popup.addChild(_loc14_);
+         var _loc15_:Button = makePopupButton("img_ok",0,0,onUseConfirm);
+         var _loc16_:Button = makePopupButton("img_cancel",0,0,onUseCancel);
+         var _loc17_:Number = Math.max(_loc15_.height,_loc16_.height);
+         var _loc18_:Number = _loc15_.width + 40 + _loc16_.width;
+         var _loc19_:Number = _loc7_ + (_loc5_ - _loc18_) / 2;
+         _loc15_.x = _loc19_;
+         _loc16_.x = _loc19_ + _loc15_.width + 40;
+         _loc15_.y = _loc8_ + 430 + (_loc17_ - _loc15_.height) / 2;
+         _loc16_.y = _loc8_ + 430 + (_loc17_ - _loc16_.height) / 2 - 8;
          this.addChild(_use_popup);
       }
 
@@ -95,14 +114,91 @@
          return _loc7_;
       }
 
+      private function popupBitmap(param1:Number, param2:Number, param3:uint, param4:Number, param5:Number, param6:uint) : Bitmap
+      {
+         var _loc7_:Shape = new Shape();
+         _loc7_.graphics.beginFill(param3,param4);
+         if(param6 != 0)
+         {
+            _loc7_.graphics.lineStyle(4,param6,1);
+         }
+         if(param5 > 0)
+         {
+            _loc7_.graphics.drawRoundRect(0,0,param1,param2,param5);
+         }
+         else
+         {
+            _loc7_.graphics.drawRect(0,0,param1,param2);
+         }
+         _loc7_.graphics.endFill();
+         var _loc8_:BitmapData = new BitmapData(param1,param2,true,0);
+         _loc8_.draw(_loc7_);
+         return new Bitmap(_loc8_);
+      }
+
+      private function popupButton(param1:Bitmap, param2:Number, param3:Number, param4:Function) : Button
+      {
+         param1.width = param2;
+         param1.height = param3;
+         var _loc5_:Button = new Button(param1);
+         if(param4 != null)
+         {
+            _loc5_.addEventListener("mouseUp",param4);
+         }
+         else
+         {
+            _loc5_.addEventListener("mouseUp",onPopupBlock);
+         }
+         return _loc5_;
+      }
+
+      private function onPopupBlock(param1:MouseEvent) : void
+      {
+      }
+
+      private function onUseBackdrop(param1:MouseEvent) : void
+      {
+         hideUsePopup();
+      }
+
       private function onUseMinus(param1:MouseEvent) : void
       {
+         syncUseCountFromInput();
          setUseCount(_use_count - 1);
       }
 
       private function onUsePlus(param1:MouseEvent) : void
       {
+         syncUseCountFromInput();
          setUseCount(_use_count + 1);
+      }
+
+      private function onUseCountChange(param1:Event) : void
+      {
+         syncUseCountFromInput();
+      }
+
+      private function syncUseCountFromInput() : void
+      {
+         if(_use_count_txt == null)
+         {
+            return;
+         }
+         var _loc2_:String = _use_count_txt.text;
+         var _loc3_:int = int(_loc2_ == null || _loc2_ == "" ? 0 : int(_loc2_));
+         if(_loc3_ < 1)
+         {
+            _loc3_ = 1;
+         }
+         if(_loc3_ > _use_max)
+         {
+            _loc3_ = _use_max;
+         }
+         _use_count = _loc3_;
+         if(_loc2_ != "" + _loc3_)
+         {
+            _use_count_txt.text = "" + _loc3_;
+         }
       }
 
       private function setUseCount(param1:int) : void
@@ -124,6 +220,7 @@
 
       private function onUseConfirm(param1:MouseEvent) : void
       {
+         syncUseCountFromInput();
          var _loc2_:int = _use_index;
          var _loc3_:int = _use_target;
          var _loc4_:int = _use_count;
@@ -152,6 +249,7 @@
             _use_popup = null;
          }
          _use_count_txt = null;
+         _use_minus_btn = null;
+         _use_plus_btn = null;
       }
-
 

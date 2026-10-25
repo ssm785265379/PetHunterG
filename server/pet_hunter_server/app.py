@@ -40,6 +40,9 @@ LOCAL_MAX_PET_CAPACITY = 90
 # 宠物查询都加一个 time.time() 绑定参数。
 PET_READY_SQL = "COALESCE(train_end, 0) <= CAST(strftime('%s','now') AS INTEGER)"
 LOCAL_PET_CAPACITY_STEP = 9
+# 扩建宠物栏消耗的证书（prop.txt 10013「扩建证书：用于扩建牧场，增加宠物的容量」）。
+LOCAL_PET_CAPACITY_CARD_ID = 10013
+LOCAL_PET_CAPACITY_CARD_COST = 1
 # Local-only starter pack. Icons p1001 and p2019 both exist in the bundled pet
 # SWFs (pet2000.swf / pet4000.swf), so the client can render them without #1065.
 # 2019 is five stars so the client's lock-confirmation branch (star >= 5) is reachable.
@@ -98,6 +101,14 @@ LOCAL_PROP_CATALOG = {
     10034: {"type": 24, "use_type": 2, "value": 0},      # 遗忘卡牌: 遗忘特性
     10505: {"type": 27, "use_type": 2, "value": 0},      # 转换水晶球: 转换资质
 }
+# prop.txt 里限时道具的 effectTime 都是 864000（秒，10 天）。幸运四叶草(18)、
+# 狩猎秘籍(19)、荣誉勋章(6) 三行还都写着"狩猎行动值上限+5"：本地上限直接累加到
+# players.max_ht_ap（不做到期回收，避免过期后再去扣玩家已有的上限）。
+LOCAL_BUFF_DURATION = 864000
+LOCAL_BUFF_STAT_BONUS = 18      # 幸运四叶草：出战的猎人和宠物全能力 +value
+LOCAL_BUFF_HUNT_EXP = 19        # 狩猎秘籍：狩猎经验 ×value
+LOCAL_BUFF_ARENA_CRYSTAL = 6    # 荣誉勋章：擂台水晶 ×value
+LOCAL_BUFF_MAX_HT_AP = 5        # 以上三种道具每次使用都 +5 上限
 # Local-only shop stock. The original server's shop table is not recoverable, so
 # these rows are explicit local defaults. `shop_type` 1 = 金币商店, 2 = 银币商店,
 # 4 = 神秘商店. `price_type` 1 = money, 2 = point, 3 = crystal, 4 = goods trade.
@@ -506,6 +517,26 @@ def _initialize_database(database_path: Path) -> None:
             connection.execute(
                 "ALTER TABLE players ADD COLUMN pending_notice TEXT NOT NULL DEFAULT ''"
             )
+        if "pending_box" not in player_columns:
+            # 同上的"一次性"通道，专门存开蛋/开箱开出的宠物那一格奖励（JSON），
+            # 让背包页能弹出宠物图标并点进宠物面板。
+            connection.execute(
+                "ALTER TABLE players ADD COLUMN pending_box TEXT NOT NULL DEFAULT ''"
+            )
+        # 限时增益道具（荣誉勋章 6 / 幸运四叶草 18 / 狩猎秘籍 19）。kind 就是
+        # prop.txt 的 type，value 是该行的 value（30 点 / 1.5 倍 / 2 倍），
+        # expire_at 是到期时间戳（秒）；同一玩家同类只留一条，重复使用取较晚到期。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_buffs (
+                player_id INTEGER NOT NULL,
+                kind INTEGER NOT NULL,
+                value REAL NOT NULL DEFAULT 0,
+                expire_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, kind)
+            )
+            """
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -910,7 +941,7 @@ def _register_account(database_path: Path) -> Response:
     username = _request_value("acct").strip()
     password = _request_value("pwd")
     if not _valid_account_credentials(username, password):
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
 
     salt = secrets.token_bytes(16)
     with _connect_database(database_path) as connection:
@@ -920,7 +951,7 @@ def _register_account(database_path: Path) -> Response:
                 (username, salt, _password_hash(password, salt)),
             )
         except sqlite3.IntegrityError:
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
     return _protocol_response(4097, {"value": "ok"})
 
 
@@ -941,12 +972,12 @@ def _login_account(database_path: Path) -> Response:
     username = _request_value("acct").strip()
     password = _request_value("pwd")
     if not _valid_account_credentials(username, password):
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
 
     with _connect_database(database_path) as connection:
         account = _find_authenticated_account(connection, username, password)
         if account is None:
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
         player = connection.execute(
             "SELECT uid FROM players WHERE account_id = ? ORDER BY id LIMIT 1",
             (account["id"],),
@@ -969,10 +1000,10 @@ def _auto_login_account(database_path: Path) -> Response:
             (uid,),
         ).fetchone()
         if account is None:
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
         candidate = _password_hash(password, account["password_salt"])
         if not hmac.compare_digest(candidate, account["password_hash"]):
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
     return _protocol_response(4100, {"value": uid})
 
 
@@ -1121,33 +1152,33 @@ def _register_account_player(database_path: Path) -> Response:
     password = _request_value("pwd")
     nick = _request_value("nick").strip()
     if not _valid_account_credentials(username, password):
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
     if not 1 <= len(nick) <= 8 or not nick.isascii() or not nick.isalnum():
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
     try:
         sex = int(_request_value("sex", "1"))
     except ValueError:
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
     if sex not in (0, 1):
-        return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
 
     skin = "100001_100002_100003" if sex == 1 else "100001_100004_100005"
     with _connect_database(database_path) as connection:
         account = _find_authenticated_account(connection, username, password)
         if account is None:
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
         player = connection.execute(
             "SELECT uid, nick FROM players WHERE account_id = ? ORDER BY id LIMIT 1",
             (account["id"],),
         ).fetchone()
         if player is not None and player["nick"] != nick:
-            return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
         if player is None:
             taken = connection.execute(
                 "SELECT 1 FROM players WHERE nick = ?", (nick,)
             ).fetchone()
             if taken is not None:
-                return Response("-1:0", status=200, mimetype="text/plain; charset=utf-8")
+                return Response("-1\t-1:0", status=200, mimetype="text/plain; charset=utf-8")
             uid = f"local-{secrets.token_hex(12)}"
             cursor = connection.execute(
                 "INSERT INTO players (uid, nick, sex, img, account_id) VALUES (?, ?, ?, ?, ?)",
@@ -1374,7 +1405,7 @@ def _player_info(database_path: Path, command_id: int = 510) -> Response:
     with _connect_database(database_path) as connection:
         player = connection.execute(_PLAYER_ROW_SQL, (uid,)).fetchone()
         if player is None:
-            return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=404, mimetype="text/plain; charset=utf-8")
         payload = _player_payload(connection, player)
     return _protocol_response(command_id, payload)
 
@@ -1400,21 +1431,31 @@ def _player_inventory(database_path: Path) -> Response:
         target_raw = _request_value("target", "").strip()
         target = int(target_raw) if target_raw else -1
     except ValueError:
-        return Response("-1:0", status=400, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
     if item_type not in (1, 2, 3) or page < 1 or not 1 <= page_size <= 9:
-        return Response("-1:0", status=400, mimetype="text/plain; charset=utf-8")
+        return Response("-1\t-1:0", status=400, mimetype="text/plain; charset=utf-8")
 
     with _connect_database(database_path) as connection:
         player = connection.execute(
-            "SELECT id, bag_capacity, sex, pending_notice FROM players WHERE uid = ?", (uid,)
+            "SELECT id, bag_capacity, sex, pending_notice, pending_box"
+            " FROM players WHERE uid = ?",
+            (uid,),
         ).fetchone()
         if player is None:
-            return Response("-1:0", status=404, mimetype="text/plain; charset=utf-8")
+            return Response("-1\t-1:0", status=404, mimetype="text/plain; charset=utf-8")
         sex = int(player["sex"] or 0)
         notice = str(player["pending_notice"] or "")
-        if notice:
+        notice_box = None
+        raw_box = str(player["pending_box"] or "") if "pending_box" in player.keys() else ""
+        if raw_box:
+            try:
+                notice_box = json.loads(raw_box)
+            except (TypeError, ValueError):
+                notice_box = None
+        if notice or raw_box:
             connection.execute(
-                "UPDATE players SET pending_notice = '' WHERE id = ?", (player["id"],)
+                "UPDATE players SET pending_notice = '', pending_box = '' WHERE id = ?",
+                (player["id"],)
             )
         if item_type == 3:
             # Sex filtering has to happen before paging, otherwise page 1 shows
@@ -1493,6 +1534,10 @@ def _player_inventory(database_path: Path) -> Response:
     if notice:
         # 只在有一次性使用结果时出现，避免给所有背包请求加一个空字段。
         payload["notice"] = notice
+    if notice_box:
+        # 开蛋/开箱开出的宠物：客户端拿不到 50 的响应，用这条弹出宠物图标，
+        # 点一下发 12（PET_BASE_INFO_KEY）进宠物面板。
+        payload["notice_box"] = notice_box
     return _protocol_response(22, payload)
 
 
@@ -1775,7 +1820,7 @@ def _shop_buy(database_path: Path) -> Response:
     return _protocol_response(29, {"value": "ok"})
 
 
-def _prop_effect_rules(item_id: int) -> dict[str, int] | None:
+def _prop_effect_rules(item_id: int) -> dict[str, float] | None:
     """Read a prop's effect straight from prop.txt (the shipped authority).
 
     prop.txt columns: id, name, iconId, **type** (effect kind), **value** (effect
@@ -1787,6 +1832,10 @@ def _prop_effect_rules(item_id: int) -> dict[str, int] | None:
     the bag. The local catalog it consulted also only covered 13 ids and had
     10011 at 1,000,000 while prop.txt says 10,000 (a 100x error). Reading the
     table fixes both, and lets every effect-bearing prop work instead of 13.
+
+    `value` is a decimal on 狩猎秘籍 (10027 = 1.5), so it is parsed as a float and
+    both `value` (truncated int, for the integer effects) and `ratio` (exact float,
+    for the multiplier effects) are returned.
     """
     record = config_tables.prop_record(item_id)
     if record is None:
@@ -1797,10 +1846,53 @@ def _prop_effect_rules(item_id: int) -> dict[str, int] | None:
         return int(raw) if raw.lstrip("-").isdigit() else 0
 
     kind = number("type")
-    amount = number("value")
-    if kind == 0 or amount == 0:
+    raw_amount = str(record.get("value", "") or "").strip()
+    try:
+        ratio = float(raw_amount) if raw_amount else 0.0
+    except ValueError:
+        ratio = 0.0
+    if kind == 0 or ratio == 0:
         return None
-    return {"type": kind, "value": amount, "use_type": number("useType")}
+    return {
+        "type": kind,
+        "value": int(ratio),
+        "ratio": ratio,
+        "use_type": number("useType"),
+    }
+
+
+def _set_player_buff(
+    connection: sqlite3.Connection,
+    player_id: int,
+    kind: int,
+    value: float,
+    expire_at: int | None = None,
+) -> None:
+    """写入/续期一条限时增益；同类叠加时取较晚的到期时间。"""
+    until = int(expire_at if expire_at is not None else time.time() + LOCAL_BUFF_DURATION)
+    connection.execute(
+        """
+        INSERT INTO player_buffs (player_id, kind, value, expire_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(player_id, kind) DO UPDATE SET
+            value = excluded.value,
+            expire_at = MAX(expire_at, excluded.expire_at)
+        """,
+        (int(player_id), int(kind), float(value), until),
+    )
+
+
+def _player_buffs(connection: sqlite3.Connection, player_id: int) -> dict[int, float]:
+    """未过期的限时增益：{prop.txt type: value}。"""
+    try:
+        rows = connection.execute(
+            "SELECT kind, value FROM player_buffs WHERE player_id = ? AND expire_at > ?",
+            (int(player_id), int(time.time())),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {int(row["kind"]): float(row["value"]) for row in rows}
+
 
 
 def _pet_by_star(min_star: int) -> int | None:
@@ -1814,8 +1906,12 @@ def _pet_by_star(min_star: int) -> int | None:
     return random.choice(pool) if pool else None
 
 
-def _insert_gift_pet(connection, player, pet_id: int) -> bool:
-    """Put one pet of `pet_id` into the roster; False when the roster is full."""
+def _insert_gift_pet(connection, player, pet_id: int) -> int | None:
+    """Put one pet of `pet_id` into the roster.
+
+    Returns the new `pets.id` (so the client can open the pet panel from the
+    "开出宠物" popup) or None when the roster is full.
+    """
     capacity = player["pet_capacity"] if "pet_capacity" in player.keys() else None
     if capacity is None:
         capacity = connection.execute(
@@ -1825,12 +1921,12 @@ def _insert_gift_pet(connection, player, pet_id: int) -> bool:
         "SELECT COUNT(*) FROM pets WHERE player_id=?", (player["id"],)
     ).fetchone()[0]
     if held >= capacity:
-        return False
+        return None
     record = config_tables._table("pet.txt").get(pet_id) or {}
     icon_raw = str(record.get("iconId", "") or "").strip()
     star_raw = str(record.get("star", "") or "").strip()
     skills = str(record.get("skills", "") or "").strip() or "101:5101"
-    connection.execute(
+    cursor = connection.execute(
         """INSERT INTO pets (player_id, pet_id, lv, star, pro, icon, skills,
                              generation, buffs)
            VALUES (?, ?, 1, ?, 1, ?, ?, 1, ?)""",
@@ -1839,7 +1935,7 @@ def _insert_gift_pet(connection, player, pet_id: int) -> bool:
          int(icon_raw) if icon_raw.isdigit() else pet_id,
          skills, _buffs_for_pet(pet_id, 1)),
     )
-    return True
+    return int(cursor.lastrowid)
 
 
 # LOCAL DEFAULT box payouts. prop.txt's `value` selects the tier; eggs/wish coins
@@ -1865,9 +1961,13 @@ def _open_prop_box(connection, player, amount: int) -> dict | None:
         star_need = 4
     if star_need is not None:
         pet_id = _pet_by_star(int(star_need))
-        if pet_id is None or not _insert_gift_pet(connection, player, pet_id):
+        if pet_id is None:
             return None
-        return {"box_type": 2, "id": pet_id, "num": 1, "point": 0, "crystal": 0}
+        pet_index = _insert_gift_pet(connection, player, pet_id)
+        if pet_index is None:
+            return None
+        return {"box_type": 2, "id": pet_id, "num": 1, "point": 0, "crystal": 0,
+                "index": pet_index}
     silver = LOCAL_BOX_SILVER.get(int(amount), 500)
     connection.execute(
         "UPDATE players SET point = point + ? WHERE id = ?", (silver, player["id"])
@@ -1897,7 +1997,8 @@ def _player_use_goods(database_path: Path) -> Response:
     with _connect_database(database_path) as connection:
         player = connection.execute(
             """
-            SELECT id, ht_ap, max_ht_ap, pet_capacity, bag_capacity
+            SELECT id, ht_ap, max_ht_ap, pet_capacity, bag_capacity,
+                   explore_ap, max_explore_ap
             FROM players WHERE uid = ?
             """,
             (uid,),
@@ -1914,9 +2015,15 @@ def _player_use_goods(database_path: Path) -> Response:
         if row is None or row["quantity"] <= 0:
             return _pet_error(400)
         prop = _prop_effect_rules(row["item_id"])
-        if prop is None or row["team"] not in (1, 2):
-            # Items this local server has no rule for stay in the bag untouched.
+        if row["team"] not in (1, 2):
             return _pet_error(100)
+        if prop is None:
+            # prop.txt 里没有这一行 = 不是可使用的道具；有行但没有效果值
+            # (宠物名片/奇异口袋/扩建证书，value=0) 是要走专门界面或还没做的，
+            # 用 417「该道具不能直接使用」而不是 100「非法操作」。
+            if config_tables.prop_record(row["item_id"]) is None:
+                return _pet_error(100)
+            return _pet_error(417)
         effect = prop["type"]
         amount = prop["value"]
         if row["item_type"] != effect or row["item_type"] == 0:
@@ -1948,7 +2055,9 @@ def _player_use_goods(database_path: Path) -> Response:
             room = max(0, int(player["max_ht_ap"]) - int(player["ht_ap"]))
             used = min(num, room // amount) if amount > 0 else 0
             if used <= 0:
-                return _pet_error(100)
+                # 415 =「现在体力充沛，不需要使用」；以前回 100「非法操作」，
+                # 玩家看不出是"满了"，只觉得道具点了没反应。
+                return _pet_error(415)
             gained = used * amount
             new_ap = int(player["ht_ap"]) + gained
             connection.execute(
@@ -1956,6 +2065,40 @@ def _player_use_goods(database_path: Path) -> Response:
             )
             payload = {"value": gained, "ht_ap": new_ap}
             text = f"体力 +{gained}"
+        elif effect == 26:  # 探险饮料：恢复探险行动值
+            max_ap = int(player["max_explore_ap"] or LOCAL_DEFAULT_EXPLORE_AP)
+            room = max(0, max_ap - int(player["explore_ap"] or 0))
+            used = min(num, room // amount) if amount > 0 else 0
+            if used <= 0:
+                return _pet_error(415)
+            gained = used * amount
+            connection.execute(
+                "UPDATE players SET explore_ap = explore_ap + ? WHERE id = ?",
+                (gained, player["id"]),
+            )
+            payload = {"value": gained}
+            text = f"探险行动值 +{gained}"
+        elif effect in (LOCAL_BUFF_ARENA_CRYSTAL, LOCAL_BUFF_STAT_BONUS,
+                        LOCAL_BUFF_HUNT_EXP):  # 限时增益：荣誉勋章 / 幸运四叶草 / 狩猎秘籍
+            ratio = float(prop["ratio"] or 0)
+            _set_player_buff(connection, player["id"], effect, ratio)
+            # prop.txt 这三行都写着"狩猎行动值上限+5"，按使用个数累加上限。
+            bonus_ap = LOCAL_BUFF_MAX_HT_AP * used
+            new_max_ap = int(player["max_ht_ap"]) + bonus_ap
+            connection.execute(
+                "UPDATE players SET max_ht_ap = ? WHERE id = ?",
+                (new_max_ap, player["id"]),
+            )
+            if effect == LOCAL_BUFF_STAT_BONUS:
+                gain = f"全能力 +{int(ratio)} 点"
+            else:
+                gain = f"{'擂台水晶' if effect == LOCAL_BUFF_ARENA_CRYSTAL else '狩猎经验'} ×{ratio:g}"
+            payload = {"value": int(ratio), "max_ht_ap": new_max_ap}
+            text = (
+                f"{gain}（10 天），狩猎行动值上限 +{bonus_ap}"
+                if bonus_ap
+                else f"{gain}（10 天）"
+            )
         elif effect == 5:  # pet exp
             if target <= 0:
                 return _pet_error(506)
@@ -2013,7 +2156,9 @@ def _player_use_goods(database_path: Path) -> Response:
                 boxes.append(box)
             used = len(boxes)
             if used == 0:
-                return _pet_error(300)   # bag or roster full
+                # 500 =「宠物数量已达最大」；300 是"背包已满"，开蛋失败时提示背包满
+                # 会把人带偏（玩家以为要清背包，其实是要放生/扩建宠物栏）。
+                return _pet_error(500)
             total_point = sum(int(box.get("point") or 0) for box in boxes)
             pet_ids = [
                 int(box["id"]) for box in boxes
@@ -2028,7 +2173,10 @@ def _player_use_goods(database_path: Path) -> Response:
             # 旧客户端只认识单个 box 对象，保留第一个；新客户端读 text/boxes。
             payload = {"value": boxes[0], "boxes": boxes}
         else:
-            return _pet_error(100)
+            # 417 =「该道具不能直接使用」：宠物名片(4)/奇异口袋(10)/扩建证书(13) 这类
+            # 要走专门界面或还没实现的道具，以前回 100「非法操作，没有通过验证」，
+            # 看起来像服务端校验出错，实际是"这个还没做"。
+            return _pet_error(417)
 
         if used >= int(row["quantity"]):
             connection.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
@@ -2040,9 +2188,19 @@ def _player_use_goods(database_path: Path) -> Response:
         ht_ap = connection.execute(
             "SELECT ht_ap FROM players WHERE id = ?", (player["id"],)
         ).fetchone()["ht_ap"]
+        # 开蛋/开箱开出宠物时，把这一格的奖励一并留给下一次 22：客户端拿不到
+        # 50 的响应也能弹出宠物图标，点它进宠物面板（12 号）。
+        pending_box = ""
+        if effect == 15 and boxes:
+            # 一次开 N 个蛋可能开出 N 只宠物，全部带回去，客户端一次列出来。
+            pet_boxes = [
+                box for box in boxes if int(box.get("box_type") or 0) == 2
+            ]
+            if pet_boxes:
+                pending_box = json.dumps(pet_boxes, ensure_ascii=False)
         connection.execute(
-            "UPDATE players SET pending_notice = ? WHERE id = ?",
-            (text, player["id"]),
+            "UPDATE players SET pending_notice = ?, pending_box = ? WHERE id = ?",
+            (text, pending_box, player["id"]),
         )
     payload["type"] = effect
     payload["used"] = used
@@ -2903,6 +3061,7 @@ def _battle_side(
     hunter_stats: tuple[int, int, int],
     pet_rows,
     defenders,
+    stat_bonus: int = 0,
 ) -> tuple[list[dict], list[dict], dict]:
     """Shared attacker/defender builder for HUNT(6), ARENA(24) and COPY(74).
 
@@ -2926,9 +3085,15 @@ def _battle_side(
     needs to compute each swing (the hunter participates too).
     """
     combat: dict[str, dict] = {"att": {}, "def": {}}
+    # 幸运四叶草（prop.txt type 18）：出战的猎人和宠物"所有能力提升 value 点"。
+    # 战斗只读 hp/att/def/speed，强化值/六维的完整口径留到阶段 3 再统一。
+    bonus = max(0, int(stat_bonus or 0))
     hunter_hp, hunter_att, hunter_def = hunter_stats
+    hunter_hp += bonus
+    hunter_att += bonus
+    hunter_def += bonus
     combat["att"][0] = {"hp": hunter_hp, "att": hunter_att, "def": hunter_def,
-                        "speed": int(ROLE_BASE_STATS.get("speed", 10))}
+                        "speed": int(ROLE_BASE_STATS.get("speed", 10)) + bonus}
     lead = {
         "team": 1, "code": 0, "is_pet": 0, "id": 0, "name": hunter_name,
         "lv": hunter_lv, "pre_lv": hunter_lv, "hp": hunter_hp, "img": hunter_skin,
@@ -2936,8 +3101,11 @@ def _battle_side(
 
     def attacker(row, code: int) -> dict:
         hp, att, defence = _combat_stats(row)
+        hp += bonus
+        att += bonus
+        defence += bonus
         combat["att"][code] = {"hp": hp, "att": att, "def": defence,
-                               "speed": int(_pet_base_stats(row["id"])["speed"])}
+                               "speed": int(_pet_base_stats(row["id"])["speed"]) + bonus}
         return {
             "team": 1, "code": code, "is_pet": 1, "index": row["index"],
             "id": row["id"], "name": _pet_name(row["id"], row["name"]),
@@ -3121,6 +3289,7 @@ def _hunter_fight(database_path: Path) -> Response:
         c.execute("UPDATE players SET ht_ap=ht_ap-1 WHERE id=?",(p["id"],))
         ap=p["ht_ap"]-1
         worn=_worn_equipment(c,p["id"])
+        buffs=_player_buffs(c,p["id"])
         rows=c.execute(f"SELECT id AS 'index',pet_id AS id,icon,name,lv,pro_hp,pro_speed,pro_phy_att,pro_mag_att,pro_phy_def,pro_mag_def FROM pets WHERE player_id=? AND battle_state=0 AND is_locked=0 AND {PET_READY_SQL} ORDER BY id LIMIT 2",(p["id"],)).fetchall()
         # Resolve the replay BEFORE paying anything: the outcome decides the payout.
         att_list, def_list, combat = _battle_side(
@@ -3130,6 +3299,7 @@ def _hunter_fight(database_path: Path) -> Response:
             hunter_stats=_hunter_combat_stats(p, worn),
             pet_rows=rows,
             defenders=monsters,
+            stat_bonus=int(buffs.get(LOCAL_BUFF_STAT_BONUS, 0) or 0),
         )
         record=_battle_record(att_list, def_list, combat)
         is_win=_record_is_win(record)
@@ -3145,6 +3315,10 @@ def _hunter_fight(database_path: Path) -> Response:
         if elite_fight:
             base_exp *= LOCAL_ELITE_REWARD_MULT
         exp_reward=base_exp if is_win else base_exp // 10
+        # 狩猎秘籍（prop.txt type 19）：10 天内狩猎经验 ×value。
+        hunt_exp_mult=float(buffs.get(LOCAL_BUFF_HUNT_EXP, 0) or 0)
+        if hunt_exp_mult > 0:
+            exp_reward=int(round(exp_reward * hunt_exp_mult))
         point_reward=(LOCAL_HUNT_POINT_REWARD*(sum(m["lv"] for m in monsters) or 1)
                       * (LOCAL_ELITE_REWARD_MULT if elite_fight else 1)
                       if is_win else 0)
@@ -4778,6 +4952,7 @@ def _fight_payload(database_path: Path, defenders):
         if p is None:
             return None
         worn = _worn_equipment(c, p["id"])
+        buffs = _player_buffs(c, p["id"])
         rows = c.execute(
             f"""SELECT id AS "index", pet_id AS id, icon, name, lv,
                       pro_hp, pro_speed, pro_phy_att, pro_mag_att, pro_phy_def, pro_mag_def
@@ -4792,6 +4967,7 @@ def _fight_payload(database_path: Path, defenders):
         hunter_stats=_hunter_combat_stats(p, worn),
         pet_rows=rows,
         defenders=defenders,
+        stat_bonus=int(buffs.get(LOCAL_BUFF_STAT_BONUS, 0) or 0),
     )
     return att_list, def_list, _battle_record(att_list, def_list, combat)
 
@@ -6174,9 +6350,15 @@ def _pet_error(error_id: int, status: int = 200) -> Response:
 
     HTTP 200 keeps Flash's URLLoader on the data path so the client shows the
     bundled error text instead of treating it as a network failure.
+
+    The body MUST be `<cmd>\\t<data>`: APetHunter.as:143-147 splits the body on a
+    tab, shifts the command, then runs GameUtil.isError() over the *second* field.
+    A bare `-1:300` has no tab, so the data field became "null", isError() found
+    nothing and JSON.parse("null") handed `null` to the current screen — every
+    error was swallowed and the player only saw the item stay in the bag.
     """
     return Response(
-        f"-1:{error_id}", status=status, mimetype="text/plain; charset=utf-8"
+        f"-1\t-1:{error_id}", status=status, mimetype="text/plain; charset=utf-8"
     )
 
 
@@ -6271,6 +6453,11 @@ def _player_pets(database_path: Path) -> Response:
         total = connection.execute(
             "SELECT COUNT(*) FROM pets WHERE player_id = ?", (player["id"],)
         ).fetchone()[0]
+        owned_cards = connection.execute(
+            "SELECT COALESCE(SUM(quantity), 0) FROM inventory"
+            " WHERE player_id = ? AND team = 1 AND item_id = ?",
+            (player["id"], LOCAL_PET_CAPACITY_CARD_ID),
+        ).fetchone()[0]
 
     pets = []
     for row in rows:
@@ -6287,10 +6474,11 @@ def _player_pets(database_path: Path) -> Response:
         {
             "pet_num": total,
             "max_pet_num": capacity,
-            # Local placeholders: capacity expansion is a free local action, so
-            # the owned card count mirrors the requirement. No item is consumed.
-            "add_pet_card_num": 1,
-            "own_card_num": 1 if can_expand else 0,
+            # PetListUI.as:177-198 用这两个数判断"够不够证书"：够就弹 TipItem(3)
+            # 让玩家确认后发 40，不够就只弹图标。以前 own_card_num 写死成
+            # 1 if can_expand，于是没有证书也能扩建。
+            "add_pet_card_num": LOCAL_PET_CAPACITY_CARD_COST,
+            "own_card_num": int(owned_cards) if can_expand else 0,
             "pets": pets,
         },
     )
@@ -6908,6 +7096,13 @@ def _pet_synthesis(database_path: Path) -> Response:
 
 
 def _pet_expand_capacity(database_path: Path) -> Response:
+    """ADD_PET_COUNT (40) — 扩建宠物栏。
+
+    PetListUI.as:177-198 的"上锁格子"提示会显示 `add_pet_card_num`（需要的证书）
+    与 `own_card_num`（背包里的扩建证书 10013），够数才让点确认发 40。以前 40 号
+    完全不扣道具、11 号又谎报 own_card_num=1，于是宠物栏可以无限免费扩建。
+    现在按 LOCAL_PET_CAPACITY_CARD_COST 扣 10013，不够回 205「需要的证书不够」。
+    """
     uid = _request_value("uid")
     with _connect_database(database_path) as connection:
         player = connection.execute(
@@ -6917,6 +7112,23 @@ def _pet_expand_capacity(database_path: Path) -> Response:
             return _pet_error(103)
         if player["pet_capacity"] >= LOCAL_MAX_PET_CAPACITY:
             return _pet_error(204)
+        card = connection.execute(
+            """
+            SELECT id, quantity FROM inventory
+            WHERE player_id = ? AND team = 1 AND item_id = ?
+            ORDER BY quantity DESC, id LIMIT 1
+            """,
+            (player["id"], LOCAL_PET_CAPACITY_CARD_ID),
+        ).fetchone()
+        if card is None or int(card["quantity"]) < LOCAL_PET_CAPACITY_CARD_COST:
+            return _pet_error(205)
+        if int(card["quantity"]) <= LOCAL_PET_CAPACITY_CARD_COST:
+            connection.execute("DELETE FROM inventory WHERE id = ?", (card["id"],))
+        else:
+            connection.execute(
+                "UPDATE inventory SET quantity = quantity - ? WHERE id = ?",
+                (LOCAL_PET_CAPACITY_CARD_COST, card["id"]),
+            )
         capacity = min(
             player["pet_capacity"] + LOCAL_PET_CAPACITY_STEP,
             LOCAL_MAX_PET_CAPACITY,
@@ -6926,7 +7138,7 @@ def _pet_expand_capacity(database_path: Path) -> Response:
             (capacity, player["id"]),
         )
     # Client re-requests the pet list (11) after this response.
-    return _protocol_response(40, {"value": "ok"})
+    return _protocol_response(40, {"value": "ok", "max_pet_num": capacity})
 
 
 def create_app(config: dict | None = None) -> Flask:
@@ -7225,7 +7437,7 @@ def create_app(config: dict | None = None) -> Flask:
             body = response.get_data(as_text=True)
         except (RuntimeError, AttributeError):
             return response
-        if not body.startswith("-1:"):
+        if not (body.startswith("-1\t") or body.startswith("-1:")):
             return response
         app.logger.warning(
             "PROTOCOL_ERROR showId=%s m=%s error=%s uid=...%s fields=%s",

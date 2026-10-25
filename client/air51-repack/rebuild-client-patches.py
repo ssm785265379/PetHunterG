@@ -42,11 +42,14 @@ def import_class(root: Path, name: str, src_swf: Path, out_swf: Path) -> Path:
     dst.mkdir(parents=True)
     shutil.copy2(root / "scripts" / "cc" / "lv1" / "game" / "ui" / f"{name}.as",
                  dst / f"{name}.as")
-    subprocess.run([str(JAVA), "-jar", str(FFDEC), "-importScript",
-                    str(src_swf), str(out_swf), str(only)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run([str(JAVA), "-jar", str(FFDEC), "-importScript",
+                    str(src_swf), str(out_swf), str(only)], capture_output=True,
+                   text=True)
     if not out_swf.exists():
-        raise SystemExit(f"import failed: {name}")
+        raise SystemExit(
+            f"import failed: {name} (exit {result.returncode})\n"
+            f"{result.stdout[-4000:]}\n{result.stderr[-4000:]}"
+        )
     return out_swf
 
 
@@ -197,7 +200,8 @@ def main() -> int:
     patch_once(
         "   import flash.display.BitmapData;\n   import flash.events.MouseEvent;",
         "   import flash.display.BitmapData;\n   import flash.display.Shape;\n"
-        "   import flash.events.Event;\n   import flash.events.MouseEvent;",
+        "   import flash.events.Event;\n   import flash.events.MouseEvent;\n"
+        "   import flash.geom.Rectangle;\n   import flash.text.TextFormat;",
         "imports",
     )
     patch_once(
@@ -206,9 +210,11 @@ def main() -> int:
 
       private var _use_popup:GameObject;
 
-      private var _use_num_txt:Text;
-
       private var _use_count_txt:Text;
+
+      private var _use_minus_btn:Button;
+
+      private var _use_plus_btn:Button;
 
       private var _use_count:int;
 
@@ -218,13 +224,53 @@ def main() -> int:
 
       private var _use_target:int;
 
-      private var _use_item_id:int;""",
+      private var _use_item_id:int;
+
+      private var _pet_popup:GameObject;
+
+      private static var _pending_pet_boxes:Array;
+
+      private var _pet_popup_items:Vector.<IconItem>;
+
+      private var _pet_popup_indices:Array;
+
+      private var _pet_popup_grid:GameObject;
+
+      private var _pet_scroll:Number;
+
+      private var _pet_scroll_max:Number;
+
+      private var _pet_view_h:Number;
+
+      private var _pet_grid_w:Number;
+
+      private var _pet_drag_start:Number;
+
+      private var _pet_drag_scroll:Number;
+
+      private var _pet_dragged:Boolean;""",
         "fields",
     )
     patch_once(
         "         super.release();\n         _items.length = 0;",
-        "         super.release();\n         hideUsePopup();\n         _items.length = 0;",
+        "         super.release();\n         hideUsePopup();\n"
+        "         hidePetRewardPopup();\n         _items.length = 0;",
         "release",
+    )
+    # 素材/不可直接使用的道具（prop.txt useType 0，客户端画成蓝底）以前
+    # PropItem 直接 mouseEnabled=false，点了毫无反应；现在可点，点了给出提示。
+    patch_once(
+        "      private function onMouseUpItem(param1:MouseEvent) : void\n      {\n"
+        "         var _loc3_:PropItem = PropItem(param1.target);",
+        "      private function onMouseUpItem(param1:MouseEvent) : void\n      {\n"
+        "         var _loc3_:PropItem = PropItem(param1.target);\n"
+        "         if(_loc3_.data != null && int(_loc3_.data.on) == -1)\n"
+        "         {\n"
+        "            Navigator.getInstance().popUI(AlertUI.show("
+        "GameUtil.getConfigValue(\"error\",\"417\",\"value\"),\"\",2),true);\n"
+        "            return;\n"
+        "         }",
+        "material tap",
     )
     patch_once(
         """               else
@@ -242,7 +288,9 @@ def main() -> int:
     )
     patch_once(
         "      private function onMouseUpPrav(param1:MouseEvent) : void",
-        snippet + "      private function onMouseUpPrav(param1:MouseEvent) : void",
+        snippet
+        + (REPO / "patches" / "BagListUI-pet-reward.as3").read_text(encoding="utf-8")
+        + "      private function onMouseUpPrav(param1:MouseEvent) : void",
         "methods",
     )
     patch_once(
@@ -264,9 +312,33 @@ def main() -> int:
         "            {\n"
         "               Navigator.getInstance().popUI(AlertUI.show(param2.notice,\"\",1),true);\n"
         "            }\n"
+        "            if(param2.notice_box)\n"
+        "            {\n"
+        "               _pending_pet_boxes = param2.notice_box is Array"
+        " ? param2.notice_box as Array : [param2.notice_box];\n"
+        "            }\n"
+        "            if(_pending_pet_boxes != null && _pending_pet_boxes.length > 0)\n"
+        "            {\n"
+        "               try\n"
+        "               {\n"
+        "                  showPetRewardPopup(_pending_pet_boxes);\n"
+        "               }\n"
+        "               catch(petError:Error)\n"
+        "               {\n"
+        "               }\n"
+        "            }\n"
         "         }",
         "notice",
     )
+    p.write_text(src, encoding="utf-8")
+
+    # 8) PropItem: 素材（data.on == -1）也要能点，否则点了完全没反馈
+    p = root / "scripts" / "cc" / "lv1" / "game" / "item" / "PropItem.as"
+    src = p.read_text(encoding="utf-8")
+    old = "               this.mouseEnabled = !_isOpen && data.on == -1 ? false : true;"
+    if src.count(old) != 1:
+        raise SystemExit("propitem mouseEnabled anchor missing")
+    src = src.replace(old, "               this.mouseEnabled = true;")
     p.write_text(src, encoding="utf-8")
 
     current = BASE
@@ -275,6 +347,20 @@ def main() -> int:
         out = REPO / "build" / "input-explore" / f"step-{name}.swf"
         current = import_class(root, name, current, out)
         print(f"  {name}: {current.stat().st_size} bytes")
+    # PropItem 在 item 包下，import_class 只认 ui 目录，单独走一次。
+    only = Path(tempfile.mkdtemp())
+    dst = only / "scripts" / "cc" / "lv1" / "game" / "item"
+    dst.mkdir(parents=True)
+    shutil.copy2(root / "scripts" / "cc" / "lv1" / "game" / "item" / "PropItem.as",
+                 dst / "PropItem.as")
+    out = REPO / "build" / "input-explore" / "step-PropItem.swf"
+    result = subprocess.run([str(JAVA), "-jar", str(FFDEC), "-importScript",
+                             str(current), str(out), str(only)],
+                            capture_output=True, text=True)
+    if not out.exists():
+        raise SystemExit(f"import failed: PropItem\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
+    current = out
+    print(f"  PropItem: {current.stat().st_size} bytes")
     shutil.copy2(current, FINAL)
     print("final:", FINAL.stat().st_size, "bytes")
     return 0
