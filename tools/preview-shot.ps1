@@ -23,7 +23,11 @@ param(
     [string]$Name  = 'shot',
     [string]$Path  = '',
     [int]$WaitMs   = 450,
-    [switch]$ClientArea
+    [switch]$ClientArea,
+    # 桌面窗口在 150% 缩放下会被抓成 960x1440；给 640x960 就统一缩放回去，
+    # 方便不同 lane 的截图直接对比。
+    [int]$Width   = 0,
+    [int]$Height  = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -160,6 +164,23 @@ try {
 } finally {
     $gfx.Dispose()
 }
+
+$capturedW = $w; $capturedH = $h
+if ($Width -gt 0 -and $Height -gt 0 -and ($w -ne $Width -or $h -ne $Height)) {
+    $scaled = New-Object System.Drawing.Bitmap($Width, $Height)
+    $sg = [System.Drawing.Graphics]::FromImage($scaled)
+    try {
+        $sg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $sg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $sg.DrawImage($bmp, 0, 0, $Width, $Height)
+    } finally {
+        $sg.Dispose()
+    }
+    $bmp.Dispose()
+    $bmp = $scaled
+    $w = $Width; $h = $Height
+}
+
 $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
 
 # cheap sanity check: sample 40x40 points, count non-black ones
@@ -175,7 +196,8 @@ for ($yy = 0; $yy -lt $h; $yy += $sy) {
 $bmp.Dispose()
 
 $ratio = if ($total -gt 0) { 100.0 * $lit / $total } else { 0 }
-Write-Host ("[ok] {0}  ({1}x{2}, non-black {3:N1}%)" -f $Path, $w, $h, $ratio) -ForegroundColor Green
+$note = if ($capturedW -ne $w -or $capturedH -ne $h) { " (captured ${capturedW}x${capturedH}, scaled)" } else { "" }
+Write-Host ("[ok] {0}  ({1}x{2}{3}, non-black {4:N1}%)" -f $Path, $w, $h, $note, $ratio) -ForegroundColor Green
 if ($ratio -lt 1) {
     Write-Host "[!] almost entirely black -- window probably not painted/occluded, capture again" -ForegroundColor Yellow
 }
