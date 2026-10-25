@@ -1808,8 +1808,13 @@ def test_hunt_and_explore_readonly_and_battle_response(tmp_path: Path):
 
 def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
     # 77/78 list candidates, 79 previews, 80 fuses. IntegrationListUI.as:227-234
-    # reads index/id/icon/loc, IntegrationInfoUI reads the merged stats plus the
+    # reads index/id/icon/loc, IntegrationInfoUI reads the product stats plus the
     # fee, and IntegrationResultUI reads index/id/icon.
+    #
+    # help.txt 7 rewrote the rule: only gold equipment of the same category can
+    # fuse, the fee is paid in 蓝色晶石 (prop 10032, error 423) instead of gold,
+    # a same-value pair keeps the main piece, and the original traits move to the
+    # result. 25002/25012 are both male armour worth 3600 gold.
     database = tmp_path / "game.sqlite3"
     client = create_app({"TESTING": True, "DATABASE": database}).test_client()
     uid = _create_local_player(client, "SynthEq")
@@ -1817,23 +1822,31 @@ def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
         player_id = connection.execute(
             "SELECT id FROM players WHERE uid = ?", (uid,)
         ).fetchone()[0]
-        connection.execute("UPDATE players SET money = 100000 WHERE id = ?", (player_id,))
+        for item_id, buffs in ((25002, "12101"), (25012, "30001")):
+            record = config_tables.equip_record(item_id)
+            stats = config_tables.equip_stats(record)
+            connection.execute(
+                "INSERT INTO inventory (player_id, item_id, team, quantity, icon,"
+                " item_type, use_type, level, star, pro, hp, speed, phy_att,"
+                " mag_att, phy_def, mag_def, buffs)"
+                " VALUES (?, ?, 3, 1, ?, ?, 1, 1, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    player_id, item_id, config_tables.equip_icon(record),
+                    config_tables.equip_slot(record), config_tables.equip_star(record),
+                    stats["hp"], stats["speed"], stats["phy_att"], stats["mag_att"],
+                    stats["phy_def"], stats["mag_def"], buffs,
+                ),
+            )
+        connection.execute(
+            "INSERT INTO inventory (player_id, item_id, team, quantity, icon,"
+            " item_type, use_type) VALUES (?, 10032, 1, 20, 10032, 23, 0)",
+            (player_id,),
+        )
         ids = [r[0] for r in connection.execute(
-            "SELECT id FROM inventory WHERE player_id=? AND team=3 ORDER BY id LIMIT 2",
+            "SELECT id FROM inventory WHERE player_id=? AND item_id IN (25002, 25012)"
+            " ORDER BY id",
             (player_id,),
         )]
-        if len(ids) < 2:
-            connection.execute(
-                "INSERT INTO inventory (player_id, item_id, team, quantity, icon, item_type,"
-                " level, star, hp, speed, phy_att, mag_att, phy_def, mag_def)"
-                " SELECT player_id, 20002, 3, 1, 20002, 1, 1, 1, 0, 0, 0, 0, 20, 20"
-                " FROM inventory WHERE player_id=? LIMIT 1",
-                (player_id,),
-            )
-            ids = [r[0] for r in connection.execute(
-                "SELECT id FROM inventory WHERE player_id=? AND team=3 ORDER BY id LIMIT 2",
-                (player_id,),
-            )]
         connection.commit()
     main_id, vice_id = ids[0], ids[1]
 
@@ -1842,7 +1855,8 @@ def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
                                        "ttype": "2", "loc": "0", "p": "1", "n": "9"})
     )
     assert command == 77
-    assert main_list["list"], "the main picker needs candidates"
+    assert [row["id"] for row in main_list["list"]] == [25002, 25012], \
+        "the non-gold starter piece must not be a fusion candidate"
     for row in main_list["list"]:
         assert {"index", "id", "icon", "loc"} <= set(row)
 
@@ -1859,22 +1873,18 @@ def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
             "SELECT hp, speed, phy_att, mag_att, phy_def, mag_def FROM inventory WHERE id=?",
             (main_id,),
         ).fetchone()
-        vice_stats = connection.execute(
-            "SELECT hp, speed, phy_att, mag_att, phy_def, mag_def FROM inventory WHERE id=?",
-            (vice_id,),
-        ).fetchone()
-    expected = [
-        max(main_stats[i], vice_stats[i]) + min(main_stats[i], vice_stats[i]) // 4
-        for i in range(6)
-    ]
+    expected = list(main_stats)
 
     command, preview = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "79", "uid": uid,
                                        "main": str(main_id), "vice": str(vice_id)})
     )
     assert command == 79
+    assert preview["id"] == 25002, "same-value fusion keeps the main piece"
     assert [preview[k] for k in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")] == expected
-    assert preview["need_money"] > 0
+    assert preview["need_money"] == 0 and preview["need_crystal"] == 0
+    # help 7-3: 20% of 3600 gold = 720 gold; 10032 sells for 100 gold -> 8 stones.
+    assert preview["need_goods"] == [{"id": 10032, "need_num": 8, "own_num": 20}]
 
     command, result = _envelope(
         client.post("/flash.do", data={"m": "show", "showId": "80", "uid": uid,
@@ -1891,8 +1901,12 @@ def test_equipment_synthesis_merges_and_consumes_the_vice_piece(tmp_path: Path):
             (main_id,),
         ).fetchone()) == expected
         assert connection.execute(
-            "SELECT money FROM players WHERE id = ?", (player_id,)
-        ).fetchone()[0] == 100000 - preview["need_money"]
+            "SELECT buffs FROM inventory WHERE id = ?", (main_id,)
+        ).fetchone()[0] == "12101:30001", "help 7-5: the vice traits move to the result"
+        assert connection.execute(
+            "SELECT quantity FROM inventory WHERE player_id=? AND item_id=10032",
+            (player_id,),
+        ).fetchone()[0] == 20 - preview["need_goods"][0]["need_num"]
 
 
 def test_forge_list_detail_and_make_transaction(tmp_path: Path):

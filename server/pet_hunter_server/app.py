@@ -739,6 +739,7 @@ def _initialize_database(database_path: Path) -> None:
                 phy_def INTEGER NOT NULL DEFAULT 0,
                 mag_def INTEGER NOT NULL DEFAULT 0,
                 equipped INTEGER NOT NULL DEFAULT 0,
+                buffs TEXT NOT NULL DEFAULT '',
                 UNIQUE (player_id, item_id)
             )
             """
@@ -771,6 +772,10 @@ def _initialize_database(database_path: Path) -> None:
             ("phy_def", "ALTER TABLE inventory ADD COLUMN phy_def INTEGER NOT NULL DEFAULT 0"),
             ("mag_def", "ALTER TABLE inventory ADD COLUMN mag_def INTEGER NOT NULL DEFAULT 0"),
             ("equipped", "ALTER TABLE inventory ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0"),
+            # 附魔结果按 id 存进 buffs（冒号分隔，和 pets.buffs 同一形状）：
+            # 客户端 EquipInfoUI/EnchantInfoUI 的“特性”一栏读 param2.buffs[].id，
+            # 而 equip.txt 的静态 skills 是“技能”栏，两者不能混用。
+            ("buffs", "ALTER TABLE inventory ADD COLUMN buffs TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in inventory_columns:
                 connection.execute(ddl)
@@ -1631,6 +1636,20 @@ def _equipment_skills(worn: dict[int, sqlite3.Row]) -> list[dict[str, int]]:
     return [{"id": skill_id} for skill_id in sorted(seen)]
 
 
+def _trait_ids(stored: object) -> list[int]:
+    """Decode an inventory/pets trait cell ("12101:30001") into ints.
+
+    Both `pets.buffs` and `inventory.buffs` hold colon-separated skill.txt ids
+    (trait families live in skill.txt with `team` 2), so one decoder is enough.
+    """
+    return [int(token) for token in str(stored or "").split(":") if token.isdigit()]
+
+
+def _trait_rows(stored: object) -> list[dict[str, int]]:
+    """Same ids shaped the way the client reads them (`getSkill` reads `.id`)."""
+    return [{"id": trait_id} for trait_id in _trait_ids(stored)]
+
+
 def _first_skill_id(raw: object) -> int:
     """从 `"101:5101"` / JSON 形态的技能列里取第一个正 id；没有则 0。
 
@@ -1877,7 +1896,7 @@ def _player_equipment_detail(database_path: Path) -> Response:
         row = connection.execute(
             """
             SELECT id AS "index", item_id AS id, icon, level, star, pro,
-                   hp, speed, phy_att, mag_att, phy_def, mag_def
+                   hp, speed, phy_att, mag_att, phy_def, mag_def, buffs
             FROM inventory WHERE id = ? AND player_id = ? AND team = 3
             """,
             (item_index, player["id"]),
@@ -1911,7 +1930,9 @@ def _player_equipment_detail(database_path: Path) -> Response:
             "mag_def": row["mag_def"],
             "speed": row["speed"],
             "skills": [{"id": sid} for sid in skill_ids],
-            "buffs": [],
+            # 附魔得到的特性存在 inventory.buffs；EquipInfoUI.as:236-243 把它印在
+            # “特性”一栏，所以这里是唯一能看到附魔结果的地方（39 是装备详情）。
+            "buffs": _trait_rows(row["buffs"]),
         },
     )
 
@@ -6826,30 +6847,452 @@ def _gold_exchange(database_path: Path) -> Response:
     return _pet_error(100)
 
 
-def _forge_refine(database_path: Path) -> Response:
-    try: idx=int(_request_value("index",""))
-    except ValueError: return _pet_error(100)
-    uid=_request_value("uid")
+# ---------------------------------------------------------------------------
+# 32/33/35 —— 神器强化（客户端 ttype=2），36 —— 附魔（ttype=3）
+#
+# 客户端证据（FFDec 导出 APetHunter.swf 脚本到临时目录，未入库）：
+#   * BlacksmithUI.as:157-166 的“附魔”按钮开 CITY_BLACKSMITH_LIST{ttype:3}；
+#     ArtifactUI.as:174-178 的“神器强化”按钮开同一界面 {ttype:2}，
+#     所以 ttype=2 是神器页面的强化，不是铁匠主页的第三个 tab。
+#   * BlacksmithListUI.as:190-215：ttype=3 进 EnchantInfoUI（带 index=list.index），
+#     ttype=2 进 RefineInfoUI（带 gid=list.index）。两边都发 32{ttype,p,n}，
+#     列表项只读 index/id/icon/level（:239-260）——index 因此必须是 inventory.id。
+#   * EnchantInfoUI.as:169-175 发 33{ttype,gid=index}，:177-310 读
+#     id/level/star/pro/icon/skills/buffs/need_*，:312-316 发 36{index}，
+#     并把 36 的响应当详情重绘（所以 36 成功必须回整份详情）。
+#   * RefineInfoUI.as:137-143 发 33{ttype,gid}，:195-264 用 next_refine 做差值预览，
+#     :330-344 在没有 next_refine 时显示 ui 208“神器达到顶级”，
+#     :349-352 发 35{index}，:159-186 收到 35 只读 level/icon 弹提示后重发 33。
+# ---------------------------------------------------------------------------
+
+# LOCAL DEFAULT：equip.txt / equipEnchant.txt 都没有强化列，下面六个常量是本地规则。
+LOCAL_REFINE_MAX_LEVEL = 10              # 到顶后 33 不再下发 next_refine
+LOCAL_REFINE_MONEY_PER_LEVEL = 500       # 每一级的金币费用 × 当前等级
+LOCAL_REFINE_STAT_PERCENT = 5            # 每级在 equip.txt 基础值上叠 5%
+LOCAL_REFINE_DIAMOND_ID = 11024          # prop.txt：“紫色钻石 … 可以用于强化神器”
+LOCAL_REFINE_DIAMONDS_PER_LEVEL = 1
+
+# equip.txt 的 remark 用“初级/高级/终级神器”给神器分级（57031/57001/67001）。
+LOCAL_ARTIFACT_REMARK = "神器"
+
+# error.txt 9「4星级（含）以上的装备才能附魔」：`equipEnchant.txt` 的 918 行恰好
+# 全部是 `equip.txt` star >= 4 的装备（缺的 18 件是 20001-20026 的 1-3 星新手装），
+# 所以这条门槛和“表里有没有行”是同一件事的两种说法。
+LOCAL_ENCHANT_MIN_STAR = 4
+
+# LOCAL DEFAULT：error.txt 没有“附魔次数已满”的键，用 100（非法操作）。
+# 405/400 分别对应水晶不足/物品不足，都有现成键（405 水晶不够、400 物品不存在）。
+LOCAL_ENCHANT_LIMIT_ERROR = 100
+
+
+def _enchant_reject_code(item_id: int) -> int:
+    """一件装备不能附魔时该回哪个 error.txt 键。
+
+    9   = 4 星以下（表内没有、也不该有附魔行）
+    407 = 此装备不能附魔（4 星以上却没有 equipEnchant.txt 行）
+    """
+    record = config_tables.equip_record(item_id) or {}
+    if config_tables.equip_star(record) < LOCAL_ENCHANT_MIN_STAR:
+        return 9
+    return 407
+
+
+def _equipment_param_index() -> int | None:
+    """35/36 只回传 list.index；33 在 ttype 2 发 gid、ttype 3 也发 gid。
+
+    两个参数都接受，gid 优先，避免客户端两个界面字段名不同时把一个能用的
+    请求判成 100。
+    """
+    raw = _request_value("gid", "") or _request_value("index", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_artifact_equip(record: dict[str, str] | None) -> bool:
+    """equip.txt remark 里带“神器”的才是 32 ttype=2 可强化的对象。"""
+    return bool(record) and LOCAL_ARTIFACT_REMARK in str(record.get("remark", "") or "")
+
+
+def _refine_level_cost(level: int) -> int:
+    return LOCAL_REFINE_MONEY_PER_LEVEL * max(1, int(level or 1))
+
+
+def _refine_stats(record: dict[str, str], level: int) -> dict[str, int]:
+    """equip.txt 基础值 + 每级 5%；level 1 与表内数值完全一致。"""
+    base = config_tables.equip_stats(record)
+    steps = max(0, int(level) - 1)
+    return {
+        column: value + value * LOCAL_REFINE_STAT_PERCENT * steps // 100
+        for column, value in base.items()
+    }
+
+
+def _owned_goods(connection: sqlite3.Connection, player_id: int, item_id: int) -> int:
+    """道具/材料两个背包页都算；装备页（team=3）不算素材。"""
+    return connection.execute(
+        "SELECT COALESCE(SUM(quantity),0) FROM inventory"
+        " WHERE player_id=? AND item_id=? AND team IN (1,2)",
+        (player_id, item_id),
+    ).fetchone()[0]
+
+
+def _spend_goods(
+    connection: sqlite3.Connection, player_id: int, item_id: int, count: int
+) -> bool:
+    """Consume `count` of a prop; False (and no write) when the bag is short.
+
+    inventory is UNIQUE(player_id,item_id), so one row holds every copy no matter
+    which tab it renders in; 10032 蓝色晶石 is tab 1 (道具) while the forge jades
+    are tab 2 (材料), hence the team IN (1,2) lookup instead of a fixed tab.
+    """
+    if count <= 0:
+        return True
+    row = connection.execute(
+        "SELECT id, quantity FROM inventory WHERE player_id=? AND item_id=?"
+        " AND team IN (1,2) ORDER BY id LIMIT 1",
+        (player_id, item_id),
+    ).fetchone()
+    if row is None or row["quantity"] < count:
+        return False
+    if row["quantity"] == count:
+        connection.execute("DELETE FROM inventory WHERE id=?", (row["id"],))
+    else:
+        connection.execute(
+            "UPDATE inventory SET quantity=quantity-? WHERE id=?", (count, row["id"])
+        )
+    return True
+
+
+def _trait_level(skill_id: int) -> int:
+    record = config_tables._table("skill.txt").get(skill_id) or {}
+    raw = str(record.get("level", "") or "").strip()
+    return int(raw) if raw.isdigit() else 0
+
+
+def _trait_family(skill_id: int) -> str:
+    """“10级火系专精” -> “火系专精”，用来判断两条特性是不是同一族。"""
+    record = config_tables._table("skill.txt").get(skill_id) or {}
+    name = str(record.get("name", "") or "").strip()
+    level = str(record.get("level", "") or "").strip()
+    if level.isdigit() and name.startswith(f"{level}级"):
+        return name[len(level) + 1:] or name
+    return name
+
+
+def _with_trait(traits: list[int], new_id: int) -> list[int]:
+    """Add one trait, or upgrade the same family in place.
+
+    LOCAL DEFAULT: the table only gives a level band per family, so a second roll
+    of a family the piece already has replaces the weaker copy instead of burning
+    another maxCount slot.
+    """
+    family = _trait_family(new_id)
+    if family:
+        for position, existing in enumerate(traits):
+            if _trait_family(existing) == family:
+                if _trait_level(new_id) > _trait_level(existing):
+                    traits[position] = new_id
+                return traits
+    traits.append(new_id)
+    return traits
+
+
+def _merge_equipment_traits(first: list[int], second: list[int], cap: int | None = None) -> list[int]:
+    merged: list[int] = []
+    for trait_id in list(first) + list(second):
+        _with_trait(merged, trait_id)
+    return merged[:cap] if cap else merged
+
+
+def _enchant_trait_pool(
+    record: dict[str, str],
+) -> list[tuple[int, list[int], int]]:
+    """(level-1 base id, valid level ids, weight) per extSkills entry.
+
+    The weight is the shipped `rate` cell (万分比, every row sums to 10000), not a
+    local guess; only the level inside the band is rolled locally.
+    """
+    skills = config_tables._table("skill.txt")
+    entries = config_tables.equip_enchant_ext_skills(record)
+    rates = config_tables.equip_enchant_rates(record)
+    pool: list[tuple[int, list[int], int]] = []
+    for position, (base, low, high) in enumerate(entries):
+        weight = rates[position] if position < len(rates) else 0
+        levels = [
+            base + level - 1
+            for level in range(low, high + 1)
+            if (base + level - 1) in skills
+        ]
+        if weight > 0 and levels:
+            pool.append((base, levels, weight))
+    if not pool:
+        # LOCAL DEFAULT: a row whose extSkills/rate cells are unreadable gets an
+        # equal-weight roll over whatever ids do resolve, so the page still works.
+        for base, low, high in entries:
+            levels = [
+                base + level - 1
+                for level in range(low, high + 1)
+                if (base + level - 1) in skills
+            ]
+            if levels:
+                pool.append((base, levels, 1))
+    return pool
+
+
+def _draw_enchant_trait(record: dict[str, str]) -> int | None:
+    pool = _enchant_trait_pool(record)
+    if not pool:
+        return None
+    _base, levels, _weight = random.choices(
+        pool, weights=[entry[2] for entry in pool], k=1
+    )[0]
+    return random.choice(levels)
+
+
+def _refine_detail_payload(
+    connection: sqlite3.Connection, player: sqlite3.Row, row: sqlite3.Row
+) -> dict:
+    record = config_tables.equip_record(row["item_id"]) or {}
+    level = int(row["level"] or 1)
+    payload = {
+        "index": row["id"],
+        "id": row["item_id"],
+        "icon": row["icon"],
+        "level": level,
+        "star": row["star"],
+        "pro": row["pro"],
+        **{
+            column: row[column]
+            for column in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")
+        },
+        "skills": [
+            {"id": skill_id} for skill_id in config_tables.equip_skills(record)
+        ],
+        "buffs": _trait_rows(row["buffs"]),
+        "need_money": 0,
+        "own_money": player["money"],
+        "need_point": 0,
+        "own_point": player["point"],
+        "need_crystal": 0,
+        "own_crystal": player["crystal"],
+        "need_goods": [],
+    }
+    if level >= LOCAL_REFINE_MAX_LEVEL:
+        # RefineInfoUI.as:330-344：没有 next_refine 就打印 ui 208“神器达到顶级”。
+        return payload
+    payload["need_money"] = _refine_level_cost(level)
+    payload["need_goods"] = [{
+        "id": LOCAL_REFINE_DIAMOND_ID,
+        "need_num": LOCAL_REFINE_DIAMONDS_PER_LEVEL,
+        "own_num": _owned_goods(connection, player["id"], LOCAL_REFINE_DIAMOND_ID),
+    }]
+    payload["next_refine"] = {
+        "level": level + 1,
+        **_refine_stats(record, level + 1),
+        # 强化不额外加技能等级：客户端只在 >0 时渲染（RefineInfoUI.as:250-254）。
+        "refine_add_skill_level": 0,
+    }
+    return payload
+
+
+def _enchant_detail_payload(
+    connection: sqlite3.Connection,
+    player: sqlite3.Row,
+    row: sqlite3.Row,
+    record: dict[str, str],
+) -> dict:
+    need = config_tables.equip_enchant_need(record)
+    goods = config_tables.equip_enchant_goods(record)
+    traits = _trait_ids(row["buffs"])
+    equip = config_tables.equip_record(row["item_id"]) or {}
+    return {
+        "index": row["id"],
+        "id": row["item_id"],
+        "icon": row["icon"],
+        "level": row["level"],
+        "star": row["star"],
+        "pro": row["pro"],
+        **{
+            column: row[column]
+            for column in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")
+        },
+        # EnchantInfoUI.as:222-243：skills 印在 ui 19“技能”，buffs 印在 ui 20“特性”。
+        "skills": [{"id": skill_id} for skill_id in config_tables.equip_skills(equip)],
+        "buffs": _trait_rows(row["buffs"]),
+        "need_money": need["money"],
+        "own_money": player["money"],
+        "need_point": need["point"],
+        "own_point": player["point"],
+        "need_crystal": need["crystal"],
+        "own_crystal": player["crystal"],
+        "need_goods": [
+            {
+                "id": gid,
+                "need_num": num,
+                "own_num": _owned_goods(connection, player["id"], gid),
+            }
+            for gid, num in goods
+        ],
+        # 客户端不读这三个字段，但协议自查/测试需要看到上限、已用次数与可抽范围。
+        "max_count": config_tables.equip_enchant_max_count(record),
+        "enchant_count": len(traits),
+        "ext_skills": [
+            {"id": base, "min_level": low, "max_level": high}
+            for base, low, high in config_tables.equip_enchant_ext_skills(record)
+        ],
+    }
+
+
+def _refine_detail(database_path: Path) -> Response:
+    index = _equipment_param_index()
+    if index is None:
+        return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?",(uid,)).fetchone(); row=c.execute("SELECT * FROM inventory WHERE id=? AND player_id=? AND team=3",(idx,p["id"] if p else 0)).fetchone()
-        if p is None: return _pet_error(103)
-        if row is None: return _pet_error(400)
-        next_level=row["level"]+1
-        payload={"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"],"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":100,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":0,"own_crystal":p["crystal"],"need_goods":[],"next_refine":{"level":next_level,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"]+5,"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"refine_add_skill_level":0}}
-    return _protocol_response(35,payload)
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?",
+            (_request_value("uid"),),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _equipment_row(c, player["id"], index)
+        if row is None:
+            return _pet_error(400)
+        if not _is_artifact_equip(config_tables.equip_record(row["item_id"])):
+            return _pet_error(406)  # error.txt 406：此装备不能强化
+        payload = _refine_detail_payload(c, player, row)
+    return _protocol_response(33, payload)
+
+
+def _enchant_detail(database_path: Path) -> Response:
+    index = _equipment_param_index()
+    if index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?",
+            (_request_value("uid"),),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _equipment_row(c, player["id"], index)
+        if row is None:
+            return _pet_error(400)
+        record = config_tables.equip_enchant_record(row["item_id"])
+        if record is None:
+            return _pet_error(_enchant_reject_code(row["item_id"]))
+        payload = _enchant_detail_payload(c, player, row, record)
+    return _protocol_response(33, payload)
+
+
+def _forge_refine(database_path: Path) -> Response:
+    """35 (EQUIP_REFINE_KEY)：神器强化一次，等级 +1、属性按表内基础值重算。
+
+    RefineInfoUI.as:159-186 收到 35 只看 level/icon，随后自己重发 33 刷新页面，
+    所以成功响应给这两个字段就够；失败走 `-1:code` 由客户端弹 error.txt 文案。
+    """
+    index = _equipment_param_index()
+    if index is None:
+        return _pet_error(100)
+    with _connect_database(database_path) as c:
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?",
+            (_request_value("uid"),),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _equipment_row(c, player["id"], index)
+        if row is None:
+            return _pet_error(400)
+        record = config_tables.equip_record(row["item_id"])
+        if not _is_artifact_equip(record):
+            return _pet_error(406)  # error.txt 406：此装备不能强化
+        level = int(row["level"] or 1)
+        if level >= LOCAL_REFINE_MAX_LEVEL:
+            return _pet_error(408)  # error.txt 408：此装备已经不能再强化了
+        fee = _refine_level_cost(level)
+        if player["money"] < fee:
+            return _pet_error(403)
+        if not _spend_goods(
+            c, player["id"], LOCAL_REFINE_DIAMOND_ID, LOCAL_REFINE_DIAMONDS_PER_LEVEL
+        ):
+            return _pet_error(400)
+        stats = _refine_stats(record, level + 1)
+        c.execute("UPDATE players SET money=money-? WHERE id=?", (fee, player["id"]))
+        c.execute(
+            "UPDATE inventory SET level=?, hp=?, speed=?, phy_att=?, mag_att=?,"
+            " phy_def=?, mag_def=? WHERE id=?",
+            (
+                level + 1, stats["hp"], stats["speed"], stats["phy_att"],
+                stats["mag_att"], stats["phy_def"], stats["mag_def"], index,
+            ),
+        )
+    return _protocol_response(35, {
+        "index": index, "id": row["item_id"], "icon": row["icon"],
+        "level": level + 1, "value": "ok",
+    })
 
 
 def _forge_enchant(database_path: Path) -> Response:
-    try: idx=int(_request_value("index",""))
-    except ValueError: return _pet_error(100)
-    uid=_request_value("uid")
+    """36 (EQUIP_ENCHANT_KEY)：附魔一次，按 equipEnchant.txt 抽一条特性写回装备。
+
+    费用与次数上限全部来自表（needMoney/needPoint/needCrystal/needGoods/maxCount），
+    只有“家族内等级在 band 里均匀抽”和“同族更强则顶替”是 LOCAL DEFAULT。
+    成功响应必须是整份详情：EnchantInfoUI.as:177-310 就是用 36 的响应重绘的。
+    """
+    index = _equipment_param_index()
+    if index is None:
+        return _pet_error(100)
     with _connect_database(database_path) as c:
-        p=c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?",(uid,)).fetchone(); row=c.execute("SELECT * FROM inventory WHERE id=? AND player_id=? AND team=3",(idx,p["id"] if p else 0)).fetchone()
-        if p is None: return _pet_error(103)
-        if row is None: return _pet_error(400)
-        if p["crystal"] < 10: return _pet_error(405)
-        c.execute("UPDATE players SET crystal=crystal-10 WHERE id=?",(p["id"],)); c.execute("UPDATE inventory SET pro=pro+1 WHERE id=?",(idx,))
-    return _protocol_response(36,{"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"]+1,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":0,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":10,"own_crystal":p["crystal"]})
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?",
+            (_request_value("uid"),),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        row = _equipment_row(c, player["id"], index)
+        if row is None:
+            return _pet_error(400)
+        record = config_tables.equip_enchant_record(row["item_id"])
+        if record is None:
+            return _pet_error(_enchant_reject_code(row["item_id"]))
+        traits = _trait_ids(row["buffs"])
+        if len(traits) >= config_tables.equip_enchant_max_count(record):
+            return _pet_error(LOCAL_ENCHANT_LIMIT_ERROR)
+        need = config_tables.equip_enchant_need(record)
+        if player["money"] < need["money"]:
+            return _pet_error(403)
+        if player["point"] < need["point"]:
+            return _pet_error(404)
+        if player["crystal"] < need["crystal"]:
+            return _pet_error(405)
+        goods = config_tables.equip_enchant_goods(record)
+        for gid, num in goods:
+            if _owned_goods(c, player["id"], gid) < num:
+                return _pet_error(400)
+        drawn = _draw_enchant_trait(record)
+        if drawn is None:
+            return _pet_error(100)
+        traits = _with_trait(traits, drawn)
+        for gid, num in goods:
+            if not _spend_goods(c, player["id"], gid, num):
+                return _pet_error(400)
+        c.execute(
+            "UPDATE players SET money=money-?,point=point-?,crystal=crystal-? WHERE id=?",
+            (need["money"], need["point"], need["crystal"], player["id"]),
+        )
+        c.execute(
+            "UPDATE inventory SET buffs=? WHERE id=?",
+            (":".join(str(trait_id) for trait_id in traits), index),
+        )
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE id=?", (player["id"],)
+        ).fetchone()
+        row = _equipment_row(c, player["id"], index)
+        payload = _enchant_detail_payload(c, player, row, record)
+    payload["value"] = "ok"
+    return _protocol_response(36, payload)
 
 
 def _forge_equip_field(equip_id: int, column: str) -> int | None:
@@ -6866,31 +7309,160 @@ def _forge_equip_field(equip_id: int, column: str) -> int | None:
     return int(raw) if raw.lstrip("-").isdigit() else None
 
 
-# LOCAL DESIGN: the shipped config has no equipment-fusion table (the same is true
-# for pet training/evolution), so both the merge rule and the fee are ours.
-LOCAL_SYNTHESIS_FEE_BASE = 100
-LOCAL_SYNTHESIS_FEE_PER_LEVEL = 50
+# help.txt 条目 7《金币装备转化熔合说明》：
+#   1) 只有金币装备才能转化熔合          -> equip.txt `money` > 0
+#   2) 武器/铠甲/头盔只能同类转化        -> equip.txt `type`（1/2/3）相同
+#   3) 同级（同金币价值）收价值 20% 的蓝色晶石；升级转化收双方价值差额
+#   4) 蓝色晶石在金币商店购买            -> prop.txt 10032（error.txt 423 专用）
+#   5) 原装备特性转移到新装备，原装备消失
+#   6) 已经在使用的装备不能熔合          -> inventory.equipped = 1 拒绝
+#
+# 表里没有、只能本地定的部分（LOCAL DEFAULT）：
+#   * “价值”= equip.txt `money`（唯一的金币价格列）；蓝色晶石枚数按 prop.txt
+#     10032 自己的 money=100 金币折算 —— help 只给了 20%/差额，没给换算率。
+#   * 升级转化的产物 = 同类别、同性别、金币价值严格高一档里最低档；同档取 id 最小。
+#   * 同级转化的产物保持主装备本体（配置里没有“同价值互换表”）。
+#   * 产物强化等级：同级保留主装备等级，升级从 1 级开始；`pro` 沿用主装备。
+#   * 特性按产物的 equipEnchant.maxCount 截断（装备没有附魔行则不截断）。
+LOCAL_SYNTHESIS_PERCENT = 20
+LOCAL_BLUECRYSTAL_ID = 10032
+LOCAL_BLUECRYSTAL_FALLBACK_GOLD = 100
 _SYNTHESIS_STATS = ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def")
 
 
-def _synthesis_fee(level: int) -> int:
-    return LOCAL_SYNTHESIS_FEE_BASE + LOCAL_SYNTHESIS_FEE_PER_LEVEL * max(1, int(level or 1))
+class _SynthesisRejected(Exception):
+    """help.txt 7 的某一条不满足；`code` 直接作为 `-1:<error.txt key>` 返回。"""
+
+    def __init__(self, code: int):
+        super().__init__(str(code))
+        self.code = code
 
 
-def _synthesis_merge(rows) -> dict[str, int]:
-    """Per stat: keep the better piece and add a quarter of the weaker one."""
-    merged: dict[str, int] = {}
-    for column in _SYNTHESIS_STATS:
-        values = sorted((int(row[column] or 0) for row in rows), reverse=True)
-        top, second = values[0], (values[1] if len(values) > 1 else 0)
-        merged[column] = top + second // 4
-    return merged
+def _equip_gold_value(record: dict[str, str] | None) -> int:
+    """equip.txt `money`，即 help 7 所说的“金币价值”；0 = 非金币装备。"""
+    return _forge_record_number(record or {}, "money")
+
+
+def _bluecrystal_gold_price() -> int:
+    """蓝色晶石自己的金币单价，用来把“价值”折成枚数（LOCAL DEFAULT 换算）。"""
+    price = _forge_record_number(
+        config_tables.prop_record(LOCAL_BLUECRYSTAL_ID) or {}, "money"
+    )
+    return price if price > 0 else LOCAL_BLUECRYSTAL_FALLBACK_GOLD
+
+
+def _synthesis_fee(main_value: int, vice_value: int) -> int:
+    """蓝色晶石枚数：同级收 20% 价值，升级收双方价值差额（help 7-3）。"""
+    price = _bluecrystal_gold_price()
+    if main_value == vice_value:
+        gold = main_value * LOCAL_SYNTHESIS_PERCENT / 100
+    else:
+        gold = abs(main_value - vice_value)
+    return max(1, math.ceil(gold / price))
+
+
+def _synthesis_upgrade_target(
+    record: dict[str, str], value: int
+) -> int | None:
+    """同类别、同性别、金币价值严格高于 `value`（双方较高值）的最低档装备 id。
+
+    LOCAL DEFAULT：同档取 id 最小，保证同一对材料永远合成同一件产物。
+    """
+    slot = config_tables.equip_slot(record)
+    sex = config_tables.equip_sex(record)
+    best: tuple[int, int] | None = None
+    for other_id, other in config_tables.equip_table().items():
+        if config_tables.equip_slot(other) != slot:
+            continue
+        if config_tables.equip_sex(other) != sex:
+            continue
+        money = _equip_gold_value(other)
+        if money <= value:
+            continue
+        candidate = (money, other_id)
+        if best is None or candidate < best:
+            best = candidate
+    return best[1] if best else None
+
+
+def _synthesis_merge(main_row, vice_row) -> dict:
+    """两件金币装备的熔合结果（help 7），不满足规则时抛 `_SynthesisRejected`。
+
+    79 预览与 80 执行都走这里，避免“预览一套规则、执行另一套规则”。
+    返回的 dict 带产物 id/icon/star/level/pro/属性/特性/费用，以及 same_tier
+    标记（同级转化不换装备本体）。
+    """
+    if main_row is None or vice_row is None or main_row["id"] == vice_row["id"]:
+        raise _SynthesisRejected(400)
+    main_record = config_tables.equip_record(main_row["item_id"])
+    vice_record = config_tables.equip_record(vice_row["item_id"])
+    if main_record is None or vice_record is None:
+        raise _SynthesisRejected(400)
+    if main_row["equipped"] or vice_row["equipped"]:
+        raise _SynthesisRejected(424)  # error.txt 424：已装备的物品不能进行装备融合
+    main_value = _equip_gold_value(main_record)
+    vice_value = _equip_gold_value(vice_record)
+    if main_value <= 0 or vice_value <= 0:
+        raise _SynthesisRejected(426)  # error.txt 426：非金币装备不能转化熔合
+    if config_tables.equip_slot(main_record) != config_tables.equip_slot(vice_record):
+        raise _SynthesisRejected(425)  # error.txt 425：不同部位的装备，不能进行融合
+
+    same_tier = main_value == vice_value
+    if same_tier:
+        target_id = main_row["item_id"]
+    else:
+        # help 7 只说“升级转化收双方价值差额”，没说产物取哪一件。LOCAL DEFAULT：
+        # 产物 = 同类别、同性别、金币价值严格高于双方的那一档里最低档（同档 id 最小），
+        # 这样两件不同价值的装备一定向上换一档，而不是把原料原样返还给玩家。
+        target_id = _synthesis_upgrade_target(
+            main_record, max(main_value, vice_value)
+        )
+        if target_id is None:
+            raise _SynthesisRejected(100)  # 已是最高档，没有可升级的产物
+    target_record = config_tables.equip_record(target_id)
+    if target_record is None:
+        raise _SynthesisRejected(100)
+
+    if same_tier:
+        # help 7-5 只要求“原装备消失、特性转移”，同级产物保持主装备本体：
+        # 属性/等级/星级/图标都用主装备当前值（可能已经被强化过）。
+        stats = {column: int(main_row[column] or 0) for column in _SYNTHESIS_STATS}
+        level = int(main_row["level"] or 1)
+        star = int(main_row["star"] or 1)
+        icon = main_row["icon"] or config_tables.equip_icon(target_record) or target_id
+    else:
+        # help 7 “升级转化”：产物按 equip.txt 属性重新生成，等级从 1 开始。
+        stats = config_tables.equip_stats(target_record)
+        level = 1
+        star = config_tables.equip_star(target_record)
+        icon = config_tables.equip_icon(target_record) or target_id
+
+    enchant = config_tables.equip_enchant_record(target_id)
+    cap = config_tables.equip_enchant_max_count(enchant) if enchant else None
+    return {
+        "id": target_id,
+        "icon": icon,
+        "star": star,
+        "level": level,
+        "pro": int(main_row["pro"] or 0),
+        "item_type": config_tables.equip_slot(target_record),
+        "use_type": _forge_record_number(target_record, "useType"),
+        "stats": stats,
+        "buffs": _merge_equipment_traits(
+            _trait_ids(main_row["buffs"]), _trait_ids(vice_row["buffs"]), cap
+        ),
+        "buff_cap": cap,
+        "skills": [{"id": skill_id} for skill_id in config_tables.equip_skills(target_record)],
+        "fee": _synthesis_fee(main_value, vice_value),
+        "same_tier": same_tier,
+    }
 
 
 def _equipment_row(connection: sqlite3.Connection, player_id: int, index: int):
     return connection.execute(
-        "SELECT id, item_id, icon, level, star, pro, hp, speed, phy_att, mag_att,"
-        " phy_def, mag_def FROM inventory WHERE id=? AND player_id=? AND team=3",
+        "SELECT id, item_id, icon, level, star, pro, equipped, buffs, hp, speed,"
+        " phy_att, mag_att, phy_def, mag_def FROM inventory"
+        " WHERE id=? AND player_id=? AND team=3",
         (index, player_id),
     ).fetchone()
 
@@ -6900,6 +7472,11 @@ def _synthesis_candidates(database_path: Path, exclude: int = 0) -> Response:
 
     Both screens read `list[]` with index/id/icon/loc (IntegrationListUI.as:227-234),
     and the vice picker sends the chosen `main` so it must not be offered again.
+
+    The list itself is now filtered by help.txt 7: only gold equipment (equip.txt
+    `money` > 0) that is not equipped, and for 78 only the main piece's own
+    category (weapon/armour/helmet). A non-gold starter piece therefore no longer
+    shows up as a fusion candidate.
     """
     command_id = 77 if exclude == 0 else 78
     uid = _request_value("uid")
@@ -6918,25 +7495,47 @@ def _synthesis_candidates(database_path: Path, exclude: int = 0) -> Response:
         player = c.execute("SELECT id, sex FROM players WHERE uid=?", (uid,)).fetchone()
         if player is None:
             return _pet_error(103)
+        main_slot: int | None = None
+        if command_id == 78:
+            # 78 是“副装备”列表：没有 main 就不知道该收哪一类，直接拒。
+            if not main:
+                return _pet_error(400)
+            main_row = _equipment_row(c, player["id"], main)
+            main_record = (
+                config_tables.equip_record(main_row["item_id"]) if main_row else None
+            )
+            if main_row is None or main_record is None:
+                return _pet_error(400)
+            main_slot = config_tables.equip_slot(main_record)
         rows = c.execute(
-            "SELECT id AS row_index, item_id, icon, level FROM inventory"
-            " WHERE player_id=? AND team=3 AND id<>? ORDER BY id LIMIT ? OFFSET ?",
-            (player["id"], main or max(0, exclude), size, (page - 1) * size),
+            "SELECT id AS row_index, item_id, icon, level, equipped FROM inventory"
+            " WHERE player_id=? AND team=3 AND id<>? ORDER BY id",
+            (player["id"], main),
         ).fetchall()
     equipment = []
     for row in rows:
         record = config_tables.equip_record(row["item_id"])
-        if record is not None and not _equip_matches_sex(row["item_id"], player["sex"]):
+        if record is None or not _equip_matches_sex(row["item_id"], player["sex"]):
             continue
+        if row["equipped"]:
+            continue  # help 7-6
+        if _equip_gold_value(record) <= 0:
+            continue  # help 7-1
+        if main_slot is not None and config_tables.equip_slot(record) != main_slot:
+            continue  # help 7-2
         equipment.append({
             "index": row["row_index"], "id": row["item_id"],
             "icon": row["icon"], "loc": row["level"] or 1,
         })
-    return _protocol_response(command_id, {"list": equipment, "type": 2, "value": "ok"})
+    start = (page - 1) * size
+    return _protocol_response(
+        command_id,
+        {"list": equipment[start:start + size], "type": 2, "value": "ok"},
+    )
 
 
 def _equip_synthesis_confirm(database_path: Path) -> Response:
-    """79 (EQUIP_SYN_CONFIRM) — the preview page: merged stats plus the fee."""
+    """79 (EQUIP_SYN_CONFIRM) — the preview page: result stats plus the fee."""
     uid = _request_value("uid")
     try:
         main = int(_request_value("main", ""))
@@ -6944,36 +7543,46 @@ def _equip_synthesis_confirm(database_path: Path) -> Response:
     except ValueError:
         return _pet_error(100)
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         main_row = _equipment_row(c, player["id"], main)
         vice_row = _equipment_row(c, player["id"], vice)
-        if main_row is None or vice_row is None or main == vice:
-            return _pet_error(400)
-    merged = _synthesis_merge((main_row, vice_row))
-    fee = _synthesis_fee(main_row["level"])
+        try:
+            plan = _synthesis_merge(main_row, vice_row)
+        except _SynthesisRejected as rejected:
+            return _pet_error(rejected.code)
+        own_stones = _owned_goods(c, player["id"], LOCAL_BLUECRYSTAL_ID)
     return _protocol_response(79, {
-        "id": main_row["item_id"],
-        "icon": main_row["icon"],
-        "star": main_row["star"],
-        "pro": main_row["pro"],
-        "level": main_row["level"],
-        **merged,
-        "skills": [], "buffs": [],
-        "need_money": fee, "own_money": player["money"],
+        "id": plan["id"],
+        "icon": plan["icon"],
+        "star": plan["star"],
+        "pro": plan["pro"],
+        "level": plan["level"],
+        **plan["stats"],
+        "skills": plan["skills"],
+        # help 7-5：原装备（双方）的特性都转移到产物上。
+        "buffs": [{"id": trait_id} for trait_id in plan["buffs"]],
+        "need_money": 0, "own_money": player["money"],
         "need_point": 0, "own_point": player["point"],
         "need_crystal": 0, "own_crystal": player["crystal"],
-        "need_goods": [],
+        "need_goods": [{
+            "id": LOCAL_BLUECRYSTAL_ID,
+            "need_num": plan["fee"],
+            "own_num": own_stones,
+        }],
         "value": "ok",
     })
 
 
 def _equip_synthesis_perform(database_path: Path) -> Response:
-    """80 (SYN_EQUIP) — fuse the vice piece into the main one.
+    """80 (SYN_EQUIP) — 熔合：双方原装备消失（升级转化换成产物），特性全转移。
 
-    The vice row is consumed (that is the whole point of the screen), the main row
-    keeps its identity and gains the merged stats.
+    help.txt 7：同级（同金币价值）转化保留主装备本体、收 20% 价值的蓝色晶石；
+    升级转化按双方价值差额收费并产出同槽位高一档的装备。扣减失败用 error.txt
+    423（蓝色晶石不足，请到金币商店购买）。
     """
     uid = _request_value("uid")
     try:
@@ -6984,30 +7593,70 @@ def _equip_synthesis_perform(database_path: Path) -> Response:
     if main == vice:
         return _pet_error(400)
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money FROM players WHERE uid=?", (uid,)).fetchone()
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
         if player is None:
             return _pet_error(103)
         main_row = _equipment_row(c, player["id"], main)
         vice_row = _equipment_row(c, player["id"], vice)
-        if main_row is None or vice_row is None:
-            return _pet_error(400)
-        fee = _synthesis_fee(main_row["level"])
-        if player["money"] < fee:
-            return _pet_error(403)
-        merged = _synthesis_merge((main_row, vice_row))
-        c.execute(
-            "UPDATE players SET money = money - ? WHERE id = ? AND money >= ?",
-            (fee, player["id"], fee),
-        )
-        assignments = ", ".join(f"{column} = ?" for column in _SYNTHESIS_STATS)
-        c.execute(
-            f"UPDATE inventory SET {assignments} WHERE id = ?",
-            (*[merged[column] for column in _SYNTHESIS_STATS], main),
-        )
-        c.execute("DELETE FROM inventory WHERE id = ? AND player_id = ?", (vice, player["id"]))
-        current = c.execute("SELECT id, item_id, icon FROM inventory WHERE id = ?", (main,)).fetchone()
+        try:
+            plan = _synthesis_merge(main_row, vice_row)
+        except _SynthesisRejected as rejected:
+            return _pet_error(rejected.code)
+        if not _spend_goods(c, player["id"], LOCAL_BLUECRYSTAL_ID, plan["fee"]):
+            return _pet_error(423)
+        buffs = ":".join(str(trait_id) for trait_id in plan["buffs"])
+        if plan["same_tier"]:
+            # 主装备本体不动，只把副装备的特性并进来，然后副装备消失。
+            c.execute("UPDATE inventory SET buffs=? WHERE id=?", (buffs, main))
+            c.execute(
+                "DELETE FROM inventory WHERE id=? AND player_id=?", (vice, player["id"])
+            )
+            result_index = main
+        else:
+            # 升级转化：主副两件都没了（help 7-5），产物按 equip.txt 重新生成。
+            c.execute(
+                "DELETE FROM inventory WHERE id IN (?,?) AND player_id=?",
+                (main, vice, player["id"]),
+            )
+            existing = c.execute(
+                "SELECT id, buffs FROM inventory WHERE player_id=? AND item_id=?",
+                (player["id"], plan["id"]),
+            ).fetchone()
+            if existing is not None:
+                # inventory is UNIQUE(player_id,item_id)：已经拥有同一件产物时叠加，
+                # 特性按产物上限合并（LOCAL DEFAULT：保留原有属性/等级）。
+                merged = _merge_equipment_traits(
+                    _trait_ids(existing["buffs"]), plan["buffs"], plan["buff_cap"]
+                )
+                c.execute(
+                    "UPDATE inventory SET quantity=quantity+1, buffs=? WHERE id=?",
+                    (":".join(str(trait_id) for trait_id in merged), existing["id"]),
+                )
+                result_index = existing["id"]
+            else:
+                c.execute(
+                    """INSERT INTO inventory (player_id,item_id,team,quantity,icon,
+                                              item_type,use_type,level,star,pro,
+                                              hp,speed,phy_att,mag_att,phy_def,mag_def,buffs)
+                       VALUES (?,?,3,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        player["id"], plan["id"], plan["icon"],
+                        plan["item_type"], plan["use_type"], plan["level"],
+                        plan["star"], plan["pro"],
+                        plan["stats"]["hp"], plan["stats"]["speed"],
+                        plan["stats"]["phy_att"], plan["stats"]["mag_att"],
+                        plan["stats"]["phy_def"], plan["stats"]["mag_def"],
+                        buffs,
+                    ),
+                )
+                result_index = c.execute(
+                    "SELECT id FROM inventory WHERE player_id=? AND item_id=?",
+                    (player["id"], plan["id"]),
+                ).fetchone()[0]
     return _protocol_response(80, {
-        "index": current["id"], "id": current["item_id"], "icon": current["icon"],
+        "index": result_index, "id": plan["id"], "icon": plan["icon"],
         "pic": [], "value": "ok",
     })
 
@@ -7031,6 +7680,8 @@ def _forge_list(database_path: Path) -> Response:
     # The client grid is 9 cells (BlacksmithListUI.as:90-105), so a larger `n`
     # is clamped rather than trusted.
     size = min(size, 9)
+    if ttype in (2, 3):
+        return _forge_equipment_list(database_path, ttype, page, size)
     recipes = _forge_recipes()
     if ttype != 1:
         return _protocol_response(32, {"list": [], "total": 0})
@@ -7061,8 +7712,68 @@ def _forge_list(database_path: Path) -> Response:
     )
 
 
+def _forge_equipment_list(
+    database_path: Path, ttype: int, page: int, size: int
+) -> Response:
+    """32 with ttype 2/3: the player's own equipment, 9 per page.
+
+    ttype=2 is 神器强化 (RefineInfoUI): only equip.txt rows whose remark says
+    神器, because the page is only reachable from ArtifactUI.as:174-178.
+    ttype=3 is 附魔 (EnchantInfoUI): only pieces that have an equipEnchant.txt row,
+    because 33/36 read their cost and skill pool from that row.
+
+    `index` is inventory.id — 35/36 echo it back verbatim (RefineInfoUI.as:351,
+    EnchantInfoUI.as:315), so it cannot be the equip id when a player owns two
+    copies of the same item.
+    """
+    uid = _request_value("uid")
+    with _connect_database(database_path) as c:
+        player = c.execute("SELECT id, sex FROM players WHERE uid=?", (uid,)).fetchone()
+        if player is None:
+            return _pet_error(103)
+        rows = c.execute(
+            "SELECT id, item_id, icon, level FROM inventory"
+            " WHERE player_id=? AND team=3 ORDER BY id",
+            (player["id"],),
+        ).fetchall()
+    equipment = []
+    for row in rows:
+        if not _equip_matches_sex(row["item_id"], player["sex"]):
+            continue
+        record = config_tables.equip_record(row["item_id"])
+        if record is None:
+            continue
+        if ttype == 2 and not _is_artifact_equip(record):
+            continue
+        if ttype == 3 and config_tables.equip_enchant_record(row["item_id"]) is None:
+            continue
+        equipment.append({
+            "index": row["id"],
+            "id": row["item_id"],
+            "icon": row["icon"],
+            "level": row["level"] or 1,
+        })
+    start = (page - 1) * size
+    return _protocol_response(
+        32, {"list": equipment[start:start + size], "total": len(equipment)}
+    )
+
+
 def _forge_detail(database_path: Path) -> Response:
-    """33 (GOODS_EXT_INFO_KEY): product stats plus the cost and what we own."""
+    """33 (GOODS_EXT_INFO_KEY): product stats plus the cost and what we own.
+
+    The client uses one command for all three pages and distinguishes them by the
+    `ttype` it just sent (RefineInfoUI.as:139-142, EnchantInfoUI.as:171-174), so
+    the branch has to happen here rather than at the route table.
+    """
+    try:
+        ttype = int(_request_value("ttype", "1") or 1)
+    except ValueError:
+        return _pet_error(100)
+    if ttype == 2:
+        return _refine_detail(database_path)
+    if ttype == 3:
+        return _enchant_detail(database_path)
     try:
         rid = int(_request_value("gid", ""))
     except ValueError:
