@@ -420,16 +420,116 @@ LOCAL_TASKS = (
 # tall; showing the full local catalogue obscures the friend/home buttons.
 # LOCAL DEFAULT: expose one current task at a time.
 LOCAL_TASK_TRACKER_LIMIT = 1
-# Prop ids used as quest rewards; 10011/10014 are absent from LOCAL_PROP_CATALOG,
-# so their use_type/item_type are declared here to keep rewards clickable.
-LOCAL_FORGE_RECIPES = {
+# ---------------------------------------------------------------------------
+# Blacksmith crafting (commands 32/33/34).
+#
+# The shipped client config has no recipe table: a recipe only exists because we
+# derive it from the two tables that do ship. The product (id, icon, slot, stats,
+# star, skills) comes from equip.txt; the materials come from prop.txt. The six
+# pieces below are the two lowest `money > 0` tiers in equip.txt (25001-25003 at
+# 3600 and 35001-35003 at 9600), one weapon / armour / helmet each. Every number
+# that is not literally in those two files is a LOCAL DEFAULT and is flagged as
+# such below, not presented as recovered original-server data.
+# ---------------------------------------------------------------------------
+
+# Legacy hand-written recipe, kept so `gid=32001` callers (and the existing
+# save/test flow) keep working. The table-driven recipes below are the real 32
+# list; this row is only compatibility.
+LOCAL_FORGE_LEGACY_RECIPES = {
     32001: {"output": 20002, "money": 100, "point": 0, "crystal": 0, "goods": ((11010, 1),)},
 }
 
-LOCAL_FORGE_EQUIPMENT = {
-    20002: {"icon": 20002, "level": 1, "star": 1, "pro": 0, "hp": 0, "speed": 0, "phy_att": 0, "mag_att": 0, "phy_def": 20, "mag_def": 20},
+# 25001-25003 焚天 set (equip.txt money=3600, star=9) and 35001-35003
+# 超级焚天 set (money=9600, star=10). The recipe id is the product equip id, so
+# command 32 can send the same number as `index` and `id` and BlacksmithListUI
+# still resolves the name through pic.txt.
+LOCAL_FORGE_EQUIP_IDS = (25001, 25002, 25003, 35001, 35002, 35003)
+
+# LOCAL DEFAULT: craft fee = ceil(equip.txt `money` * 10%). Point/crystal are
+# copied from the row itself (all zero for these six); a future row that ships
+# them needs no code change.
+LOCAL_FORGE_FEE_PERCENT = 10
+
+# LOCAL DEFAULT material rule, because equip.txt ships no recipe rows:
+#   tier 1 (money <= 5000)  -> 1 material kind, 1 each
+#   tier 2 (money <= 50000) -> 2 kinds, 2 each
+#   tier 3 (anything above) -> 3 kinds, 3 each
+# The ids are the slot's jade band from prop.txt 11001-11009:
+#   weapon 11001-11003, armour 11004-11006, helmet 11007-11009.
+LOCAL_FORGE_TIER_MONEY = (5000, 50000)
+LOCAL_FORGE_MATERIAL_BANDS = {
+    1: (11001, 11002, 11003),
+    2: (11004, 11005, 11006),
+    3: (11007, 11008, 11009),
 }
 
+
+def _forge_record_number(record: dict[str, str], column: str) -> int:
+    """Read one numeric equip.txt/prop.txt cell; blanks and junk become 0."""
+    raw = str(record.get(column, "") or "").strip()
+    return int(raw) if raw.lstrip("-").isdigit() else 0
+
+
+def _forge_tier(record: dict[str, str]) -> int:
+    money = _forge_record_number(record, "money")
+    if money <= LOCAL_FORGE_TIER_MONEY[0]:
+        return 1
+    if money <= LOCAL_FORGE_TIER_MONEY[1]:
+        return 2
+    return 3
+
+
+def _forge_material_rule(record: dict[str, str]) -> tuple[tuple[int, int], ...]:
+    """(material id, count) pairs for one equip.txt row, per the LOCAL rule above."""
+    tier = _forge_tier(record)
+    band = LOCAL_FORGE_MATERIAL_BANDS.get(
+        _forge_record_number(record, "type"), LOCAL_FORGE_MATERIAL_BANDS[1]
+    )
+    return tuple((band[index], tier) for index in range(min(tier, len(band))))
+
+
+def _forge_table_recipes() -> dict[int, dict]:
+    """One recipe per id in LOCAL_FORGE_EQUIP_IDS, rebuilt from the config tables.
+
+    Deliberately not cached: the tables are already memoised in config_tables and
+    rebuilding six rows per request keeps the recipe table in step with them.
+    """
+    recipes: dict[int, dict] = {}
+    for equip_id in LOCAL_FORGE_EQUIP_IDS:
+        record = config_tables.equip_record(equip_id)
+        if record is None:
+            continue
+        money = _forge_record_number(record, "money")
+        recipes[equip_id] = {
+            "output": equip_id,
+            "money": max(1, (money * LOCAL_FORGE_FEE_PERCENT + 99) // 100),
+            "point": _forge_record_number(record, "point"),
+            "crystal": _forge_record_number(record, "crystal"),
+            "goods": _forge_material_rule(record),
+        }
+    return recipes
+
+
+def _forge_recipes() -> dict[int, dict]:
+    """Legacy rows first, then the table-driven ones (dict order is the 32 order)."""
+    return {**LOCAL_FORGE_LEGACY_RECIPES, **_forge_table_recipes()}
+
+
+def _forge_equip_level(equip_id: int) -> int:
+    """Level advertised by command 32 for one product.
+
+    LOCAL DEFAULT: equip.txt has no `level` column (only star/money/location), so
+    the row's `star` tier is used with 1 as the floor. A forged item still enters
+    the bag at refine level 1, exactly like every other seeded equipment.
+    """
+    record = config_tables.equip_record(equip_id)
+    if record is None:
+        return 1
+    return max(1, _forge_record_number(record, "star"))
+
+
+# Prop ids used as quest rewards; 10011/10014 are absent from LOCAL_PROP_CATALOG,
+# so their use_type/item_type are declared here to keep rewards clickable.
 LOCAL_TASK_REWARD_PROPS = {
     10011: {"icon": 10011, "type": 5, "use_type": 2},
     10014: {"icon": 10014, "type": 14, "use_type": 1},
@@ -6063,26 +6163,12 @@ def _forge_enchant(database_path: Path) -> Response:
     return _protocol_response(36,{"index":idx,"id":row["item_id"],"icon":row["icon"],"level":row["level"],"star":row["star"],"pro":row["pro"]+1,"hp":row["hp"],"speed":row["speed"],"phy_att":row["phy_att"],"mag_att":row["mag_att"],"phy_def":row["phy_def"],"mag_def":row["mag_def"],"need_money":0,"own_money":p["money"],"need_point":0,"own_point":p["point"],"need_crystal":10,"own_crystal":p["crystal"]})
 
 
-_FORGE_FIELD_ALIASES = {
-    "iconId": "iconId",
-    "star": "star",
-    "pro": "pro",
-    "hp": "hp",
-    "speed": "speed",
-    "phyAtt": "phy_att",
-    "magAtt": "mag_att",
-    "phyDef": "phy_def",
-    "magDef": "mag_def",
-    "level": "level",
-}
-
-
 def _forge_equip_field(equip_id: int, column: str) -> int | None:
     """Read one crafting-result stat from the shipped equip.txt.
 
-    The local LOCAL_FORGE_EQUIPMENT table only carried a hand-written row (all zero
-    except two defences), so the craft page advertised a sword with 0 attack while
-    equip.txt holds the real numbers.
+    Every advertised number (icon/star/hp/attack/defence/speed/skills) comes from
+    the row the recipe points at, so there is no second hand-written stat table
+    that can drift from the client config.
     """
     record = config_tables.equip_record(equip_id)
     if record is None:
@@ -6238,58 +6324,96 @@ def _equip_synthesis_perform(database_path: Path) -> Response:
 
 
 def _forge_list(database_path: Path) -> Response:
-    try: ttype = int(_request_value("ttype", "1")); page = int(_request_value("p", "1")); size = int(_request_value("n", "9"))
-    except ValueError: return _pet_error(100)
-    if ttype != 1: return _protocol_response(32, {"list": []})
-    # `id` must be the CRAFTED EQUIP id: BlacksmithListUI.as:245 resolves the row
-    # name with getConfigValue("pic", row.id, "name"), and a recipe id (32001) has
-    # no pic row, so the list rendered nameless. `index` stays the recipe id
-    # because that is what the client sends back as `gid` to command 33.
+    """32 (GOODS_EXT_LIST_KEY): the craftable rows, 9 per page.
+
+    `index` is the recipe id the client echoes back as `gid`; `id` is the product.
+    For the table-driven recipes both numbers are the same equip id (so the name
+    resolves in pic.txt), while the legacy row keeps its old 32001 id with the
+    20002 product so old callers and saves keep working.
+    """
+    try:
+        ttype = int(_request_value("ttype", "1"))
+        page = int(_request_value("p", "1"))
+        size = int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or size < 1:
+        return _pet_error(100)
+    # The client grid is 9 cells (BlacksmithListUI.as:90-105), so a larger `n`
+    # is clamped rather than trusted.
+    size = min(size, 9)
+    recipes = _forge_recipes()
+    if ttype != 1:
+        return _protocol_response(32, {"list": [], "total": 0})
+    # Legacy row first (stable compatibility), then weapons/armour/helmets in
+    # equip.txt slot order so the page reads like a smith's shelf.
+    ordered = sorted(
+        recipes.items(),
+        key=lambda item: (
+            0 if item[0] in LOCAL_FORGE_LEGACY_RECIPES else 1,
+            _forge_record_number(
+                config_tables.equip_record(item[1]["output"]) or {}, "type"
+            ),
+            item[0],
+        ),
+    )
     rows = [
         {
             "index": rid,
             "id": recipe["output"],
             "icon": _forge_equip_field(recipe["output"], "iconId") or recipe["output"],
-            "level": _forge_equip_field(recipe["output"], "level") or 1,
+            "level": _forge_equip_level(recipe["output"]),
         }
-        for rid, recipe in LOCAL_FORGE_RECIPES.items()
+        for rid, recipe in ordered
     ]
-    start = max(0, page - 1) * size
-    return _protocol_response(32, {"list": rows[start:start + max(0, size)]})
+    start = (page - 1) * size
+    return _protocol_response(
+        32, {"list": rows[start:start + size], "total": len(rows)}
+    )
 
 
 def _forge_detail(database_path: Path) -> Response:
-    try: rid = int(_request_value("gid", ""))
-    except ValueError: return _pet_error(100)
-    recipe = LOCAL_FORGE_RECIPES.get(rid)
-    if recipe is None: return _pet_error(400)
+    """33 (GOODS_EXT_INFO_KEY): product stats plus the cost and what we own."""
+    try:
+        rid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    recipe = _forge_recipes().get(rid)
+    record = config_tables.equip_record(recipe["output"]) if recipe else None
+    # A gid that names no recipe (or a product missing from equip.txt) is a bad
+    # request, not a server fault: -1:100 per the blacksmith protocol notes.
+    if recipe is None or record is None:
+        return _pet_error(100)
     uid = _request_value("uid")
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)).fetchone()
-        if player is None: return _pet_error(103)
-        output = LOCAL_FORGE_EQUIPMENT[recipe["output"]]
+        player = c.execute(
+            "SELECT id,money,point,crystal FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
         needs = []
         for gid, num in recipe["goods"]:
-            own = c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"], gid)).fetchone()[0]
+            own = c.execute(
+                "SELECT COALESCE(SUM(quantity),0) FROM inventory"
+                " WHERE player_id=? AND item_id=? AND team=2",
+                (player["id"], gid),
+            ).fetchone()[0]
             needs.append({"id": gid, "need_num": num, "own_num": own})
-    def stat(column: str) -> int:
-        value = _forge_equip_field(recipe["output"], column)
-        if value is not None:
-            return value
-        return output.get(_FORGE_FIELD_ALIASES[column], 0)
-
+    stats = config_tables.equip_stats(record)
     return _protocol_response(33, {
         "id": recipe["output"],
-        "icon": stat("iconId") or output["icon"],
-        "star": stat("star"),
-        "pro": stat("pro"),
-        "hp": stat("hp"),
-        "phy_att": stat("phyAtt"),
-        "mag_att": stat("magAtt"),
-        "phy_def": stat("phyDef"),
-        "mag_def": stat("magDef"),
-        "speed": stat("speed"),
-        "level": stat("level"),
+        "icon": _forge_record_number(record, "iconId") or recipe["output"],
+        "star": max(1, _forge_record_number(record, "star")),
+        "pro": 0,
+        "level": _forge_equip_level(recipe["output"]),
+        "hp": stats["hp"],
+        "phy_att": stats["phy_att"],
+        "mag_att": stats["mag_att"],
+        "phy_def": stats["phy_def"],
+        "mag_def": stats["mag_def"],
+        "speed": stats["speed"],
+        "skills": config_tables.equip_skills(record),
+        "buffs": [],
         "need_money": recipe["money"], "own_money": player["money"],
         "need_point": recipe["point"], "own_point": player["point"],
         "need_crystal": recipe["crystal"], "own_crystal": player["crystal"],
@@ -6298,29 +6422,94 @@ def _forge_detail(database_path: Path) -> Response:
 
 
 def _forge_make(database_path: Path) -> Response:
-    try: rid = int(_request_value("gid", ""))
-    except ValueError: return _pet_error(100)
-    recipe = LOCAL_FORGE_RECIPES.get(rid)
-    if recipe is None: return _pet_error(400)
+    """34 (GOODS_MAKE_KEY): atomically spend the cost and put the product in the bag."""
+    try:
+        rid = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    recipe = _forge_recipes().get(rid)
+    if recipe is None:
+        return _pet_error(400)
+    output = recipe["output"]
+    record = config_tables.equip_record(output)
+    if record is None:
+        return _pet_error(400)
+    icon = _forge_record_number(record, "iconId") or output
     with _connect_database(database_path) as c:
-        player = c.execute("SELECT id,money,point,crystal,bag_capacity FROM players WHERE uid=?", (_request_value("uid"),)).fetchone()
-        if player is None: return _pet_error(103)
-        if any(player[col] < recipe[col] for col in ("money","point","crystal")): return _pet_error(403)
+        player = c.execute(
+            "SELECT id,money,point,crystal,bag_capacity FROM players WHERE uid=?",
+            (_request_value("uid"),),
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        # Currency errors follow the shop convention: 403 gold, 404 silver, 405 crystal.
+        if player["money"] < recipe["money"]:
+            return _pet_error(403)
+        if player["point"] < recipe["point"]:
+            return _pet_error(404)
+        if player["crystal"] < recipe["crystal"]:
+            return _pet_error(405)
+        stock = []
         for gid, num in recipe["goods"]:
-            row = c.execute("SELECT id,quantity FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"],gid)).fetchone()
-            if row is None or row["quantity"] < num: return _pet_error(400)
-        existing = c.execute("SELECT 1 FROM inventory WHERE player_id=? AND item_id=?", (player["id"],recipe["output"])).fetchone()
-        if not existing and c.execute("SELECT COUNT(*) FROM inventory WHERE player_id=? AND team=3", (player["id"],)).fetchone()[0] >= player["bag_capacity"]: return _pet_error(300)
-        for gid, num in recipe["goods"]:
-            row = c.execute("SELECT id,quantity FROM inventory WHERE player_id=? AND item_id=? AND team=2", (player["id"], gid)).fetchone()
-            if row["quantity"] == num:
-                c.execute("DELETE FROM inventory WHERE id=?", (row["id"],))
+            row = c.execute(
+                "SELECT id,quantity FROM inventory"
+                " WHERE player_id=? AND item_id=? AND team=2",
+                (player["id"], gid),
+            ).fetchone()
+            if row is None or row["quantity"] < num:
+                return _pet_error(400)
+            stock.append((row["id"], row["quantity"], num))
+        existing = c.execute(
+            "SELECT id FROM inventory WHERE player_id=? AND item_id=?",
+            (player["id"], output),
+        ).fetchone()
+        # A repeat craft stacks onto the existing row, so it does not need a slot;
+        # only a brand-new product has to fit the bag.
+        if existing is None and c.execute(
+            "SELECT COUNT(*) FROM inventory WHERE player_id=? AND team=3",
+            (player["id"],),
+        ).fetchone()[0] >= player["bag_capacity"]:
+            return _pet_error(300)
+        for row_id, quantity, num in stock:
+            if quantity == num:
+                c.execute("DELETE FROM inventory WHERE id=?", (row_id,))
             else:
-                c.execute("UPDATE inventory SET quantity=quantity-? WHERE id=?", (num, row["id"]))
-        c.execute("UPDATE players SET money=money-?,point=point-?,crystal=crystal-? WHERE id=?", (recipe["money"],recipe["point"],recipe["crystal"],player["id"]))
-        o=LOCAL_FORGE_EQUIPMENT[recipe["output"]]; c.execute("INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type,level,star,pro,hp,speed,phy_att,mag_att,phy_def,mag_def) VALUES (?,?,3,1,?,0,1,?,?,?,?,?,?,?,?,?)", (player["id"],recipe["output"],o["icon"],o["level"],o["star"],o["pro"],o["hp"],o["speed"],o["phy_att"],o["mag_att"],o["phy_def"],o["mag_def"]))
-        index=c.execute("SELECT id FROM inventory WHERE player_id=? AND item_id=?",(player["id"],recipe["output"])).fetchone()[0]
-    return _protocol_response(34, {"index": index, "id": recipe["output"], "icon": o["icon"]})
+                c.execute(
+                    "UPDATE inventory SET quantity=quantity-? WHERE id=?",
+                    (num, row_id),
+                )
+        # The connection context manager commits all of the above together; an
+        # exception rolls the materials and money back as well.
+        c.execute(
+            "UPDATE players SET money=money-?,point=point-?,crystal=crystal-? WHERE id=?",
+            (recipe["money"], recipe["point"], recipe["crystal"], player["id"]),
+        )
+        # inventory is UNIQUE(player_id,item_id): a second craft of the same
+        # product must stack (same ON CONFLICT shape as _grant_goods) instead of
+        # raising IntegrityError on a plain INSERT.
+        c.execute(
+            """INSERT INTO inventory (player_id,item_id,team,quantity,icon,item_type,use_type,
+                                      level,star,pro,hp,speed,phy_att,mag_att,phy_def,mag_def)
+               VALUES (?,?,3,1,?,?,?,1,?,0,?,?,?,?,?,?)
+               ON CONFLICT (player_id,item_id) DO UPDATE SET quantity = quantity + 1""",
+            (
+                player["id"], output, icon,
+                _forge_record_number(record, "type"),
+                _forge_record_number(record, "useType"),
+                max(1, _forge_record_number(record, "star")),
+                _forge_record_number(record, "hp"),
+                _forge_record_number(record, "speed"),
+                _forge_record_number(record, "phyAtt"),
+                _forge_record_number(record, "magAtt"),
+                _forge_record_number(record, "phyDef"),
+                _forge_record_number(record, "magDef"),
+            ),
+        )
+        index = c.execute(
+            "SELECT id FROM inventory WHERE player_id=? AND item_id=?",
+            (player["id"], output),
+        ).fetchone()[0]
+    return _protocol_response(34, {"index": index, "id": output, "icon": icon})
 
 
 def _reward_goods_ids(stored: str) -> list[tuple[int, int]]:
