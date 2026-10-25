@@ -1,0 +1,762 @@
+[
+  {
+    "from": 0.14,
+    "to": 6.08,
+    "sid": 1,
+    "location": 2,
+    "content": "这是一款 2016 年的安卓网游，官方服务器已经关了",
+    "music": 0
+  },
+  {
+    "from": 6.14,
+    "to": 9.61,
+    "sid": 2,
+    "location": 2,
+    "content": "现在打开，只会停在连接超时",
+    "music": 0
+  },
+  {
+    "from": 9.67,
+    "to": 13.9,
+    "sid": 3,
+    "location": 2,
+    "content": "今天用 AI 加一套工具链把它救活",
+    "music": 0
+  },
+  {
+    "from": 13.96,
+    "to": 18.95,
+    "sid": 4,
+    "location": 2,
+    "content": "目标是三件事：能安装、能进游戏、存档能留下",
+    "music": 0
+  },
+  {
+    "from": 19.01,
+    "to": 24.95,
+    "sid": 5,
+    "location": 2,
+    "content": "先把工具说清楚，后面每一步都会落到具体软件和具体命令",
+    "music": 0
+  },
+  {
+    "from": 25.01,
+    "to": 31.01,
+    "sid": 6,
+    "location": 2,
+    "content": "解包用 apktool，看资源也可以直接用 7-Zip，APK 本质是 zip",
+    "music": 0
+  },
+  {
+    "from": 31.07,
+    "to": 37.07,
+    "sid": 7,
+    "location": 2,
+    "content": "反编译客户端用 FFDec，全称 JPEXS Free Flash Decompiler，免费开源",
+    "music": 0
+  },
+  {
+    "from": 37.13,
+    "to": 43.13,
+    "sid": 8,
+    "location": 2,
+    "content": "重打包用 HARMAN AIR SDK 51.4.1 里的 adt，JDK 必须是 17",
+    "music": 0
+  },
+  {
+    "from": 43.19,
+    "to": 49.19,
+    "sid": 9,
+    "location": 2,
+    "content": "装机和看日志用 Android SDK 的 adb，版本 35 的 build-tools",
+    "music": 0
+  },
+  {
+    "from": 49.25,
+    "to": 55.25,
+    "sid": 10,
+    "location": 2,
+    "content": "桌面调试用 AIR SDK 自带的 adl64，不用打包就能跑",
+    "music": 0
+  },
+  {
+    "from": 55.31,
+    "to": 61.31,
+    "sid": 11,
+    "location": 2,
+    "content": "抓包用 mitmproxy，明文 HTTP 直接看，HTTPS 要装它自己的证书",
+    "music": 0
+  },
+  {
+    "from": 61.37,
+    "to": 67.37,
+    "sid": 12,
+    "location": 2,
+    "content": "服务端用 Python 3.11 加 Flask，存档用 SQLite",
+    "music": 0
+  },
+  {
+    "from": 67.43,
+    "to": 73.43,
+    "sid": 13,
+    "location": 2,
+    "content": "测试用 pytest，版本管理用 git，分支隔离用 git worktree",
+    "music": 0
+  },
+  {
+    "from": 73.49,
+    "to": 78.29,
+    "sid": 14,
+    "location": 2,
+    "content": "这套组合的好处是每一步都可复现，不是黑盒",
+    "music": 0
+  },
+  {
+    "from": 78.35,
+    "to": 84.35,
+    "sid": 15,
+    "location": 2,
+    "content": "第一步，解包。执行 apktool d 游戏.apk -o 输出目录",
+    "music": 0
+  },
+  {
+    "from": 84.41,
+    "to": 90.41,
+    "sid": 16,
+    "location": 2,
+    "content": "解开以后重点看四个地方：AndroidManifest、assets、lib、res",
+    "music": 0
+  },
+  {
+    "from": 90.47,
+    "to": 96.47,
+    "sid": 17,
+    "location": 2,
+    "content": "AndroidManifest 告诉我们包名、启动 Activity、最低系统版本",
+    "music": 0
+  },
+  {
+    "from": 96.53,
+    "to": 102.53,
+    "sid": 18,
+    "location": 2,
+    "content": "lib 目录里是 so 库，assets 里是游戏资源",
+    "music": 0
+  },
+  {
+    "from": 102.59,
+    "to": 108.59,
+    "sid": 19,
+    "location": 2,
+    "content": "这个包在 assets 里有一个 APetHunter.swf，接近 27 兆",
+    "music": 0
+  },
+  {
+    "from": 108.65,
+    "to": 114.65,
+    "sid": 20,
+    "location": 2,
+    "content": "看到 SWF 就说明它是 Adobe AIR 游戏，逻辑全在这个文件里",
+    "music": 0
+  },
+  {
+    "from": 114.71,
+    "to": 120.71,
+    "sid": 21,
+    "location": 2,
+    "content": "同时用 7-Zip 把原始 APK 和存档压一份备份，改坏了能回滚",
+    "music": 0
+  },
+  {
+    "from": 120.77,
+    "to": 126.52,
+    "sid": 22,
+    "location": 2,
+    "content": "第二步，让它能启动。先在手机上装原包，看它为什么崩",
+    "music": 0
+  },
+  {
+    "from": 126.58,
+    "to": 132.58,
+    "sid": 23,
+    "location": 2,
+    "content": "用 adb logcat 过滤包名，能看到它缺 libstagefright.so",
+    "music": 0
+  },
+  {
+    "from": 132.64,
+    "to": 138.64,
+    "sid": 24,
+    "location": 2,
+    "content": "这是 AIR 3.4 的私有依赖，Android 16 上已经不存在",
+    "music": 0
+  },
+  {
+    "from": 138.7,
+    "to": 144.7,
+    "sid": 25,
+    "location": 2,
+    "content": "解决方案不是改代码，是换运行库：用 AIR SDK 51 重新打包",
+    "music": 0
+  },
+  {
+    "from": 144.76,
+    "to": 150.76,
+    "sid": 26,
+    "location": 2,
+    "content": "用 adt -package 指定 target apk、arch armv7、签名证书",
+    "music": 0
+  },
+  {
+    "from": 150.82,
+    "to": 156.82,
+    "sid": 27,
+    "location": 2,
+    "content": "签名用 pkcs12 格式的 keystore，密码从本地文件读，不写进脚本",
+    "music": 0
+  },
+  {
+    "from": 156.88,
+    "to": 162.88,
+    "sid": 28,
+    "location": 2,
+    "content": "包名先不要覆盖原包，旁装一个新包名，避免清掉原来的数据",
+    "music": 0
+  },
+  {
+    "from": 162.94,
+    "to": 168.94,
+    "sid": 29,
+    "location": 2,
+    "content": "打包完用 aapt dump badging 验证包名、版本号、启动 Activity",
+    "music": 0
+  },
+  {
+    "from": 169.0,
+    "to": 175.0,
+    "sid": 30,
+    "location": 2,
+    "content": "第三步，装机。adb install -r 覆盖安装，数据会保留",
+    "music": 0
+  },
+  {
+    "from": 175.06,
+    "to": 181.0,
+    "sid": 31,
+    "location": 2,
+    "content": "安装器弹窗要在手机上点安装，命令行返回成功不等于装好",
+    "music": 0
+  },
+  {
+    "from": 181.06,
+    "to": 186.24,
+    "sid": 32,
+    "location": 2,
+    "content": "启动后如果停在连接超时，说明运行库这一关过了",
+    "music": 0
+  },
+  {
+    "from": 186.3,
+    "to": 191.86,
+    "sid": 33,
+    "location": 2,
+    "content": "这一步的验收标准只有一个：能进到游戏自己的报错页",
+    "music": 0
+  },
+  {
+    "from": 191.92,
+    "to": 197.92,
+    "sid": 34,
+    "location": 2,
+    "content": "第四步，把调试速度提上来。每次改完打 43 兆的包要两分钟",
+    "music": 0
+  },
+  {
+    "from": 197.98,
+    "to": 203.98,
+    "sid": 35,
+    "location": 2,
+    "content": "用 AIR SDK 的 adl64 直接跑 SWF，两秒出画面",
+    "music": 0
+  },
+  {
+    "from": 204.04,
+    "to": 210.04,
+    "sid": 36,
+    "location": 2,
+    "content": "写一个 PowerShell 脚本做四件事：复制 SWF、改写服务器地址",
+    "music": 0
+  },
+  {
+    "from": 210.1,
+    "to": 216.1,
+    "sid": 37,
+    "location": 2,
+    "content": "用 mklink 建目录联接指向资源目录，避免重复拷贝 27 兆素材",
+    "music": 0
+  },
+  {
+    "from": 216.16,
+    "to": 222.16,
+    "sid": 38,
+    "location": 2,
+    "content": "生成桌面描述文件，窗口固定 640 乘 960，这是 SWF 原生舞台",
+    "music": 0
+  },
+  {
+    "from": 222.22,
+    "to": 228.22,
+    "sid": 39,
+    "location": 2,
+    "content": "窗口尺寸不对，按钮和弹窗位置全部偏移，别用 480 乘 854",
+    "music": 0
+  },
+  {
+    "from": 228.28,
+    "to": 234.28,
+    "sid": 40,
+    "location": 2,
+    "content": "脚本最后用 Start-Process 启动 adl64，把 trace 重定向到 adl.log",
+    "music": 0
+  },
+  {
+    "from": 234.34,
+    "to": 240.34,
+    "sid": 41,
+    "location": 2,
+    "content": "第五步，抓包。客户端要连的地址藏在 SWF 的字符串常量里",
+    "music": 0
+  },
+  {
+    "from": 240.4,
+    "to": 246.4,
+    "sid": 42,
+    "location": 2,
+    "content": "用 FFDec 的二进制视图搜索 http，能找到四个硬编码 IP",
+    "music": 0
+  },
+  {
+    "from": 246.46,
+    "to": 252.46,
+    "sid": 43,
+    "location": 2,
+    "content": "运行时用 mitmproxy 起代理，手机和模拟器都设成同一个网关",
+    "music": 0
+  },
+  {
+    "from": 252.52,
+    "to": 258.52,
+    "sid": 44,
+    "location": 2,
+    "content": "抓到的请求都是 POST /flash.do，参数只有三个关键字段",
+    "music": 0
+  },
+  {
+    "from": 258.58,
+    "to": 264.58,
+    "sid": 45,
+    "location": 2,
+    "content": "m 等于 show，表示查询；showId 是功能号；uid 是角色 ID",
+    "music": 0
+  },
+  {
+    "from": 264.64,
+    "to": 270.64,
+    "sid": 46,
+    "location": 2,
+    "content": "响应格式不是纯 JSON，而是命令号加一个 Tab 再加 JSON",
+    "music": 0
+  },
+  {
+    "from": 270.7,
+    "to": 276.7,
+    "sid": 47,
+    "location": 2,
+    "content": "这个 Tab 是客户端的协议分隔符，后面会因为它踩一个大坑",
+    "music": 0
+  },
+  {
+    "from": 276.76,
+    "to": 282.76,
+    "sid": 48,
+    "location": 2,
+    "content": "第六步，起服务。用 Flask 写一个 /flash.do 路由",
+    "music": 0
+  },
+  {
+    "from": 282.82,
+    "to": 288.82,
+    "sid": 49,
+    "location": 2,
+    "content": "先不实现任何业务，只按 showId 返回形状正确的空数据",
+    "music": 0
+  },
+  {
+    "from": 288.88,
+    "to": 294.88,
+    "sid": 50,
+    "location": 2,
+    "content": "比如背包返回 list 空数组，任务返回空列表，角色返回默认值",
+    "music": 0
+  },
+  {
+    "from": 294.94,
+    "to": 299.36,
+    "sid": 51,
+    "location": 2,
+    "content": "目的是让客户端不崩，而不是让它有内容",
+    "music": 0
+  },
+  {
+    "from": 299.42,
+    "to": 305.42,
+    "sid": 52,
+    "location": 2,
+    "content": "同时提供 /health 和 server.xml，让客户端能完成服务器选择",
+    "music": 0
+  },
+  {
+    "from": 305.48,
+    "to": 311.48,
+    "sid": 53,
+    "location": 2,
+    "content": "用 SQLite 建账号、角色、背包、宠物几张表，先只读",
+    "music": 0
+  },
+  {
+    "from": 311.54,
+    "to": 317.48,
+    "sid": 54,
+    "location": 2,
+    "content": "每写一次数据都放进一个事务，避免中途失败留下半条记录",
+    "music": 0
+  },
+  {
+    "from": 317.54,
+    "to": 322.53,
+    "sid": 55,
+    "location": 2,
+    "content": "第七步，字段对齐。方法不是猜，是反查客户端",
+    "music": 0
+  },
+  {
+    "from": 322.59,
+    "to": 328.59,
+    "sid": 56,
+    "location": 2,
+    "content": "在 FFDec 里搜索 param2.list，能看到背包页在读哪些字段",
+    "music": 0
+  },
+  {
+    "from": 328.65,
+    "to": 334.02,
+    "sid": 57,
+    "location": 2,
+    "content": "每个字段都要找到读取它的那一行代码，这叫消费者",
+    "music": 0
+  },
+  {
+    "from": 334.08,
+    "to": 338.88,
+    "sid": 58,
+    "location": 2,
+    "content": "响应里多给字段没用，少给一个就可能空指针",
+    "music": 0
+  },
+  {
+    "from": 338.94,
+    "to": 344.94,
+    "sid": 59,
+    "location": 2,
+    "content": "有的页面没有判空，直接取长度，你回一个 ok 它当场报错",
+    "music": 0
+  },
+  {
+    "from": 345.0,
+    "to": 350.75,
+    "sid": 60,
+    "location": 2,
+    "content": "表现出来就是点了没反应，实际是 TypeError",
+    "music": 0
+  },
+  {
+    "from": 350.81,
+    "to": 355.61,
+    "sid": 61,
+    "location": 2,
+    "content": "所以规则是：找不到消费者，就不写这个字段",
+    "music": 0
+  },
+  {
+    "from": 355.67,
+    "to": 359.52,
+    "sid": 62,
+    "location": 2,
+    "content": "第八步，把业务错误做成协议错误",
+    "music": 0
+  },
+  {
+    "from": 359.58,
+    "to": 365.52,
+    "sid": 63,
+    "location": 2,
+    "content": "客户端先按 Tab 切命令号，再解析后面的 JSON",
+    "music": 0
+  },
+  {
+    "from": 365.58,
+    "to": 371.58,
+    "sid": 64,
+    "location": 2,
+    "content": "如果服务端回一个没有 Tab 的 -1 冒号 300，数据段会变成字符串 null",
+    "music": 0
+  },
+  {
+    "from": 371.64,
+    "to": 376.44,
+    "sid": 65,
+    "location": 2,
+    "content": "于是客户端认为这不是错误，提示被整段吞掉",
+    "music": 0
+  },
+  {
+    "from": 376.5,
+    "to": 380.73,
+    "sid": 66,
+    "location": 2,
+    "content": "玩家看到的就是道具没扣、也没有提示",
+    "music": 0
+  },
+  {
+    "from": 380.79,
+    "to": 386.79,
+    "sid": 67,
+    "location": 2,
+    "content": "修法是把所有错误统一成 -1 Tab -1 冒号 错误号",
+    "music": 0
+  },
+  {
+    "from": 386.85,
+    "to": 392.85,
+    "sid": 68,
+    "location": 2,
+    "content": "错误号直接取客户端自带 error.txt 里的键，文案就是现成的",
+    "music": 0
+  },
+  {
+    "from": 392.91,
+    "to": 398.91,
+    "sid": 69,
+    "location": 2,
+    "content": "同时在服务端日志里记录 showId 和错误号，排查从猜变成读",
+    "music": 0
+  },
+  {
+    "from": 398.97,
+    "to": 404.97,
+    "sid": 70,
+    "location": 2,
+    "content": "第九步，数值和规则。顺序是配置表优先，帮助文本第二，本地设计第三",
+    "music": 0
+  },
+  {
+    "from": 405.03,
+    "to": 411.03,
+    "sid": 71,
+    "location": 2,
+    "content": "配置表就是 assets 里的 txt，用 UTF-8 BOM 编码，读的时候要用 utf-8-sig",
+    "music": 0
+  },
+  {
+    "from": 411.09,
+    "to": 417.09,
+    "sid": 72,
+    "location": 2,
+    "content": "注意配置表会互相抄，这个包的怪物表抄了宠物表，但列序不一样",
+    "music": 0
+  },
+  {
+    "from": 417.15,
+    "to": 423.09,
+    "sid": 73,
+    "location": 2,
+    "content": "照着宠物表的列序读怪物，六维全错，这种坑只能交叉验证",
+    "music": 0
+  },
+  {
+    "from": 423.15,
+    "to": 429.15,
+    "sid": 74,
+    "location": 2,
+    "content": "帮助文本也会骗人，它写 1500 代 30 个特性，按它自己的公式应该是 39",
+    "music": 0
+  },
+  {
+    "from": 429.21,
+    "to": 434.39,
+    "sid": 75,
+    "location": 2,
+    "content": "所以只采信能自证的部分，其余全部标成本地设计",
+    "music": 0
+  },
+  {
+    "from": 434.45,
+    "to": 440.45,
+    "sid": 76,
+    "location": 2,
+    "content": "在规格文档里给每个数字标来源：配置表、客户端、服务端、本地",
+    "music": 0
+  },
+  {
+    "from": 440.51,
+    "to": 446.51,
+    "sid": 77,
+    "location": 2,
+    "content": "第十步，存档。用 SQLite 的 WAL 模式，读写互不阻塞",
+    "music": 0
+  },
+  {
+    "from": 446.57,
+    "to": 451.18,
+    "sid": 78,
+    "location": 2,
+    "content": "每次改数值都在事务里完成，失败自动回滚",
+    "music": 0
+  },
+  {
+    "from": 451.24,
+    "to": 456.8,
+    "sid": 79,
+    "location": 2,
+    "content": "验收标准是退出游戏、重启服务、重新登录，数据还在",
+    "music": 0
+  },
+  {
+    "from": 456.86,
+    "to": 462.86,
+    "sid": 80,
+    "location": 2,
+    "content": "第十一步，改客户端。用 FFDec 的 importScript 替换单个类",
+    "music": 0
+  },
+  {
+    "from": 462.92,
+    "to": 468.92,
+    "sid": 81,
+    "location": 2,
+    "content": "它不能往 SWF 里新增类，只能替换已有的类，这点必须提前知道",
+    "music": 0
+  },
+  {
+    "from": 468.98,
+    "to": 474.98,
+    "sid": 82,
+    "location": 2,
+    "content": "补丁脚本用字符串定位加断言，匹配数量不等于一就直接失败",
+    "music": 0
+  },
+  {
+    "from": 475.04,
+    "to": 481.04,
+    "sid": 83,
+    "location": 2,
+    "content": "改完重新导出脚本，确认补丁文本真的进去了，不要只看脚本返回零",
+    "music": 0
+  },
+  {
+    "from": 481.1,
+    "to": 487.1,
+    "sid": 84,
+    "location": 2,
+    "content": "第十二步，工程化。每个任务一个分支，一个 worktree，一个端口",
+    "music": 0
+  },
+  {
+    "from": 487.16,
+    "to": 492.53,
+    "sid": 85,
+    "location": 2,
+    "content": "用 lane 脚本一键起服务、起窗口、复制存档",
+    "music": 0
+  },
+  {
+    "from": 492.59,
+    "to": 498.53,
+    "sid": 86,
+    "location": 2,
+    "content": "测试用 pytest，测试数量只允许增加，不允许减少",
+    "music": 0
+  },
+  {
+    "from": 498.59,
+    "to": 504.59,
+    "sid": 87,
+    "location": 2,
+    "content": "合并前六道门：分支干净、全量测试、画面截图、文档、无脏文件、冲突后重跑",
+    "music": 0
+  },
+  {
+    "from": 504.65,
+    "to": 510.4,
+    "sid": 88,
+    "location": 2,
+    "content": "第十三步，打包。用 adt 重新签名，输出 APK",
+    "music": 0
+  },
+  {
+    "from": 510.46,
+    "to": 516.46,
+    "sid": 89,
+    "location": 2,
+    "content": "装机后如果客户端连不上，先看 adb reverse 的端口转发还在不在",
+    "music": 0
+  },
+  {
+    "from": 516.52,
+    "to": 522.52,
+    "sid": 90,
+    "location": 2,
+    "content": "手机重连、adb 重启、电脑休眠都会让转发失效，现象就是网络错误",
+    "music": 0
+  },
+  {
+    "from": 522.58,
+    "to": 528.58,
+    "sid": 91,
+    "location": 2,
+    "content": "用 adb reverse --list 确认，没有就重建一条",
+    "music": 0
+  },
+  {
+    "from": 528.64,
+    "to": 534.01,
+    "sid": 92,
+    "location": 2,
+    "content": "整套流程的核心不是某个工具，而是每一步都有证据",
+    "music": 0
+  },
+  {
+    "from": 534.07,
+    "to": 539.63,
+    "sid": 93,
+    "location": 2,
+    "content": "请求、响应、界面、存档，四样能对上，才算复原成功",
+    "music": 0
+  },
+  {
+    "from": 539.69,
+    "to": 545.63,
+    "sid": 94,
+    "location": 2,
+    "content": "仅用于自己拥有、已停服的游戏，不要商用，不要传播素材",
+    "music": 0
+  },
+  {
+    "from": 545.69,
+    "to": 548.97,
+    "sid": 95,
+    "location": 2,
+    "content": "就这些，你也可以去救一个",
+    "music": 0
+  }
+]
