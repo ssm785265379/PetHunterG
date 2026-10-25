@@ -2538,18 +2538,126 @@ def _explore_discover_gain(need_rate: int) -> int:
 LOCAL_PICS = {1001: {"icon":1001,"reward":0},1002: {"icon":1002,"reward":0},20001: {"icon":20001,"reward":1}}
 
 
-LOCAL_JOBS = {1: {"state":1}, 2: {"state":0}}
+def _job_goods(raw: str) -> list[dict[str, int]]:
+    """upRole.rewardGoods 的 `id:num,id:num` -> `[{id,num}]`；"0" 表示没有宝箱。"""
+    goods: list[dict[str, int]] = []
+    for part in str(raw or "").split(","):
+        bits = part.split(":")
+        if (
+            len(bits) >= 2
+            and bits[0].strip().isdigit()
+            and bits[1].strip().isdigit()
+            and int(bits[0]) > 0
+        ):
+            goods.append({"id": int(bits[0]), "num": int(bits[1])})
+    return goods
+
+
+def _job_table_int(row: dict[str, str], key: str) -> int:
+    raw = str(row.get(key, "") or "").strip()
+    return int(raw) if raw.isdigit() else 0
 
 
 def _job_list(database_path: Path) -> Response:
-    return _protocol_response(70,{"list":[{"job":k,"state":v["state"]} for k,v in LOCAL_JOBS.items()]})
+    """70 — 120 个称号/转生，按当前 job 标 state：2 已获得，1 可转，0 未开放。"""
+    uid = _request_value("uid")
+    try:
+        page, size = int(_request_value("p", "1")), int(_request_value("n", "9"))
+    except ValueError:
+        return _pet_error(100)
+    if page < 1 or not 1 <= size <= 9:
+        return _pet_error(100)
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+    current = int(player["job"] or 1)
+    entries = [
+        {
+            "job": job,
+            "state": 2 if job <= current else (1 if job == current + 1 else 0),
+        }
+        for job in sorted(config_tables.up_role_table())
+    ]
+    start = (page - 1) * size
+    return _protocol_response(70, {"list": entries[start:start + size]})
 
 
 def _job_detail(database_path: Path) -> Response:
-    try: job=int(_request_value("gid",""))
-    except ValueError:return _pet_error(100)
-    if job not in LOCAL_JOBS:return _pet_error(400)
-    return _protocol_response(71,{"job":job,"need_lv":1,"diff_lv":0,"nextRole":{"now_hp":0,"next_hp":0,"now_speed":0,"next_speed":0,"now_phy_att":0,"next_phy_att":0,"now_phy_def":0,"next_phy_def":0,"now_mag_att":0,"next_mag_att":0,"now_mag_def":0,"next_mag_def":0},"reward_goods":[]})
+    """71 — 一个称号的需求等级、转职掉级、六维对比与宝箱预览。"""
+    try:
+        job = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    table = config_tables.up_role_table()
+    if job not in table:
+        return _pet_error(400)
+    row = table[job]
+    uid = _request_value("uid")
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, lv, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        worn = _worn_equipment(connection, player["id"])
+    need = _job_table_int(row, "needLevel")
+    lower = _job_table_int(row, "lowerLevel")
+    now_lv = max(1, int(player["lv"] or 1))
+    now_job = int(player["job"] or 1)
+    now_stats = _role_stats(worn, now_lv, now_job)
+    next_stats = _role_stats(worn, max(1, now_lv - lower), job)
+    next_role: dict[str, int] = {}
+    for key in ("hp", "speed", "phy_att", "mag_att", "phy_def", "mag_def"):
+        next_role[f"now_{key}"] = now_stats[key]
+        next_role[f"next_{key}"] = next_stats[key]
+    return _protocol_response(71, {
+        "job": job,
+        "need_lv": need,
+        "diff_lv": lower,
+        "nextRole": next_role,
+        "reward_goods": _job_goods(row.get("rewardGoods", "")),
+    })
+
+
+def _job_change(database_path: Path) -> Response:
+    """72 — 手动转职：只能转下一个称号，等级够才能转，成功后掉级并发宝箱。"""
+    try:
+        job = int(_request_value("gid", ""))
+    except ValueError:
+        return _pet_error(100)
+    table = config_tables.up_role_table()
+    if job not in table:
+        return _pet_error(400)
+    uid = _request_value("uid")
+    with _connect_database(database_path) as connection:
+        player = connection.execute(
+            "SELECT id, lv, job FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        if player is None:
+            return _pet_error(103)
+        current = int(player["job"] or 1)
+        if job != current + 1:
+            # 非相邻称号 / 已到 120 级：不是"等级不够"，用通用参数错误。
+            return _pet_error(100)
+        need = _job_table_int(table[job], "needLevel")
+        if int(player["lv"] or 1) < need:
+            return _pet_error(207)
+        lower = _job_table_int(table[job], "lowerLevel")
+        new_lv = max(1, int(player["lv"] or 1) - lower)
+        connection.execute(
+            "UPDATE players SET job=?, lv=? WHERE id=?", (job, new_lv, player["id"])
+        )
+        goods = _job_goods(table[job].get("rewardGoods", ""))
+        if goods:
+            _grant_goods(
+                connection,
+                player["id"],
+                [(entry["id"], entry["num"]) for entry in goods],
+            )
+    return _protocol_response(72, {"value": "ok", "job": job, "lv": new_lv})
 
 
 def _pic_list(database_path: Path) -> Response:
@@ -7358,9 +7466,10 @@ _SHOW_HANDLERS: dict[str, Callable[[Path], Response]] = {
     "91": _guild_members,
     "92": _create_guild,
     "94": _guild_battle,
-    # 称号 / 转职（70/71 已实现，72 转职在 T04 里补）
+    # 称号 / 转职：70 列表、71 详情、72 手动转职（读 upRole.txt）
     "70": _job_list,
     "71": _job_detail,
+    "72": _job_change,
 }
 
 

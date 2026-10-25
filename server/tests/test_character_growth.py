@@ -275,3 +275,129 @@ def test_510_lists_worn_equipment_skills_as_objects(tmp_path: Path):
         client.post("/flash.do", data={"m": "show", "showId": "3", "uid": uid})
     )
     assert role["skills"] == profile["skills"]
+
+
+def test_job_list_and_detail_follow_the_up_role_table(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "JobLst")
+
+    _, page = envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "70", "uid": uid, "p": 1, "n": 9},
+        )
+    )
+    rows = {row["job"]: row["state"] for row in page["list"]}
+    assert len(page["list"]) == 9
+    assert rows[1] == 2, "当前称号"
+    assert rows[2] == 1, "下一个可转的称号"
+    assert rows[3] == 0, "更远的称号未开放（灰底）"
+
+    _, page2 = envelope(
+        client.post(
+            "/flash.do",
+            data={"m": "show", "showId": "70", "uid": uid, "p": 2, "n": 9},
+        )
+    )
+    assert [row["job"] for row in page2["list"]] == list(range(10, 19))
+
+    _, detail = envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "71", "uid": uid, "gid": 2}
+        )
+    )
+    assert detail["need_lv"] == 400
+    assert detail["diff_lv"] == 0
+    assert set(detail["nextRole"]) >= {
+        "now_hp", "next_hp", "now_speed", "next_speed",
+        "now_phy_att", "next_phy_att", "now_phy_def", "next_phy_def",
+        "now_mag_att", "next_mag_att", "now_mag_def", "next_mag_def",
+    }
+    assert detail["reward_goods"] == [{"id": 10016, "num": 1}]
+
+
+def test_job_change_rejects_short_level_then_promotes_and_grants_the_chest(
+    tmp_path: Path,
+):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "JobChg")
+
+    rejected = client.post(
+        "/flash.do", data={"m": "show", "showId": "72", "uid": uid, "gid": 2}
+    )
+    # 客户端按 `<cmd>\t<data>` 拆包，所以错误体必须是 -1 命令 + -1:207 数据。
+    assert rejected.get_data(as_text=True) == "-1\t-1:207"
+    # 非相邻称号（3 级，当前 1 级）直接拒绝，不消耗任何宝箱。
+    skipped = client.post(
+        "/flash.do", data={"m": "show", "showId": "72", "uid": uid, "gid": 3}
+    )
+    assert skipped.get_data(as_text=True) == "-1\t-1:100"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT job FROM players WHERE uid=?", (uid,)
+        ).fetchone()[0] == 1
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET lv=400 WHERE uid=?", (uid,))
+        connection.commit()
+    _, changed = envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "72", "uid": uid, "gid": 2}
+        )
+    )
+    assert changed["value"] == "ok"
+    assert (changed["job"], changed["lv"]) == (2, 400)
+    with sqlite3.connect(database) as connection:
+        job, lv = connection.execute(
+            "SELECT job, lv FROM players WHERE uid=?", (uid,)
+        ).fetchone()
+        chest = connection.execute(
+            "SELECT quantity FROM inventory WHERE player_id=1 AND item_id=10016"
+        ).fetchone()
+    assert (job, lv) == (2, 400)
+    assert chest is not None and chest[0] == 1
+
+
+def test_job_five_resets_level_to_one_and_still_grants_the_chest(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "JobFiv")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET lv=1000, job=4 WHERE uid=?", (uid,))
+        connection.commit()
+
+    _, changed = envelope(
+        client.post(
+            "/flash.do", data={"m": "show", "showId": "72", "uid": uid, "gid": 5}
+        )
+    )
+
+    assert (changed["job"], changed["lv"]) == (5, 1)
+    with sqlite3.connect(database) as connection:
+        chest = connection.execute(
+            "SELECT quantity FROM inventory WHERE player_id=1 AND item_id=12101"
+        ).fetchone()
+    assert chest is not None and chest[0] == 1
+
+
+def test_job_list_marks_every_title_owned_at_job_120(tmp_path: Path):
+    database = tmp_path / "game.sqlite3"
+    client = create_app({"TESTING": True, "DATABASE": database}).test_client()
+    uid = create_local_player(client, "JobMax")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE players SET job=120 WHERE uid=?", (uid,))
+        connection.commit()
+
+    jobs = []
+    for page in range(1, 15):
+        _, payload = envelope(
+            client.post(
+                "/flash.do",
+                data={"m": "show", "showId": "70", "uid": uid, "p": page, "n": 9},
+            )
+        )
+        jobs.extend(payload["list"])
+    assert len(jobs) == 120
+    assert all(row["state"] == 2 for row in jobs)
